@@ -1,0 +1,11 @@
+# Runtime state
+CoreCAIJ/caij_historico_notebooks.json
+CoreCAIJ/caij_os_counter.txt
+CoreCAIJ/caij_os_por_serial.json
+CoreCAIJ/InfoNotebook.backup-*.ps1
+
+# Generic temp / editor files
+*.tmp
+*.log
+Thumbs.db
+.DS_Store
