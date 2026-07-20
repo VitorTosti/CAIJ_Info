@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CAIJ Info Notebook Mac</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <section class="topbar">
+      <div class="brand">
+        <img src="/logo.png" alt="CAIJ">
+        <div>
+          <h1>Info Notebook Mac</h1>
+          <p id="serverLine">Servidor: verificando...</p>
+        </div>
+      </div>
+      <div class="os-box">
+        <span>OS atual</span>
+        <strong id="osNumber">C000235</strong>
+      </div>
+    </section>
+
+    <section class="workspace">
+      <aside class="panel device-panel">
+        <div class="panel-head">
+          <h2>MacBook detectado</h2>
+          <button id="editToggle" class="icon-btn" title="Editar dados">Editar</button>
+        </div>
+        <div class="device-grid" id="deviceRead"></div>
+        <form class="edit-grid hidden" id="editForm">
+          <label>Modelo<input name="modelo"></label>
+          <label>Serial<input name="serial"></label>
+          <label>CPU<input name="cpu"></label>
+          <label>GPU<input name="gpu"></label>
+          <label>RAM<input name="ram"></label>
+          <label>Disco<input name="disco"></label>
+          <label>Bateria<input name="bateria"></label>
+          <button type="submit">Salvar dados</button>
+        </form>
+      </aside>
+
+      <section class="panel print-panel">
+        <div class="panel-head">
+          <h2>Etiqueta</h2>
+          <label class="toggle">
+            <input type="checkbox" id="includeOs" checked>
+            <span>Incluir OS</span>
+          </label>
+        </div>
+
+        <div class="grade-row" id="gradeRow">
+          <button data-grade="A" class="grade active">A</button>
+          <button data-grade="B" class="grade">B</button>
+          <button data-grade="C" class="grade">C</button>
+          <button data-grade="RMA" class="grade">RMA</button>
+        </div>
+
+        <div class="paint-row hidden" id="paintRow">
+          <span>Pintura</span>
+          <button data-paint="1" class="paint active">1</button>
+          <button data-paint="2" class="paint">2</button>
+          <button data-paint="3" class="paint">3</button>
+        </div>
+
+        <label class="obs-label">Observacoes
+          <textarea id="obs" rows="3" placeholder="Obrigatorio para Grade B e C - Pintura"></textarea>
+        </label>
+
+        <div class="preview">
+          <span>Previa</span>
+          <strong id="previewModel">Apple MacBook</strong>
+          <p id="previewSpecs">CPU | RAM | Disco</p>
+          <p id="previewGrade">Grade A</p>
+        </div>
+
+        <div class="actions">
+          <button id="syncOs" class="secondary">Sincronizar OS</button>
+          <button id="printBtn" class="primary">Imprimir etiqueta</button>
+        </div>
+      </section>
+    </section>
+
+    <section class="status-line" id="statusLine">Pronto.</section>
+  </main>
+  <script src="/app.js"></script>
+</body>
+</html>

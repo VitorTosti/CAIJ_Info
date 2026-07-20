@@ -743,10 +743,10 @@ function Get-ServidorCandidates {
     if ($env:CAIJ_SERVIDOR_URL) { [void]$candidatos.Add($env:CAIJ_SERVIDOR_URL.TrimEnd('/')) }
     if ($env:CAIJ_SERVIDOR_IP)  { [void]$candidatos.Add(('http://{0}:{1}' -f $env:CAIJ_SERVIDOR_IP.Trim(), $portaServidor)) }
 
-    # IP historico do PC principal.
-    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.54', $portaServidor))
+    # IP do PC principal.
+    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.127', $portaServidor))
 
-    # Tenta o final .54 em cada rede IPv4 local do notebook.
+    # Tenta o final .127 em cada rede IPv4 local do notebook.
     try {
         $ipsLocais = @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue |
             Where-Object { $_.IPEnabled -and $_.IPAddress } |
@@ -756,7 +756,7 @@ function Get-ServidorCandidates {
         foreach ($ipLocal in $ipsLocais) {
             $parts = $ipLocal.Split('.')
             if ($parts.Count -eq 4) {
-                [void]$candidatos.Add(('http://{0}.{1}.{2}.54:{3}' -f $parts[0], $parts[1], $parts[2], $portaServidor))
+                [void]$candidatos.Add(('http://{0}.{1}.{2}.127:{3}' -f $parts[0], $parts[1], $parts[2], $portaServidor))
             }
         }
     } catch {}
@@ -903,7 +903,7 @@ function Get-ServidorBaseUrl {
         }
     }
 
-    $script:servidorBaseUrlCache = 'http://192.168.15.54:9100'
+    $script:servidorBaseUrlCache = 'http://192.168.15.127:9100'
     return $script:servidorBaseUrlCache
 }
 
@@ -1187,6 +1187,33 @@ function Set-RoundedControl {
         $path.Dispose()
     } catch {}
 }
+function New-SectionHairline {
+    param(
+        [Parameter(Mandatory=$true)]$Parent,
+        [int]$X, [int]$Y, [int]$W,
+        [System.Drawing.Color]$Cor = ([System.Drawing.Color]::FromArgb(0, 168, 232))
+    )
+    $ln = New-Object System.Windows.Forms.Panel
+    $ln.BackColor = [System.Drawing.Color]::Transparent
+    $ln.Location  = New-Object System.Drawing.Point($X, $Y)
+    $ln.Size      = New-Object System.Drawing.Size($W, 1)
+    $corCap = $Cor
+    $ln.Add_Paint({
+        param($s, $e)
+        $rct = New-Object System.Drawing.Rectangle(0, 0, $s.Width, 1)
+        $br = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
+            $rct,
+            [System.Drawing.Color]::FromArgb(110, $corCap.R, $corCap.G, $corCap.B),
+            [System.Drawing.Color]::FromArgb(0, $corCap.R, $corCap.G, $corCap.B),
+            [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal
+        )
+        $e.Graphics.FillRectangle($br, $rct)
+        $br.Dispose()
+    }.GetNewClosure())
+    [void]$Parent.Controls.Add($ln)
+    return $ln
+}
+
 Set-RoundedControl -Control $sBox -Radius 8
 $sBox.Add_SizeChanged({ Set-RoundedControl -Control $sBox -Radius 8 })
 Set-RoundedControl -Control $hModel -Radius 9
@@ -1767,7 +1794,7 @@ function Show-DialogConfigurarServidor {
     $urlAtual = ''
     if ($script:servidorBaseUrlCache) { $urlAtual = $script:servidorBaseUrlCache }
     elseif (Test-Path $cfgPath) { try { $urlAtual = (Get-Content $cfgPath -Raw).Trim() } catch {} }
-    if (-not $urlAtual) { $urlAtual = 'http://192.168.15.54:9100' }
+    if (-not $urlAtual) { $urlAtual = 'http://192.168.15.127:9100' }
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Configurar Servidor CAIJ'
@@ -1786,7 +1813,7 @@ function Show-DialogConfigurarServidor {
     [void]$f.Controls.Add($lHead)
 
     $lHint = New-Object System.Windows.Forms.Label
-    $lHint.Text = 'Digite o IP ou URL completa do servidor (ex: http://192.168.15.54:9100)'
+    $lHint.Text = 'Digite o IP ou URL completa do servidor (ex: http://192.168.15.127:9100)'
     $lHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
     $lHint.ForeColor = [System.Drawing.Color]::FromArgb(90, 140, 175)
     $lHint.Location = New-Object System.Drawing.Point(16, 40)
@@ -4303,8 +4330,9 @@ $btnImprimir.Add_Click({
     $gradeLabel.Text = 'CLASSIFICACAO DO NOTEBOOK'
     $gradeLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
     $gradeLabel.ForeColor = $cAccent
-    $gradeLabel.Location = New-Object System.Drawing.Point(25, 338); $gradeLabel.Size = New-Object System.Drawing.Size(471, 18)
+    $gradeLabel.Location = New-Object System.Drawing.Point(25, 338); $gradeLabel.Size = New-Object System.Drawing.Size(165, 18)
     $popup.Controls.Add($gradeLabel)
+    [void](New-SectionHairline -Parent $popup -X 196 -Y 347 -W 298)
 
     $gradeIdleColor = [System.Drawing.Color]::FromArgb(13, 26, 40)
     $gradeHoverColor = [System.Drawing.Color]::FromArgb(23, 42, 60)
@@ -4315,6 +4343,16 @@ $btnImprimir.Add_Click({
         'C' = [System.Drawing.Color]::FromArgb(232, 102, 34)
         'RMA' = [System.Drawing.Color]::FromArgb(208, 58, 82)
     }
+    # Variacoes derivadas: fundo tintado (escuro na cor da grade) e texto claro na cor da grade
+    $coresGradeIdle = @{}
+    $coresGradeTexto = @{}
+    $coresGradeBorda = @{}
+    foreach ($kG in @($coresGrade.Keys)) {
+        $cG = $coresGrade[$kG]
+        $coresGradeIdle[$kG]  = [System.Drawing.Color]::FromArgb(([int]($cG.R * 0.13) + 8), ([int]($cG.G * 0.13) + 14), ([int]($cG.B * 0.13) + 22))
+        $coresGradeTexto[$kG] = [System.Drawing.Color]::FromArgb([Math]::Min($cG.R + 120, 255), [Math]::Min($cG.G + 110, 255), [Math]::Min($cG.B + 110, 255))
+        $coresGradeBorda[$kG] = [System.Drawing.Color]::FromArgb([int]($cG.R * 0.55), [int]($cG.G * 0.55), [int]($cG.B * 0.55))
+    }
     $gradesInfo = @(
         @{L='A'; D='Perfeito'},
         @{L='B'; D='Detalhes'},
@@ -4323,115 +4361,155 @@ $btnImprimir.Add_Click({
     )
 
     $script:SelecionarPintura = {
+        $corPintura      = [System.Drawing.Color]::FromArgb(232, 102, 34)
+        $corPinturaClara = [System.Drawing.Color]::FromArgb(255, 180, 120)
+
         $pForm = New-Object System.Windows.Forms.Form
         $pForm.Text = 'Grade C - Pintura'
-        $pForm.Size = New-Object System.Drawing.Size(380, 262)
+        $pForm.Size = New-Object System.Drawing.Size(400, 330)
         $pForm.StartPosition = 'CenterParent'
         $pForm.BackColor = [System.Drawing.Color]::FromArgb(7, 15, 24)
         $pForm.FormBorderStyle = 'FixedDialog'
         $pForm.MaximizeBox = $false
         $pForm.MinimizeBox = $false
 
+        # Header: barra de destaque + titulo + hairline
+        $pAccent = New-Object System.Windows.Forms.Panel
+        $pAccent.BackColor = $corPintura
+        $pAccent.Location  = New-Object System.Drawing.Point(20, 18)
+        $pAccent.Size      = New-Object System.Drawing.Size(3, 22)
+        $pForm.Controls.Add($pAccent)
+
         $pTitle = New-Object System.Windows.Forms.Label
-        $pTitle.Text = 'Grade C - Pintura'
+        $pTitle.Text = 'GRADE C - PINTURA'
         $pTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11, [System.Drawing.FontStyle]::Bold)
         $pTitle.ForeColor = [System.Drawing.Color]::FromArgb(255, 180, 92)
-        $pTitle.Location = New-Object System.Drawing.Point(18, 14)
-        $pTitle.Size = New-Object System.Drawing.Size(310, 24)
+        $pTitle.Location = New-Object System.Drawing.Point(30, 16)
+        $pTitle.Size = New-Object System.Drawing.Size(190, 24)
         $pForm.Controls.Add($pTitle)
+        [void](New-SectionHairline -Parent $pForm -X 226 -Y 29 -W 138 -Cor $corPintura)
 
         $pSub = New-Object System.Windows.Forms.Label
-        $pSub.Text = 'Escolha o nivel que vai aparecer na etiqueta.'
+        $pSub.Text = 'Escolha o nivel de pintura que vai aparecer na etiqueta.'
         $pSub.Font = New-Object System.Drawing.Font('Segoe UI', 8)
         $pSub.ForeColor = $cMuted
-        $pSub.Location = New-Object System.Drawing.Point(18, 40)
-        $pSub.Size = New-Object System.Drawing.Size(310, 18)
+        $pSub.Location = New-Object System.Drawing.Point(30, 42)
+        $pSub.Size = New-Object System.Drawing.Size(334, 16)
         $pForm.Controls.Add($pSub)
 
-        $selectedPinturaLbl = New-Object System.Windows.Forms.Label
-        $selectedPinturaLbl.Text = 'Selecionada: nenhuma'
-        $selectedPinturaLbl.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
-        $selectedPinturaLbl.ForeColor = [System.Drawing.Color]::FromArgb(255, 208, 138)
-        $selectedPinturaLbl.Location = New-Object System.Drawing.Point(18, 172)
-        $selectedPinturaLbl.Size = New-Object System.Drawing.Size(300, 16)
-        $pForm.Controls.Add($selectedPinturaLbl)
+        # Cards de opcao (estilo radio)
+        $script:pinturaSelecionadaTemp = $null
+        if ($script:pinturaOpcaoAtual) { $script:pinturaSelecionadaTemp = $script:pinturaOpcaoAtual }
 
-        $pinturaList = New-Object System.Windows.Forms.ListBox
-        $pinturaList.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10, [System.Drawing.FontStyle]::Bold)
-        $pinturaList.BackColor = [System.Drawing.Color]::FromArgb(20, 30, 42)
-        $pinturaList.ForeColor = [System.Drawing.Color]::White
-        $pinturaList.BorderStyle = 'FixedSingle'
-        $pinturaList.Location = New-Object System.Drawing.Point(18, 82)
-        $pinturaList.Size = New-Object System.Drawing.Size(328, 74)
-        $pinturaList.IntegralHeight = $false
-        [void]$pinturaList.Items.Add('PINTURA 1')
-        [void]$pinturaList.Items.Add('PINTURA 2')
-        [void]$pinturaList.Items.Add('PINTURA 3')
-        $pForm.Controls.Add($pinturaList)
-
-        $atualizarPinturaSelecionada = {
-            $selectedPinturaLbl.Text = if ($script:pinturaSelecionadaTemp) { "Selecionada: $($script:pinturaSelecionadaTemp)" } else { 'Selecionada: nenhuma' }
+        $script:pinturaCardsUi = @()
+        $script:pinturaDescsUi = @{
+            'PINTURA 1' = 'Retoque pontual'
+            'PINTURA 2' = 'Pintura parcial'
+            'PINTURA 3' = 'Pintura completa'
         }
-        $pinturaList.Add_SelectedIndexChanged({
-            if ($pinturaList.SelectedIndex -ge 0) {
-                $script:pinturaSelecionadaTemp = [string]$pinturaList.SelectedItem
-            } else {
-                $script:pinturaSelecionadaTemp = $null
+
+        $script:AtualizarPinturaCards = {
+            foreach ($card in @($script:pinturaCardsUi)) {
+                $opcaoCard = [string]$card.Tag
+                $selecionado = ($opcaoCard -eq [string]$script:pinturaSelecionadaTemp)
+                if ($selecionado) {
+                    $card.BackColor = [System.Drawing.Color]::FromArgb(64, 30, 12)
+                    $card.ForeColor = [System.Drawing.Color]::White
+                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(232, 102, 34)
+                    $card.FlatAppearance.BorderSize = 2
+                    $card.Text = ([string][char]0x25CF + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
+                } else {
+                    $card.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
+                    $card.ForeColor = [System.Drawing.Color]::FromArgb(210, 190, 170)
+                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(52, 40, 30)
+                    $card.FlatAppearance.BorderSize = 1
+                    $card.Text = ([string][char]0x25CB + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
+                }
             }
-            & $atualizarPinturaSelecionada
-        })
+            if ($script:pinturaConfirmBtn) {
+                $temSel = [bool]$script:pinturaSelecionadaTemp
+                $script:pinturaConfirmBtn.Enabled = $temSel
+                $script:pinturaConfirmBtn.BackColor = if ($temSel) { [System.Drawing.Color]::FromArgb(0, 126, 72) } else { [System.Drawing.Color]::FromArgb(14, 34, 26) }
+                $script:pinturaConfirmBtn.ForeColor = if ($temSel) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(70, 110, 90) }
+            }
+        }
+
+        $yCard = 68
+        foreach ($opcaoPintura in @('PINTURA 1', 'PINTURA 2', 'PINTURA 3')) {
+            $card = New-Object System.Windows.Forms.Button
+            $card.Tag = $opcaoPintura
+            $card.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+            $card.FlatStyle = 'Flat'
+            $card.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+            $card.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
+            $card.Location = New-Object System.Drawing.Point(20, $yCard)
+            $card.Size = New-Object System.Drawing.Size(344, 40)
+            $card.Cursor = [System.Windows.Forms.Cursors]::Hand
+            $card.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(34, 26, 18)
+            $card.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(52, 28, 14)
+            $card.Add_Click({
+                param($s, $e)
+                $script:pinturaSelecionadaTemp = [string]$s.Tag
+                & $script:AtualizarPinturaCards
+            })
+            $pForm.Controls.Add($card)
+            Set-RoundedControl -Control $card -Radius 10
+            $script:pinturaCardsUi += $card
+            $yCard += 46
+        }
+
+        # Rodape
+        $pFooterLine = New-Object System.Windows.Forms.Panel
+        $pFooterLine.BackColor = [System.Drawing.Color]::FromArgb(24, 40, 56)
+        $pFooterLine.Location  = New-Object System.Drawing.Point(20, 216)
+        $pFooterLine.Size      = New-Object System.Drawing.Size(344, 1)
+        $pForm.Controls.Add($pFooterLine)
 
         $cancel = New-Object System.Windows.Forms.Button
         $cancel.Text = 'Cancelar'
-        $cancel.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-        $cancel.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 220)
-        $cancel.BackColor = [System.Drawing.Color]::FromArgb(52, 14, 22)
+        $cancel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+        $cancel.ForeColor = [System.Drawing.Color]::FromArgb(200, 160, 165)
+        $cancel.BackColor = [System.Drawing.Color]::FromArgb(14, 20, 30)
         $cancel.FlatStyle = 'Flat'
-        $cancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(120, 44, 58)
-        $cancel.Location = New-Object System.Drawing.Point(18, 198)
-        $cancel.Size = New-Object System.Drawing.Size(112, 34)
+        $cancel.FlatAppearance.BorderSize = 1
+        $cancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(84, 36, 46)
+        $cancel.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(52, 18, 26)
+        $cancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $cancel.Location = New-Object System.Drawing.Point(20, 230)
+        $cancel.Size = New-Object System.Drawing.Size(112, 36)
         $cancel.Add_Click({
             $script:pinturaSelecionadaTemp = $null
             $pForm.Tag = 'Cancel'
             $pForm.Close()
-        }.GetNewClosure())
+        })
         $pForm.Controls.Add($cancel)
+        Set-RoundedControl -Control $cancel -Radius 8
 
         $confirm = New-Object System.Windows.Forms.Button
-        $confirm.Text = 'Confirmar'
+        $confirm.Text = 'Confirmar  >'
         $confirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
         $confirm.ForeColor = [System.Drawing.Color]::White
         $confirm.BackColor = [System.Drawing.Color]::FromArgb(0, 126, 72)
         $confirm.FlatStyle = 'Flat'
-        $confirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 214, 130)
+        $confirm.FlatAppearance.BorderSize = 0
         $confirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 148, 84)
-        $confirm.Location = New-Object System.Drawing.Point(214, 198)
-        $confirm.Size = New-Object System.Drawing.Size(132, 34)
+        $confirm.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 104, 60)
+        $confirm.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $confirm.Location = New-Object System.Drawing.Point(232, 230)
+        $confirm.Size = New-Object System.Drawing.Size(132, 36)
         $confirm.Add_Click({
-            $valorSelecionado = if ($pinturaList.SelectedIndex -ge 0) { [string]$pinturaList.SelectedItem } else { $null }
-            if (-not $valorSelecionado) {
-                [System.Windows.Forms.MessageBox]::Show('Selecione Pintura 1, 2 ou 3 antes de confirmar.', 'Grade C - Pintura', 'OK', 'Warning') | Out-Null
-                return
-            }
-            $script:pinturaSelecionadaTemp = $valorSelecionado
+            if (-not $script:pinturaSelecionadaTemp) { return }
             $pForm.Tag = 'OK'
             $pForm.Close()
-        }.GetNewClosure())
+        })
         $pForm.Controls.Add($confirm)
         Set-RoundedControl -Control $confirm -Radius 8
+        $script:pinturaConfirmBtn = $confirm
 
-        $script:pinturaSelecionadaTemp = $null
-        if ($script:pinturaOpcaoAtual) {
-            $script:pinturaSelecionadaTemp = $script:pinturaOpcaoAtual
-            $idxAtual = $pinturaList.Items.IndexOf($script:pinturaOpcaoAtual)
-            if ($idxAtual -ge 0) { $pinturaList.SelectedIndex = $idxAtual }
-        }
-        & $atualizarPinturaSelecionada
+        & $script:AtualizarPinturaCards
         [void]$pForm.ShowDialog($popup)
-        $valorFinalPintura = if ($pinturaList.SelectedIndex -ge 0) { [string]$pinturaList.SelectedItem } else { $script:pinturaSelecionadaTemp }
-        if ($pForm.Tag -eq 'OK' -and $valorFinalPintura) {
-            $script:pinturaSelecionadaTemp = $valorFinalPintura
-            return [string]$valorFinalPintura
+        if ($pForm.Tag -eq 'OK' -and $script:pinturaSelecionadaTemp) {
+            return [string]$script:pinturaSelecionadaTemp
         }
         return $null
     }
@@ -4442,17 +4520,17 @@ $btnImprimir.Add_Click({
         $btnG = New-Object System.Windows.Forms.Button
         $btnG.Text = "$($g.L)`r`n$($g.D)"
         $btnG.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
-        $btnG.ForeColor = [System.Drawing.Color]::White
-        $btnG.BackColor = if ($g.L -eq 'A') { $coresGrade[$g.L] } else { $gradeIdleColor }
+        $btnG.ForeColor = if ($g.L -eq 'A') { [System.Drawing.Color]::White } else { $coresGradeTexto[$g.L] }
+        $btnG.BackColor = if ($g.L -eq 'A') { $coresGrade[$g.L] } else { $coresGradeIdle[$g.L] }
         $btnG.FlatStyle = 'Flat'
-        $btnG.FlatAppearance.BorderColor = $coresGrade[$g.L]
+        $btnG.FlatAppearance.BorderColor = if ($g.L -eq 'A') { $coresGrade[$g.L] } else { $coresGradeBorda[$g.L] }
         $btnG.FlatAppearance.BorderSize  = if ($g.L -eq 'A') { 2 } else { 1 }
         $btnG.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-        $btnG.Location = New-Object System.Drawing.Point((16 + ($gradeIndex * 120)), 360)
-        $btnG.Size     = New-Object System.Drawing.Size(114, 38)
+        $btnG.Location = New-Object System.Drawing.Point((16 + ($gradeIndex * 120)), 358)
+        $btnG.Size     = New-Object System.Drawing.Size(114, 42)
         $btnG.Tag      = $g.L
         $btnG.Cursor   = [System.Windows.Forms.Cursors]::Hand
-        $btnG.FlatAppearance.MouseOverBackColor = $gradeHoverColor
+        $btnG.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(([int]($coresGrade[$g.L].R * 0.24) + 8), ([int]($coresGrade[$g.L].G * 0.24) + 14), ([int]($coresGrade[$g.L].B * 0.24) + 22))
         $btnG.FlatAppearance.MouseDownBackColor = $gradeDownColor
         $origPos = $btnG.Location
         $btnG.Add_Click({
@@ -4496,7 +4574,7 @@ $btnImprimir.Add_Click({
         }.GetNewClosure())
         $script:btnGrades[$g.L] = $btnG
         $popup.Controls.Add($btnG)
-        Set-RoundedControl -Control $btnG -Radius 6
+        Set-RoundedControl -Control $btnG -Radius 10
         $gradeIndex++
     }
 
@@ -4513,22 +4591,26 @@ $btnImprimir.Add_Click({
                 $btn.Enabled = $true
                 $btn.BackColor = $gradeIdleColor
                 $btn.FlatAppearance.BorderSize = 1
-                $btn.ForeColor = [System.Drawing.Color]::FromArgb(170, 192, 214)
+                $btn.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(30, 48, 66)
+                $btn.ForeColor = [System.Drawing.Color]::FromArgb(120, 140, 160)
                 if ($key -eq 'RMA') {
                     $btn.BackColor = $coresGrade['RMA']
                     $btn.FlatAppearance.BorderSize = 2
+                    $btn.FlatAppearance.BorderColor = $coresGrade['RMA']
                     $btn.ForeColor = [System.Drawing.Color]::White
                 }
             } elseif (($btn.Tag -eq $script:gradeAtual) -or ($btn.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA')) {
                 $btn.Enabled = $true
                 $btn.BackColor = $coresGrade[$key]
                 $btn.FlatAppearance.BorderSize = 2
+                $btn.FlatAppearance.BorderColor = $coresGrade[$key]
                 $btn.ForeColor = [System.Drawing.Color]::White
             } else {
                 $btn.Enabled = $true
-                $btn.BackColor = $gradeIdleColor
+                $btn.BackColor = $coresGradeIdle[$key]
                 $btn.FlatAppearance.BorderSize = 1
-                $btn.ForeColor = [System.Drawing.Color]::White
+                $btn.FlatAppearance.BorderColor = $coresGradeBorda[$key]
+                $btn.ForeColor = $coresGradeTexto[$key]
             }
         }
     }
@@ -4554,8 +4636,9 @@ $btnImprimir.Add_Click({
     $obsLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
     $obsLabel.ForeColor = $cAccent
     $obsLabel.Location = New-Object System.Drawing.Point(14, 5)
-    $obsLabel.Size = New-Object System.Drawing.Size(190, 15)
+    $obsLabel.Size = New-Object System.Drawing.Size(96, 15)
     $obsPanel.Controls.Add($obsLabel)
+    [void](New-SectionHairline -Parent $obsPanel -X 116 -Y 12 -W 254)
 
     $obsCount = New-Object System.Windows.Forms.Label
     $obsCount.Text = '0/220'
@@ -5836,7 +5919,7 @@ $btnImprimir.Add_Click({
                 ) | Out-Null
             } else {
                 [System.Windows.Forms.MessageBox]::Show(
-                    "Servidor de impressao nao encontrado ou sem resposta.`nVerifique se o ServidorImpressao.ps1 esta rodando no PC principal (192.168.15.54).",
+                    "Servidor de impressao nao encontrado ou sem resposta.`nVerifique se o ServidorImpressao.ps1 esta rodando no PC principal (192.168.15.127).",
                     "Servidor offline",
                     "OK",
                     "Warning"
@@ -6153,4 +6236,3 @@ $form.Add_FormClosed({
 })
 
 $form.ShowDialog() | Out-Null
-

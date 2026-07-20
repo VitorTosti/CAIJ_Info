@@ -44,12 +44,12 @@ $form.FormBorderStyle = 'FixedSingle'
 $form.MaximizeBox = $false
 $form.MinimizeBox = $false
 $form.BackColor = $cBg
-$form.Size = New-Object System.Drawing.Size(980, 760)
+$form.Size = New-Object System.Drawing.Size(980, 560)
 $form.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 
 $head = New-Object System.Windows.Forms.Panel
 $head.Location = New-Object System.Drawing.Point(0, 0)
-$head.Size = New-Object System.Drawing.Size(980, 100)
+$head.Size = New-Object System.Drawing.Size(980, 82)
 $head.BackColor = [System.Drawing.Color]::FromArgb(9, 18, 30)
 $form.Controls.Add($head)
 $head.Add_Paint({
@@ -67,23 +67,23 @@ $head.Add_Paint({
 
 $title = New-Object System.Windows.Forms.Label
 $title.Text = 'CENTRAL DE TESTES'
-$title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 21, [System.Drawing.FontStyle]::Bold)
+$title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 18, [System.Drawing.FontStyle]::Bold)
 $title.ForeColor = $cMain
-$title.Location = New-Object System.Drawing.Point(24, 14)
-$title.Size = New-Object System.Drawing.Size(420, 42)
+$title.Location = New-Object System.Drawing.Point(24, 10)
+$title.Size = New-Object System.Drawing.Size(420, 34)
 $head.Controls.Add($title)
 
 $sub = New-Object System.Windows.Forms.Label
 $sub.Text = 'Fluxo completo de validacao tecnica para notebooks'
 $sub.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $sub.ForeColor = $cMuted
-$sub.Location = New-Object System.Drawing.Point(26, 56)
+$sub.Location = New-Object System.Drawing.Point(26, 46)
 $sub.Size = New-Object System.Drawing.Size(440, 22)
 $head.Controls.Add($sub)
 
 $chip = New-Object System.Windows.Forms.Panel
-$chip.Location = New-Object System.Drawing.Point(760, 24)
-$chip.Size = New-Object System.Drawing.Size(192, 48)
+$chip.Location = New-Object System.Drawing.Point(760, 17)
+$chip.Size = New-Object System.Drawing.Size(192, 46)
 $chip.BackColor = [System.Drawing.Color]::FromArgb(10, 33, 52)
 $head.Controls.Add($chip)
 Set-RoundedControl -Control $chip -Radius 10
@@ -105,8 +105,8 @@ $chipVal.Size = New-Object System.Drawing.Size(170, 22)
 $chip.Controls.Add($chipVal)
 
 $summary = New-Object System.Windows.Forms.Panel
-$summary.Location = New-Object System.Drawing.Point(16, 112)
-$summary.Size = New-Object System.Drawing.Size(946, 92)
+$summary.Location = New-Object System.Drawing.Point(16, 94)
+$summary.Size = New-Object System.Drawing.Size(946, 74)
 $summary.BackColor = $cCard2
 $form.Controls.Add($summary)
 Set-RoundedControl -Control $summary -Radius 10
@@ -139,12 +139,12 @@ $sumText = New-Object System.Windows.Forms.Label
 $sumText.Text = 'Marque cada etapa apos validar fisicamente o item.'
 $sumText.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $sumText.ForeColor = $cMuted
-$sumText.Location = New-Object System.Drawing.Point(20, 40)
+$sumText.Location = New-Object System.Drawing.Point(20, 36)
 $sumText.Size = New-Object System.Drawing.Size(540, 18)
 $summary.Controls.Add($sumText)
 
 $progressTrack = New-Object System.Windows.Forms.Panel
-$progressTrack.Location = New-Object System.Drawing.Point(20, 64)
+$progressTrack.Location = New-Object System.Drawing.Point(20, 56)
 $progressTrack.Size = New-Object System.Drawing.Size(900, 12)
 $progressTrack.BackColor = [System.Drawing.Color]::FromArgb(24, 38, 55)
 $summary.Controls.Add($progressTrack)
@@ -158,8 +158,8 @@ $progressTrack.Controls.Add($progressFill)
 Set-RoundedControl -Control $progressFill -Radius 6
 
 $listPanel = New-Object System.Windows.Forms.Panel
-$listPanel.Location = New-Object System.Drawing.Point(16, 214)
-$listPanel.Size = New-Object System.Drawing.Size(946, 436)
+$listPanel.Location = New-Object System.Drawing.Point(16, 178)
+$listPanel.Size = New-Object System.Drawing.Size(946, 244)
 $listPanel.BackColor = $cBg
 $form.Controls.Add($listPanel)
 
@@ -216,7 +216,7 @@ function New-TestRow {
     )
     $panel = New-Object System.Windows.Forms.Panel
     $panel.Location = New-Object System.Drawing.Point(0, $Y)
-    $panel.Size = New-Object System.Drawing.Size(946, 70)
+    $panel.Size = New-Object System.Drawing.Size(946, 58)
     $panel.BackColor = $cCard
     $listPanel.Controls.Add($panel)
     Set-RoundedControl -Control $panel -Radius 9
@@ -225,7 +225,7 @@ function New-TestRow {
     $num.Text = $Numero
     $num.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
     $num.ForeColor = $cAccent
-    $num.Location = New-Object System.Drawing.Point(14, 18)
+    $num.Location = New-Object System.Drawing.Point(14, 14)
     $num.Size = New-Object System.Drawing.Size(34, 28)
     $panel.Controls.Add($num)
 
@@ -233,7 +233,7 @@ function New-TestRow {
     $ttl.Text = $Titulo
     $ttl.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11, [System.Drawing.FontStyle]::Bold)
     $ttl.ForeColor = $cMain
-    $ttl.Location = New-Object System.Drawing.Point(52, 10)
+    $ttl.Location = New-Object System.Drawing.Point(52, 7)
     $ttl.Size = New-Object System.Drawing.Size(250, 24)
     $panel.Controls.Add($ttl)
 
@@ -241,7 +241,7 @@ function New-TestRow {
     $ins.Text = $Instrucao
     $ins.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
     $ins.ForeColor = $cMuted
-    $ins.Location = New-Object System.Drawing.Point(52, 35)
+    $ins.Location = New-Object System.Drawing.Point(52, 29)
     $ins.Size = New-Object System.Drawing.Size(360, 22)
     $panel.Controls.Add($ins)
 
@@ -249,23 +249,23 @@ function New-TestRow {
     $status.Text = 'PENDENTE'
     $status.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
     $status.ForeColor = $cWarn
-    $status.Location = New-Object System.Drawing.Point(420, 24)
+    $status.Location = New-Object System.Drawing.Point(420, 19)
     $status.Size = New-Object System.Drawing.Size(95, 20)
     $panel.Controls.Add($status)
 
-    $btnAbrir = New-ActionButton -Text 'Abrir Teste' -X 520 -Y 16 -W 122 -H 36 `
+    $btnAbrir = New-ActionButton -Text 'Abrir Teste' -X 520 -Y 11 -W 122 -H 34 `
         -Bg ([System.Drawing.Color]::FromArgb(22, 54, 94)) -Fg ([System.Drawing.Color]::White) -OnClick $AbrirAcao
     $panel.Controls.Add($btnAbrir)
 
-    $btnOK = New-ActionButton -Text 'Passou' -X 648 -Y 16 -W 86 -H 36 `
+    $btnOK = New-ActionButton -Text 'Passou' -X 648 -Y 11 -W 86 -H 34 `
         -Bg ([System.Drawing.Color]::FromArgb(10, 64, 38)) -Fg ([System.Drawing.Color]::FromArgb(204, 250, 228)) -OnClick $null
     $panel.Controls.Add($btnOK)
 
-    $btnFail = New-ActionButton -Text 'Falhou' -X 738 -Y 16 -W 90 -H 36 `
+    $btnFail = New-ActionButton -Text 'Falhou' -X 738 -Y 11 -W 90 -H 34 `
         -Bg ([System.Drawing.Color]::FromArgb(68, 20, 30)) -Fg ([System.Drawing.Color]::FromArgb(255, 212, 219)) -OnClick $null
     $panel.Controls.Add($btnFail)
 
-    $btnReset = New-ActionButton -Text 'Reset' -X 832 -Y 16 -W 84 -H 36 `
+    $btnReset = New-ActionButton -Text 'Reset' -X 832 -Y 11 -W 84 -H 34 `
         -Bg ([System.Drawing.Color]::FromArgb(28, 36, 50)) -Fg ([System.Drawing.Color]::FromArgb(210, 225, 242)) -OnClick $null
     $panel.Controls.Add($btnReset)
 
@@ -305,16 +305,14 @@ function New-TestRow {
 }
 
 $script:linhas += New-TestRow -Y 0   -Numero '1' -Titulo 'Camera' -Instrucao 'Validar imagem, foco e captura' -AbrirAcao { Start-Process 'microsoft.windows.camera:' }
-$script:linhas += New-TestRow -Y 74  -Numero '2' -Titulo 'Teclado' -Instrucao 'Pressionar todas as teclas' -AbrirAcao { Start-Process 'msedge.exe' -ArgumentList '-inprivate https://keyboard-test.space/pt/' }
-$script:linhas += New-TestRow -Y 148 -Numero '3' -Titulo 'Som e Microfone' -Instrucao 'Ouvir teste e validar entrada de voz' -AbrirAcao {
+$script:linhas += New-TestRow -Y 62  -Numero '2' -Titulo 'Teclado' -Instrucao 'Pressionar todas as teclas' -AbrirAcao { Start-Process 'msedge.exe' -ArgumentList '-inprivate https://keyboard-test.space/pt/' }
+$script:linhas += New-TestRow -Y 124 -Numero '3' -Titulo 'Som e Microfone' -Instrucao 'Ouvir teste e validar entrada de voz' -AbrirAcao {
     Start-Process 'ms-settings:sound'
     $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
     $synth.Volume = 100
     $synth.SpeakAsync('Teste de audio.') | Out-Null
 }
-$script:linhas += New-TestRow -Y 222 -Numero '4' -Titulo 'Tela / Dead Pixel' -Instrucao 'Inspecionar cores, brilho e pixel' -AbrirAcao { Start-Process 'msedge.exe' -ArgumentList '-inprivate https://lcdtech.info/en/tests/dead.pixel.htm' }
-$script:linhas += New-TestRow -Y 296 -Numero '5' -Titulo 'Portas USB' -Instrucao 'Conectar dispositivo e detectar leitura' -AbrirAcao { Start-Process 'explorer.exe' -ArgumentList 'shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}' }
-$script:linhas += New-TestRow -Y 370 -Numero '6' -Titulo 'Rede (Wi-Fi/Bluetooth)' -Instrucao 'Confirmar conectividade e estado dos radios' -AbrirAcao { Start-Process 'ms-settings:network-status' }
+$script:linhas += New-TestRow -Y 186 -Numero '4' -Titulo 'Tela / Dead Pixel' -Instrucao 'Inspecionar cores, brilho e pixel' -AbrirAcao { Start-Process 'msedge.exe' -ArgumentList '-inprivate https://lcdtech.info/en/tests/dead.pixel.htm' }
 
 function Update-Resumo {
     $ok = ($script:linhas | Where-Object { $_.Status -eq 'ok' }).Count
@@ -344,7 +342,7 @@ function Update-Resumo {
     }
 }
 
-$btnOpenAll = New-ActionButton -Text 'Abrir Todos' -X 16 -Y 658 -W 130 -H 40 `
+$btnOpenAll = New-ActionButton -Text 'Abrir Todos' -X 16 -Y 438 -W 130 -H 38 `
     -Bg ([System.Drawing.Color]::FromArgb(11, 69, 42)) -Fg ([System.Drawing.Color]::White) -OnClick {
         Start-Process 'microsoft.windows.camera:'
         Start-Sleep -Milliseconds 250
@@ -356,14 +354,10 @@ $btnOpenAll = New-ActionButton -Text 'Abrir Todos' -X 16 -Y 658 -W 130 -H 40 `
         $synth.SpeakAsync('Teste de audio.') | Out-Null
         Start-Sleep -Milliseconds 250
         Start-Process 'msedge.exe' -ArgumentList '-inprivate https://lcdtech.info/en/tests/dead.pixel.htm'
-        Start-Sleep -Milliseconds 250
-        Start-Process 'explorer.exe' -ArgumentList 'shell:::{20D04FE0-3AEA-1069-A2D8-08002B30309D}'
-        Start-Sleep -Milliseconds 250
-        Start-Process 'ms-settings:network-status'
     }
 $form.Controls.Add($btnOpenAll)
 
-$btnCopy = New-ActionButton -Text 'Copiar Relatorio' -X 152 -Y 658 -W 150 -H 40 `
+$btnCopy = New-ActionButton -Text 'Copiar Relatorio' -X 152 -Y 438 -W 150 -H 38 `
     -Bg ([System.Drawing.Color]::FromArgb(22, 54, 94)) -Fg ([System.Drawing.Color]::White) -OnClick {
         $txt = "CAIJ | CENTRAL DE TESTES$NL"
         $txt += "==========================$NL"
@@ -380,7 +374,7 @@ $btnCopy = New-ActionButton -Text 'Copiar Relatorio' -X 152 -Y 658 -W 150 -H 40 
     }
 $form.Controls.Add($btnCopy)
 
-$btnResetAll = New-ActionButton -Text 'Limpar Marcacoes' -X 308 -Y 658 -W 160 -H 40 `
+$btnResetAll = New-ActionButton -Text 'Limpar Marcacoes' -X 308 -Y 438 -W 160 -H 38 `
     -Bg ([System.Drawing.Color]::FromArgb(34, 40, 55)) -Fg ([System.Drawing.Color]::FromArgb(220, 232, 245)) -OnClick {
         foreach ($l in $script:linhas) {
             $l.Status = 'pendente'
@@ -393,10 +387,10 @@ $btnResetAll = New-ActionButton -Text 'Limpar Marcacoes' -X 308 -Y 658 -W 160 -H
     }
 $form.Controls.Add($btnResetAll)
 
-$btnClose = New-ActionButton -Text 'Fechar' -X 846 -Y 658 -W 116 -H 40 `
+$btnClose = New-ActionButton -Text 'Fechar' -X 846 -Y 438 -W 116 -H 38 `
     -Bg ([System.Drawing.Color]::FromArgb(68, 20, 30)) -Fg ([System.Drawing.Color]::FromArgb(255, 214, 220)) -OnClick { $form.Close() }
 $form.Controls.Add($btnClose)
 
 Update-Resumo
-$form.ClientSize = New-Object System.Drawing.Size(978, 708)
+$form.ClientSize = New-Object System.Drawing.Size(978, 490)
 $form.ShowDialog() | Out-Null
