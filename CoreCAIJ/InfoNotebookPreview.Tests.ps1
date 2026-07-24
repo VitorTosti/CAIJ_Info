@@ -19,6 +19,11 @@ $scriptText = Get-Content -Path $ScriptPath -Raw
 Assert-True ($scriptText -notmatch '(?m)^\s*B\s+14\s+238\s+458\s+1\s*$') 'previa com observacao nao deve desenhar separador solto'
 Assert-True ($scriptText -match 'GRADE T - TRIAGEM') 'previa reconhece Grade T - Triagem'
 Assert-True ($scriptText -match "\@\{L='T'; D='Triagem'\}") 'popup mostra botao Grade T'
+Assert-True ($scriptText -match "\`$tecNomes\s*=\s*@\('Lucas',\s*'Hyrides',\s*'Vitor',\s*'Erick'\)") 'cadastro mostra tecnico Erick'
+Assert-True ($scriptText -match 'Get-CaijGradeOptions') 'cadastro usa todas as grades'
+Assert-True ($scriptText -match 'ContextMenuStrip') 'cadastro abre menu de grades'
+Assert-True ($scriptText -match '\$btnGradeOs') 'referencia usa botao de grade'
+Assert-True ($scriptText -notmatch '\$txtGradeOs\s*=\s*New-Object System\.Windows\.Forms\.TextBox') 'referencia nao usa texto livre'
 
 $serverPath = Join-Path $PSScriptRoot 'ServidorImpressao.ps1'
 $serverText = Get-Content -Path $serverPath -Raw

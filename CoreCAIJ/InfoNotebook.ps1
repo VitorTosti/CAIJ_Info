@@ -2318,20 +2318,20 @@ function Show-CadastroOsAltertagDraft {
     $cmbTec = [PSCustomObject]@{ SelectedItem = 'Lucas' }
     $script:tecnicoSelecionado = 'Lucas'
     $script:tecBtns = @{}
-    $tecNomes = @('Lucas', 'Hyrides', 'Vitor')
-    $tecX = 8
+    $tecNomes = @('Lucas', 'Hyrides', 'Vitor', 'Erick')
+    $tecX = 6
     foreach ($tec in $tecNomes) {
         $btn = New-Object System.Windows.Forms.Button
         $btn.Text      = $tec
-        $btn.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
+        $btn.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 6.5)
         $btn.FlatStyle = 'Flat'
         $btn.FlatAppearance.BorderSize = 1
         $btn.Location  = New-Object System.Drawing.Point($tecX, 20)
-        $btn.Size      = New-Object System.Drawing.Size(52, 34)
+        $btn.Size      = New-Object System.Drawing.Size(40, 34)
         $btn.Cursor    = [System.Windows.Forms.Cursors]::Hand
         $script:tecBtns[$tec] = $btn
         [void]$cardTec.Controls.Add($btn)
-        $tecX += 56
+        $tecX += 42
 
         $btn.Add_Click({
             $nomeTec = $this.Text
@@ -2356,7 +2356,7 @@ function Show-CadastroOsAltertagDraft {
     $script:tecBtns['Lucas'].BackColor = [System.Drawing.Color]::FromArgb(0, 88, 148)
     $script:tecBtns['Lucas'].ForeColor = [System.Drawing.Color]::White
     $script:tecBtns['Lucas'].FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-    foreach ($t in @('Hyrides','Vitor')) {
+    foreach ($t in @('Hyrides', 'Vitor', 'Erick')) {
         $script:tecBtns[$t].BackColor = [System.Drawing.Color]::FromArgb(10, 20, 33)
         $script:tecBtns[$t].ForeColor = [System.Drawing.Color]::FromArgb(100, 148, 185)
         $script:tecBtns[$t].FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(22, 44, 66)
@@ -2408,15 +2408,38 @@ function Show-CadastroOsAltertagDraft {
     $lblGradeCaption.Location = New-Object System.Drawing.Point(8, 5)
     $lblGradeCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardGrade.Controls.Add($lblGradeCaption)
-    $txtGradeOs = New-Object System.Windows.Forms.TextBox
-    $txtGradeOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
-    $txtGradeOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
-    $txtGradeOs.ForeColor = [System.Drawing.Color]::White
-    $txtGradeOs.BorderStyle = 'None'
-    $txtGradeOs.Location = New-Object System.Drawing.Point(8, 22)
-    $txtGradeOs.Size = New-Object System.Drawing.Size(162, 18)
-    $txtGradeOs.Text = if ($script:rnaAtivo) { 'RMA' } elseif ($script:gradeAtual) { "GRADE $($script:gradeAtual)" } else { 'GRADE A' }
-    [void]$cardGrade.Controls.Add($txtGradeOs)
+    $script:gradeCadastroOs = if ($script:rnaAtivo) { 'RMA' } elseif ($script:gradeAtual) { [string]$script:gradeAtual } else { 'A' }
+    $btnGradeOs = New-Object System.Windows.Forms.Button
+    $btnGradeOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
+    $btnGradeOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
+    $btnGradeOs.ForeColor = [System.Drawing.Color]::White
+    $btnGradeOs.FlatStyle = 'Flat'
+    $btnGradeOs.FlatAppearance.BorderSize = 0
+    $btnGradeOs.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $btnGradeOs.Location = New-Object System.Drawing.Point(5, 18)
+    $btnGradeOs.Size = New-Object System.Drawing.Size(168, 23)
+    $btnGradeOs.Text = (Format-CaijGradeReference $script:gradeCadastroOs)
+    $btnGradeOs.Cursor = [System.Windows.Forms.Cursors]::Hand
+    [void]$cardGrade.Controls.Add($btnGradeOs)
+
+    $gradeMenuOs = New-Object System.Windows.Forms.ContextMenuStrip
+    $gradeMenuOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
+    $gradeMenuOs.ForeColor = [System.Drawing.Color]::White
+    foreach ($gradeOpcao in @(Get-CaijGradeOptions)) {
+        $gradeItem = New-Object System.Windows.Forms.ToolStripMenuItem
+        $gradeItem.Text = (Format-CaijGradeReference $gradeOpcao)
+        $gradeItem.Tag = $gradeOpcao
+        $gradeItem.Add_Click({
+            $script:gradeCadastroOs = [string]$this.Tag
+            $script:gradeAtual = [string]$this.Tag
+            $btnGradeOs.Text = (Format-CaijGradeReference $script:gradeCadastroOs)
+            Update-ResumoOs -Produto $listProd.SelectedItem
+        })
+        [void]$gradeMenuOs.Items.Add($gradeItem)
+    }
+    $btnGradeOs.Add_Click({
+        $gradeMenuOs.Show($btnGradeOs, (New-Object System.Drawing.Point(0, $btnGradeOs.Height)))
+    })
 
     # --- Card OS atual ---
     $cardOs = New-Object System.Windows.Forms.Panel
@@ -3424,7 +3447,7 @@ function Show-CadastroOsAltertagDraft {
         $resumoValores['tecnico'].Text = [string]$cmbTec.SelectedItem
         $resumoValores['osAtual'].Text = (Format-OsCodigo -Numero $script:osNumero)
         $resumoValores['serial'].Text = [string]$txtSerialOs.Text
-        $resumoValores['referencia'].Text = [string]$txtGradeOs.Text
+        $resumoValores['referencia'].Text = [string]$btnGradeOs.Text
         $resumoValores['quantidade'].Text = if ($qtdSel) { $qtdSel } else { '-' }
         $resumoValores['localizacao'].Text = 'Bancada tecnica'
         $resumoValores['produto'].Text = if ($Produto) { [string]$Produto.texto } else { '-' }
@@ -3847,7 +3870,6 @@ function Show-CadastroOsAltertagDraft {
 
     # $cmbTec e PSCustomObject — atualizacao do resumo feita no Add_Click de cada botao toggle
     $txtSerialOs.Add_TextChanged({ Update-ResumoOs -Produto $listProd.SelectedItem })
-    $txtGradeOs.Add_TextChanged({ Update-ResumoOs -Produto $listProd.SelectedItem })
 
     $btnFecharDlg = New-Object System.Windows.Forms.Button
     $btnFecharDlg.Text = 'Fechar'
@@ -3880,7 +3902,7 @@ function Show-CadastroOsAltertagDraft {
         $servicosMarcados = @($servChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text })
         $qtdSel = Get-ProdutoQuantidadeOsDisplayLocal $prodSel
         $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Criar OS no Altertag para:`n`nOS atual: $(Format-OsCodigo -Numero $script:osNumero)`nProduto: $([string]$prodSel.texto)`nQuantidade: $(if ($qtdSel) { $qtdSel } else { '1,00' })`nSerial: $($txtSerialOs.Text.Trim())`nReferencia: $($txtGradeOs.Text.Trim())`nServicos: $(if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' })`nLocalizacao: Bancada tecnica",
+            "Criar OS no Altertag para:`n`nOS atual: $(Format-OsCodigo -Numero $script:osNumero)`nProduto: $([string]$prodSel.texto)`nQuantidade: $(if ($qtdSel) { $qtdSel } else { '1,00' })`nSerial: $($txtSerialOs.Text.Trim())`nReferencia: $($btnGradeOs.Text.Trim())`nServicos: $(if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' })`nLocalizacao: Bancada tecnica",
             'Confirmar cadastro',
             [System.Windows.Forms.MessageBoxButtons]::YesNo,
             [System.Windows.Forms.MessageBoxIcon]::Question
@@ -3894,7 +3916,7 @@ function Show-CadastroOsAltertagDraft {
             $payloadObj = @{
                 tecnico = [string]$cmbTec.SelectedItem
                 serial = $txtSerialOs.Text.Trim()
-                referencia = $txtGradeOs.Text.Trim()
+                referencia = $btnGradeOs.Text.Trim()
                 idProduto = [int]$prodSel.idProduto
                 produtoCodigo = $codigoProdutoSel
                 produtoDescricao = [string]$prodSel.descricao
