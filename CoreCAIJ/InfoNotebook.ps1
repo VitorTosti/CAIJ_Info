@@ -2323,6 +2323,234 @@ $buildText = {
 }
 
 
+function Show-CadastroOsConfirm {
+    param(
+        [System.Windows.Forms.Form]$Owner,
+        [string]$OsCodigo,
+        [string]$Produto,
+        [string]$Quantidade,
+        [string]$Serial,
+        [string]$Referencia,
+        [string]$Servicos,
+        [string]$Localizacao
+    )
+
+    $formConfirm = New-Object System.Windows.Forms.Form
+    $formConfirm.Text = 'Confirmar cadastro'
+    $formConfirm.ClientSize = New-Object System.Drawing.Size(600, 470)
+    $formConfirm.StartPosition = 'CenterParent'
+    $formConfirm.BackColor = [System.Drawing.Color]::FromArgb(6, 13, 22)
+    $formConfirm.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $formConfirm.FormBorderStyle = 'None'
+    $formConfirm.ShowInTaskbar = $false
+    $formConfirm.MaximizeBox = $false
+    $formConfirm.MinimizeBox = $false
+    $formConfirm.KeyPreview = $true
+    Set-DoubleBuffered $formConfirm
+    Set-RoundedControl -Control $formConfirm -Radius 12
+    $formConfirm.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+    $formConfirm.Add_Paint({
+        param($s, $e)
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(40, 116, 158), 1)
+        $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+        $border.Dispose()
+    })
+
+    $headerConfirm = New-Object System.Windows.Forms.Panel
+    $headerConfirm.Location = New-Object System.Drawing.Point(0, 0)
+    $headerConfirm.Size = New-Object System.Drawing.Size(600, 78)
+    $headerConfirm.BackColor = [System.Drawing.Color]::FromArgb(9, 21, 34)
+    [void]$formConfirm.Controls.Add($headerConfirm)
+    $headerConfirm.Add_Paint({
+        param($s, $e)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(24, 185, 255), 2)
+        $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
+        $line.Dispose()
+        $dimLine = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(22, 55, 78), 1)
+        $e.Graphics.DrawLine($dimLine, 380, 12, 430, 12)
+        $e.Graphics.DrawLine($dimLine, 392, 18, 430, 18)
+        $dimLine.Dispose()
+    })
+
+    $headerRail = New-Object System.Windows.Forms.Panel
+    $headerRail.Location = New-Object System.Drawing.Point(0, 0)
+    $headerRail.Size = New-Object System.Drawing.Size(4, 78)
+    $headerRail.BackColor = [System.Drawing.Color]::FromArgb(24, 185, 255)
+    [void]$headerConfirm.Controls.Add($headerRail)
+
+    $eyebrow = New-Object System.Windows.Forms.Label
+    $eyebrow.Text = 'ALTERTAG / NOVA OS'
+    $eyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(80, 184, 230)
+    $eyebrow.Location = New-Object System.Drawing.Point(22, 11)
+    $eyebrow.Size = New-Object System.Drawing.Size(260, 14)
+    [void]$headerConfirm.Controls.Add($eyebrow)
+
+    $titleConfirm = New-Object System.Windows.Forms.Label
+    $titleConfirm.Text = 'Confirmar cadastro'
+    $titleConfirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
+    $titleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $titleConfirm.Location = New-Object System.Drawing.Point(20, 29)
+    $titleConfirm.Size = New-Object System.Drawing.Size(360, 30)
+    [void]$headerConfirm.Controls.Add($titleConfirm)
+
+    $subtitleConfirm = New-Object System.Windows.Forms.Label
+    $subtitleConfirm.Text = 'Revise os dados antes de enviar'
+    $subtitleConfirm.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $subtitleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(105, 145, 178)
+    $subtitleConfirm.Location = New-Object System.Drawing.Point(23, 57)
+    $subtitleConfirm.Size = New-Object System.Drawing.Size(320, 14)
+    [void]$headerConfirm.Controls.Add($subtitleConfirm)
+
+    $osChip = New-Object System.Windows.Forms.Panel
+    $osChip.Location = New-Object System.Drawing.Point(438, 27)
+    $osChip.Size = New-Object System.Drawing.Size(132, 36)
+    $osChip.BackColor = [System.Drawing.Color]::FromArgb(5, 42, 38)
+    [void]$headerConfirm.Controls.Add($osChip)
+    Set-RoundedControl -Control $osChip -Radius 8
+
+    $osChipCaption = New-Object System.Windows.Forms.Label
+    $osChipCaption.Text = 'OS'
+    $osChipCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+    $osChipCaption.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $osChipCaption.Location = New-Object System.Drawing.Point(10, 4)
+    $osChipCaption.Size = New-Object System.Drawing.Size(32, 12)
+    [void]$osChip.Controls.Add($osChipCaption)
+
+    $osChipValue = New-Object System.Windows.Forms.Label
+    $osChipValue.Text = $OsCodigo
+    $osChipValue.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10, [System.Drawing.FontStyle]::Bold)
+    $osChipValue.ForeColor = [System.Drawing.Color]::FromArgb(180, 255, 225)
+    $osChipValue.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $osChipValue.Location = New-Object System.Drawing.Point(38, 7)
+    $osChipValue.Size = New-Object System.Drawing.Size(84, 22)
+    [void]$osChip.Controls.Add($osChipValue)
+
+    $closeConfirm = New-Object System.Windows.Forms.Button
+    $closeConfirm.Text = 'X'
+    $closeConfirm.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $closeConfirm.ForeColor = [System.Drawing.Color]::FromArgb(112, 150, 180)
+    $closeConfirm.BackColor = [System.Drawing.Color]::FromArgb(9, 21, 34)
+    $closeConfirm.FlatStyle = 'Flat'
+    $closeConfirm.FlatAppearance.BorderSize = 0
+    $closeConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(68, 24, 34)
+    $closeConfirm.Location = New-Object System.Drawing.Point(570, 5)
+    $closeConfirm.Size = New-Object System.Drawing.Size(24, 24)
+    $closeConfirm.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $closeConfirm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    [void]$headerConfirm.Controls.Add($closeConfirm)
+
+    function Add-ConfirmField {
+        param(
+            [string]$Label,
+            [string]$Value,
+            [int]$X,
+            [int]$Y,
+            [int]$Width,
+            [int]$Height,
+            [System.Drawing.Color]$Accent,
+            [float]$ValueSize = 9
+        )
+
+        $field = New-Object System.Windows.Forms.Panel
+        $field.Location = New-Object System.Drawing.Point($X, $Y)
+        $field.Size = New-Object System.Drawing.Size($Width, $Height)
+        $field.BackColor = [System.Drawing.Color]::FromArgb(11, 23, 37)
+        [void]$formConfirm.Controls.Add($field)
+        Set-RoundedControl -Control $field -Radius 6
+
+        $rail = New-Object System.Windows.Forms.Panel
+        $rail.Location = New-Object System.Drawing.Point(0, 0)
+        $rail.Size = New-Object System.Drawing.Size(3, $Height)
+        $rail.BackColor = $Accent
+        [void]$field.Controls.Add($rail)
+
+        $caption = New-Object System.Windows.Forms.Label
+        $caption.Text = $Label
+        $caption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+        $caption.ForeColor = $Accent
+        $caption.Location = New-Object System.Drawing.Point(12, 8)
+        $caption.Size = New-Object System.Drawing.Size(($Width - 22), 13)
+        [void]$field.Controls.Add($caption)
+
+        $valueLabel = New-Object System.Windows.Forms.Label
+        $valueLabel.Text = if ([string]::IsNullOrWhiteSpace($Value)) { '-' } else { $Value }
+        $valueLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', $ValueSize)
+        $valueLabel.ForeColor = [System.Drawing.Color]::FromArgb(226, 240, 252)
+        $valueLabel.Location = New-Object System.Drawing.Point(12, 25)
+        $valueLabel.Size = New-Object System.Drawing.Size(($Width - 24), ($Height - 31))
+        $valueLabel.AutoEllipsis = $true
+        [void]$field.Controls.Add($valueLabel)
+    }
+
+    Add-ConfirmField 'PRODUTO' $Produto 20 92 560 70 ([System.Drawing.Color]::FromArgb(24, 185, 255)) 9.2
+    Add-ConfirmField 'SERIAL' $Serial 20 174 270 62 ([System.Drawing.Color]::FromArgb(132, 148, 255)) 10
+    Add-ConfirmField 'REFERENCIA' $Referencia 302 174 278 62 ([System.Drawing.Color]::FromArgb(255, 208, 96)) 9
+    Add-ConfirmField 'QUANTIDADE' $Quantidade 20 248 170 58 ([System.Drawing.Color]::FromArgb(24, 185, 255)) 9
+    Add-ConfirmField 'LOCALIZACAO' $Localizacao 202 248 378 58 ([System.Drawing.Color]::FromArgb(66, 232, 176)) 9
+    Add-ConfirmField 'SERVICOS' $Servicos 20 318 560 62 ([System.Drawing.Color]::FromArgb(255, 156, 98)) 8.5
+
+    $footerConfirm = New-Object System.Windows.Forms.Panel
+    $footerConfirm.Location = New-Object System.Drawing.Point(0, 396)
+    $footerConfirm.Size = New-Object System.Drawing.Size(600, 74)
+    $footerConfirm.BackColor = [System.Drawing.Color]::FromArgb(8, 17, 28)
+    [void]$formConfirm.Controls.Add($footerConfirm)
+    $footerConfirm.Add_Paint({
+        param($s, $e)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(22, 55, 78), 1)
+        $e.Graphics.DrawLine($line, 20, 0, ($s.Width - 20), 0)
+        $line.Dispose()
+    })
+
+    $footerStatus = New-Object System.Windows.Forms.Label
+    $footerStatus.Text = 'PRONTO PARA CADASTRAR'
+    $footerStatus.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+    $footerStatus.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $footerStatus.Location = New-Object System.Drawing.Point(22, 27)
+    $footerStatus.Size = New-Object System.Drawing.Size(190, 15)
+    [void]$footerConfirm.Controls.Add($footerStatus)
+
+    $btnBackConfirm = New-Object System.Windows.Forms.Button
+    $btnBackConfirm.Text = 'Voltar'
+    $btnBackConfirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+    $btnBackConfirm.ForeColor = [System.Drawing.Color]::FromArgb(155, 187, 212)
+    $btnBackConfirm.BackColor = [System.Drawing.Color]::FromArgb(14, 28, 43)
+    $btnBackConfirm.FlatStyle = 'Flat'
+    $btnBackConfirm.FlatAppearance.BorderSize = 1
+    $btnBackConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(36, 70, 104)
+    $btnBackConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(22, 43, 62)
+    $btnBackConfirm.Location = New-Object System.Drawing.Point(352, 18)
+    $btnBackConfirm.Size = New-Object System.Drawing.Size(96, 38)
+    $btnBackConfirm.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnBackConfirm.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    [void]$footerConfirm.Controls.Add($btnBackConfirm)
+    Set-RoundedControl -Control $btnBackConfirm -Radius 7
+
+    $btnCreateConfirm = New-Object System.Windows.Forms.Button
+    $btnCreateConfirm.Text = 'Criar OS'
+    $btnCreateConfirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+    $btnCreateConfirm.ForeColor = [System.Drawing.Color]::White
+    $btnCreateConfirm.BackColor = [System.Drawing.Color]::FromArgb(0, 110, 78)
+    $btnCreateConfirm.FlatStyle = 'Flat'
+    $btnCreateConfirm.FlatAppearance.BorderSize = 1
+    $btnCreateConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $btnCreateConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 145, 96)
+    $btnCreateConfirm.Location = New-Object System.Drawing.Point(458, 18)
+    $btnCreateConfirm.Size = New-Object System.Drawing.Size(120, 38)
+    $btnCreateConfirm.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnCreateConfirm.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    [void]$footerConfirm.Controls.Add($btnCreateConfirm)
+    Set-RoundedControl -Control $btnCreateConfirm -Radius 7
+
+    $formConfirm.AcceptButton = $btnCreateConfirm
+    $formConfirm.CancelButton = $btnBackConfirm
+    $resultConfirm = if ($Owner) { $formConfirm.ShowDialog($Owner) } else { $formConfirm.ShowDialog() }
+    $formConfirm.Dispose()
+    return ($resultConfirm -eq [System.Windows.Forms.DialogResult]::OK)
+}
+
+
 function Show-CadastroOsAltertagDraft {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = 'Cadastrar OS Altertag'
@@ -3988,13 +4216,16 @@ function Show-CadastroOsAltertagDraft {
         }
         $servicosMarcados = @($servChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text })
         $qtdSel = Get-ProdutoQuantidadeOsDisplayLocal $prodSel
-        $confirm = [System.Windows.Forms.MessageBox]::Show(
-            "Criar OS no Altertag para:`n`nOS atual: $(Format-OsCodigo -Numero $script:osNumero)`nProduto: $([string]$prodSel.texto)`nQuantidade: $(if ($qtdSel) { $qtdSel } else { '1,00' })`nSerial: $($txtSerialOs.Text.Trim())`nReferencia: $($btnGradeOs.Text.Trim())`nServicos: $(if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' })`nLocalizacao: Bancada tecnica",
-            'Confirmar cadastro',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question
-        )
-        if ($confirm -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $confirm = Show-CadastroOsConfirm `
+            -Owner $dlg `
+            -OsCodigo (Format-OsCodigo -Numero $script:osNumero) `
+            -Produto ([string]$prodSel.texto) `
+            -Quantidade $(if ($qtdSel) { $qtdSel } else { '1,00' }) `
+            -Serial ($txtSerialOs.Text.Trim()) `
+            -Referencia ($btnGradeOs.Text.Trim()) `
+            -Servicos $(if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' }) `
+            -Localizacao 'Bancada tecnica'
+        if (-not $confirm) { return }
 
         $btnCriar.Enabled = $false
         $btnCriar.Text = 'Criando...'

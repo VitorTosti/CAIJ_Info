@@ -47,6 +47,13 @@ Assert-True ($scriptText -match '\$gradeMenuOs\.MinimumSize\s*=\s*New-Object Sys
 Assert-True ($scriptText -match '\$gradeItem\.Size\s*=\s*New-Object System\.Drawing\.Size\(176,\s*30\)') 'itens possuem dimensoes estaveis'
 Assert-True ($scriptText -match '\$gradeMenuOs\.Add_Opening') 'menu sincroniza grade selecionada ao abrir'
 Assert-True ($scriptText -match '\$item\.Checked\s*=\s*\(\[string\]\$item\.Tag -eq \[string\]\$script:gradeCadastroOs\)') 'marcador representa grade atual'
+Assert-True ($scriptText -match 'function\s+Show-CadastroOsConfirm') 'cadastro usa modal moderno de confirmacao'
+Assert-True ($scriptText -match 'ALTERTAG / NOVA OS') 'modal identifica fluxo Altertag'
+foreach ($confirmLabel in @('PRODUTO', 'SERIAL', 'REFERENCIA', 'QUANTIDADE', 'LOCALIZACAO', 'SERVICOS')) {
+    Assert-True ($scriptText -match [regex]::Escape("'$confirmLabel'")) "modal mostra campo $confirmLabel"
+}
+Assert-True ($scriptText -match 'Show-CadastroOsConfirm\s+`\s*\r?\n\s*-Owner\s+\$dlg') 'cadastro abre modal moderno'
+Assert-True ($scriptText -notmatch "'Confirmar cadastro',\s*\r?\n\s*\[System\.Windows\.Forms\.MessageBoxButtons\]::YesNo") 'cadastro nao usa MessageBox antigo'
 Assert-True ($scriptText -match 'Test-CaijGradeRequiresObs') 'validacao de OBS usa regra central'
 Assert-True ($scriptText -match "\`$gradeTxt\s*=\s*.*'T - TRIAGEM'") 'previa encurta selo da triagem'
 
