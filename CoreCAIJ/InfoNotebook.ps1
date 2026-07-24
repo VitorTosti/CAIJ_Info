@@ -13,6 +13,75 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 
+if (-not ('CaijGradeMenuRenderer' -as [type])) {
+    $gradeMenuRendererSource = @'
+using System;
+using System.Drawing;
+using System.Windows.Forms;
+
+public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
+{
+    private static readonly Color Background = Color.FromArgb(10, 20, 33);
+    private static readonly Color Hover = Color.FromArgb(20, 48, 70);
+    private static readonly Color Border = Color.FromArgb(36, 70, 104);
+    private static readonly Color Text = Color.FromArgb(236, 245, 255);
+
+    public CaijGradeMenuRenderer()
+    {
+        RoundedEdges = false;
+    }
+
+    private static Color GetAccent(object rawTag)
+    {
+        string tag = Convert.ToString(rawTag).Trim().ToUpperInvariant();
+        if (tag == "A") return Color.FromArgb(66, 232, 176);
+        if (tag == "B") return Color.FromArgb(255, 208, 96);
+        if (tag.StartsWith("C - PINTURA")) return Color.FromArgb(255, 156, 98);
+        if (tag.StartsWith("T - TRIAGEM")) return Color.FromArgb(24, 185, 255);
+        if (tag == "RMA") return Color.FromArgb(241, 95, 122);
+        return Color.FromArgb(102, 134, 165);
+    }
+
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
+    {
+        using (var brush = new SolidBrush(Background))
+            e.Graphics.FillRectangle(brush, e.AffectedBounds);
+    }
+
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
+    {
+        Rectangle bounds = new Rectangle(Point.Empty, e.Item.Size);
+        using (var brush = new SolidBrush(e.Item.Selected ? Hover : Background))
+            e.Graphics.FillRectangle(brush, bounds);
+
+        using (var accent = new SolidBrush(GetAccent(e.Item.Tag)))
+            e.Graphics.FillRectangle(accent, 3, 5, 4, Math.Max(1, bounds.Height - 10));
+
+        ToolStripMenuItem menuItem = e.Item as ToolStripMenuItem;
+        if (menuItem != null && menuItem.Checked)
+        {
+            using (var marker = new SolidBrush(Text))
+                e.Graphics.FillEllipse(marker, 12, Math.Max(2, (bounds.Height - 5) / 2), 5, 5);
+        }
+    }
+
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
+    {
+        e.TextColor = e.Item.Enabled ? Text : Color.FromArgb(102, 134, 165);
+        base.OnRenderItemText(e);
+    }
+
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e)
+    {
+        Rectangle border = new Rectangle(0, 0, e.ToolStrip.Width - 1, e.ToolStrip.Height - 1);
+        using (var pen = new Pen(Border))
+            e.Graphics.DrawRectangle(pen, border);
+    }
+}
+'@
+    Add-Type -TypeDefinition $gradeMenuRendererSource -ReferencedAssemblies @('System.Windows.Forms', 'System.Drawing') -WarningAction SilentlyContinue
+}
+
 function Set-DoubleBuffered {
     param([System.Windows.Forms.Control]$Control)
     if (-not $Control) { return }

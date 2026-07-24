@@ -25,6 +25,20 @@ Assert-True ($scriptText -match 'Get-CaijGradeOptions') 'cadastro usa todas as g
 Assert-True ($scriptText -match 'ContextMenuStrip') 'cadastro abre menu de grades'
 Assert-True ($scriptText -match '\$btnGradeOs') 'referencia usa botao de grade'
 Assert-True ($scriptText -notmatch '\$txtGradeOs\s*=\s*New-Object System\.Windows\.Forms\.TextBox') 'referencia nao usa texto livre'
+Assert-True ($scriptText -match 'class\s+CaijGradeMenuRenderer') 'renderer exclusivo do menu de grades'
+Assert-True ($scriptText -match "StartsWith\(`"C - PINTURA`"") 'renderer agrupa grades C'
+Assert-True ($scriptText -match 'Color\.FromArgb\(66,\s*232,\s*176\)') 'renderer usa verde na grade A'
+Assert-True ($scriptText -match 'Color\.FromArgb\(255,\s*208,\s*96\)') 'renderer usa amarelo na grade B'
+Assert-True ($scriptText -match 'Color\.FromArgb\(255,\s*156,\s*98\)') 'renderer usa laranja nas grades C'
+Assert-True ($scriptText -match 'Color\.FromArgb\(24,\s*185,\s*255\)') 'renderer usa ciano na grade T'
+Assert-True ($scriptText -match 'Color\.FromArgb\(241,\s*95,\s*122\)') 'renderer usa vermelho no RMA'
+$rendererSourceMatch = [regex]::Match($scriptText, "(?s)\`$gradeMenuRendererSource\s*=\s*@'\r?\n(?<source>.*?)\r?\n'@")
+Assert-True $rendererSourceMatch.Success 'fonte C# do renderer pode ser extraida'
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+Add-Type -TypeDefinition $rendererSourceMatch.Groups['source'].Value -ReferencedAssemblies @('System.Windows.Forms', 'System.Drawing') -WarningAction SilentlyContinue
+$rendererInstance = New-Object CaijGradeMenuRenderer
+Assert-True ($rendererInstance -is [System.Windows.Forms.ToolStripProfessionalRenderer]) 'renderer C# compila e instancia'
 Assert-True ($scriptText -match 'Test-CaijGradeRequiresObs') 'validacao de OBS usa regra central'
 Assert-True ($scriptText -match "\`$gradeTxt\s*=\s*.*'T - TRIAGEM'") 'previa encurta selo da triagem'
 
