@@ -65,6 +65,8 @@ Assert-True ($scriptText -match 'BoxPreview\s+10\s+166\s+630\s+384\s+2') 'previa
 Assert-True ($scriptText -match 'B\s+318\s+166\s+2\s+218') 'previa divide configuracao e observacoes'
 Assert-True ($scriptText -match "L\s+'CONFIGURACAO'\s+22\s+173") 'previa identifica configuracao'
 Assert-True ($scriptText -match "L\s+'OBSERVACOES'\s+334\s+173") 'previa identifica observacoes'
+Assert-True ($scriptText -match '\$controlDeck\.SendToBack\(\)\s*\r?\n\s*foreach\s*\(\$previewControl') 'painel direito fica atras dos controles'
+Assert-True ($scriptText -match '\$previewControl\.BringToFront\(\)') 'controles da previa voltam para frente'
 
 $serverPath = Join-Path $PSScriptRoot 'ServidorImpressao.ps1'
 $serverText = Get-Content -Path $serverPath -Raw

@@ -4756,7 +4756,7 @@ $btnImprimir.Add_Click({
     $gradeLabel.Location = New-Object System.Drawing.Point(656, 101)
     $gradeLabel.Size = New-Object System.Drawing.Size(126, 20)
     $popup.Controls.Add($gradeLabel)
-    [void](New-SectionHairline -Parent $popup -X 788 -Y 111 -W 96)
+    $gradeHairline = New-SectionHairline -Parent $popup -X 788 -Y 111 -W 96
 
     $gradeIdleColor = [System.Drawing.Color]::FromArgb(13, 26, 40)
     $gradeHoverColor = [System.Drawing.Color]::FromArgb(23, 42, 60)
@@ -6265,6 +6265,24 @@ $btnImprimir.Add_Click({
             return
         }
     })
+
+    # O painel de fundo deve permanecer atras dos controles criados depois dele.
+    $controlDeck.SendToBack()
+    foreach ($previewControl in @(
+        $gradeAccentBar,
+        $gradeLabel,
+        $gradeHairline,
+        $obsPanel,
+        $osCard,
+        $lblFonteDados,
+        $btnAuto,
+        $btnManual
+    )) {
+        if ($previewControl) { $previewControl.BringToFront() }
+    }
+    foreach ($gradeControl in @($script:btnGrades.Values)) {
+        if ($gradeControl) { $gradeControl.BringToFront() }
+    }
 
     $resultado = $popup.ShowDialog()
 
