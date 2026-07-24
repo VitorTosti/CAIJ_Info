@@ -256,10 +256,24 @@ $produtoEmOutroAlmoxarifado = @{
         }
     )
 } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$produtoCriadoNaBancada = @{
+    data = @(
+        @{
+            id_produto = 82530104
+            id_almoxarifado = 31196
+            desc_produto = '5420 I5 16GB 256GB'
+        }
+    )
+} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 
 Assert-True (Test-VhsysProdutoLocalizacao -Response $produtoComLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196) 'confirma localizacao TECNICA_BT'
+Assert-True (Test-VhsysProdutoLocalizacao -Response $produtoCriadoNaBancada -IdProduto 82530104 -IdAlmoxarifado 31196) 'confirma almoxarifado retornado ao cadastrar produto'
 Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoSemLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita produto sem localizacao'
 Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoEmOutroAlmoxarifado -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita outro almoxarifado'
+
+$serverText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ServidorImpressao.ps1') -Raw
+Assert-True ($serverText -match 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor valida resposta do cadastro do produto'
+Assert-True ($serverText -notmatch '\$prodCheck\s*=\s*Invoke-VhsysJson') 'servidor nao consulta rota de produtos proibida depois do cadastro'
 
 $draftServicos = New-VhsysOrdemServicosPayload -Servicos @('troca de bateria', 'Troca SSD', '', 'troca de tela')
 Assert-Equal $draftServicos.Count 3 'payload servicos count'

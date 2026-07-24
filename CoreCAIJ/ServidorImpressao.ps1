@@ -1296,6 +1296,9 @@ function Test-VhsysProdutoLocalizacao {
 
     foreach ($produto in @($Response.data)) {
         if ([int]$produto.id_produto -ne $IdProduto) { continue }
+        if ($produto.PSObject.Properties['id_almoxarifado'] -and [int]$produto.id_almoxarifado -eq $IdAlmoxarifado) {
+            return $true
+        }
         $jsonLocalizacoes = ([string]$produto.json_localizacoes).Trim()
         if (-not $jsonLocalizacoes) { return $false }
         try {
@@ -1397,15 +1400,7 @@ function Add-VhsysProdutoNaOrdemServico {
     $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor -IdAlmoxarifado $almoxarifadoBancadaTecnicaId
     $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
 
-    $prodCheck = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Get' -TimeoutSec 15
-    $produtoConfirmado = @($prodCheck.data | Where-Object {
-        [int]$_.id_produto -eq $IdProduto -or
-        ([string]$_.desc_produto).Trim() -eq $ProdutoDescricao.Trim()
-    }).Count -gt 0
-    if (-not $produtoConfirmado) {
-        throw "OS $IdPedido nao confirmou o produto pela API. Verifique a OS manualmente antes de continuar."
-    }
-    if (-not (Test-VhsysProdutoLocalizacao -Response $prodCheck -IdProduto $IdProduto -IdAlmoxarifado $almoxarifadoBancadaTecnicaId)) {
+    if (-not (Test-VhsysProdutoLocalizacao -Response $prodResp -IdProduto $IdProduto -IdAlmoxarifado $almoxarifadoBancadaTecnicaId)) {
         throw "Produto da OS $IdPedido nao confirmou a localizacao TÉCNICA_BT. A OS nao foi concluida; corrija a localizacao manualmente."
     }
 

@@ -446,6 +446,9 @@ function Test-VhsysProdutoLocalizacao {
 
     foreach ($produto in @($Response.data)) {
         if ([int]$produto.id_produto -ne $IdProduto) { continue }
+        if ($produto.PSObject.Properties['id_almoxarifado'] -and [int]$produto.id_almoxarifado -eq $IdAlmoxarifado) {
+            return $true
+        }
         $jsonLocalizacoes = ([string]$produto.json_localizacoes).Trim()
         if (-not $jsonLocalizacoes) { return $false }
         try {
