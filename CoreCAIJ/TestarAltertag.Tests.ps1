@@ -234,8 +234,32 @@ Assert-Equal $draftProdutoLoc[0].desc_almoxarifado 'TÉCNICA_BT' 'payload produt
 Assert-Equal $draftProdutoLoc[0].qtde_saida '1,00' 'payload produto localizacao quantidade'
 $draftProdutoValorRuim = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.000000 2950.000000 3000.000000' -IdAlmoxarifado 31196
 Assert-Equal $draftProdutoValorRuim[0].valor_unit_produto '0.00' 'payload produto valor invalido normalizado'
-$draftProdutoSemLoc = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '2950.00' -IdAlmoxarifado 31196 -SemLocalizacao
-Assert-True (-not $draftProdutoSemLoc[0].PSObject.Properties['json_localizacoes']) 'payload produto fallback sem localizacao'
+
+$produtoComLocalizacao = @{
+    data = @(
+        @{
+            id_produto = 82530104
+            json_localizacoes = '[{"desc_almoxarifado":"TÉCNICA_BT","id_almoxarifado":"31196","qtde_saida":"1,00"}]'
+        }
+    )
+} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$produtoSemLocalizacao = @{
+    data = @(
+        @{ id_produto = 82530104; json_localizacoes = $null }
+    )
+} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$produtoEmOutroAlmoxarifado = @{
+    data = @(
+        @{
+            id_produto = 82530104
+            json_localizacoes = '[{"desc_almoxarifado":"OUTRO","id_almoxarifado":"999","qtde_saida":"1,00"}]'
+        }
+    )
+} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+
+Assert-True (Test-VhsysProdutoLocalizacao -Response $produtoComLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196) 'confirma localizacao TECNICA_BT'
+Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoSemLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita produto sem localizacao'
+Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoEmOutroAlmoxarifado -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita outro almoxarifado'
 
 $draftServicos = New-VhsysOrdemServicosPayload -Servicos @('troca de bateria', 'Troca SSD', '', 'troca de tela')
 Assert-Equal $draftServicos.Count 3 'payload servicos count'

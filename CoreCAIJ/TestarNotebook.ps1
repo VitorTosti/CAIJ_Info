@@ -310,7 +310,7 @@ $script:linhas += New-TestRow -Y 124 -Numero '3' -Titulo 'Som e Microfone' -Inst
     Start-Process 'ms-settings:sound'
     $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
     $synth.Volume = 100
-    $synth.SpeakAsync('Teste de audio.') | Out-Null
+    $synth.SpeakAsync('teste') | Out-Null
 }
 $script:linhas += New-TestRow -Y 186 -Numero '4' -Titulo 'Tela / Dead Pixel' -Instrucao 'Inspecionar cores, brilho e pixel' -AbrirAcao { Start-Process 'msedge.exe' -ArgumentList '-inprivate https://lcdtech.info/en/tests/dead.pixel.htm' }
 
@@ -351,7 +351,7 @@ $btnOpenAll = New-ActionButton -Text 'Abrir Todos' -X 16 -Y 438 -W 130 -H 38 `
         Start-Process 'ms-settings:sound'
         $synth = New-Object System.Speech.Synthesis.SpeechSynthesizer
         $synth.Volume = 100
-        $synth.SpeakAsync('Teste de audio.') | Out-Null
+        $synth.SpeakAsync('teste') | Out-Null
         Start-Sleep -Milliseconds 250
         Start-Process 'msedge.exe' -ArgumentList '-inprivate https://lcdtech.info/en/tests/dead.pixel.htm'
     }

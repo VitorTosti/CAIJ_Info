@@ -41,6 +41,7 @@ function setStatus(message, type = "") {
 
 function gradeValue() {
   if (state.grade === "C") return `C - PINTURA ${state.paint}`;
+  if (state.grade === "T") return "T - TRIAGEM";
   return state.grade;
 }
 

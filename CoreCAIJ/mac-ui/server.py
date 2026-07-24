@@ -109,6 +109,8 @@ def validate_print_request(grade, obs):
         return "Observacoes sao obrigatorias para Grade B."
     if re.match(r"^C\s*-\s*PINTURA", grade_text) and not obs_text:
         return "Observacoes sao obrigatorias para Grade C - Pintura."
+    if re.match(r"^T\s*-\s*TRIAGEM", grade_text) and not obs_text:
+        return "Observacoes sao obrigatorias para Grade T - Triagem."
     return ""
 
 

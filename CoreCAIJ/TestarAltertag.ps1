@@ -412,8 +412,7 @@ function New-VhsysOrdemProdutoPayload {
         [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][string]$Descricao,
         [string]$ValorUnitario = '0.00',
-        [int]$IdAlmoxarifado = 31196,
-        [switch]$SemLocalizacao
+        [int]$IdAlmoxarifado = 31196
     )
 
     $payload = [ordered]@{
@@ -424,20 +423,43 @@ function New-VhsysOrdemProdutoPayload {
         id_almoxarifado = $IdAlmoxarifado
     }
 
-    if (-not $SemLocalizacao) {
-        $payload.json_localizacoes = @(
-            [ordered]@{
-                desc_almoxarifado = 'TÉCNICA_BT'
-                id_almoxarifado = ([string]$IdAlmoxarifado)
-                controla_lote = '0'
-                qtde_atual = '1,00'
-                qtde_saida = '1,00'
-                id_lote = '0'
-            }
-        ) | ConvertTo-Json -Compress
-    }
+    $payload.json_localizacoes = @(
+        [ordered]@{
+            desc_almoxarifado = 'TÉCNICA_BT'
+            id_almoxarifado = ([string]$IdAlmoxarifado)
+            controla_lote = '0'
+            qtde_atual = '1,00'
+            qtde_saida = '1,00'
+            id_lote = '0'
+        }
+    ) | ConvertTo-Json -Compress
 
     @([pscustomobject]$payload)
+}
+
+function Test-VhsysProdutoLocalizacao {
+    param(
+        [Parameter(Mandatory=$true)]$Response,
+        [Parameter(Mandatory=$true)][int]$IdProduto,
+        [Parameter(Mandatory=$true)][int]$IdAlmoxarifado
+    )
+
+    foreach ($produto in @($Response.data)) {
+        if ([int]$produto.id_produto -ne $IdProduto) { continue }
+        $jsonLocalizacoes = ([string]$produto.json_localizacoes).Trim()
+        if (-not $jsonLocalizacoes) { return $false }
+        try {
+            foreach ($localizacao in @($jsonLocalizacoes | ConvertFrom-Json)) {
+                if ([int]$localizacao.id_almoxarifado -eq $IdAlmoxarifado) {
+                    return $true
+                }
+            }
+        } catch {
+            return $false
+        }
+        return $false
+    }
+    return $false
 }
 
 function New-VhsysOrdemServicosPayload {

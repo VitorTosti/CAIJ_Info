@@ -95,6 +95,8 @@ Assert-Equal (Resolve-CaijGradeSelection -Grade 'C' -Pintura '2') 'C - PINTURA 2
 Assert-Equal (Resolve-CaijGradeSelection -Grade 'C' -Pintura 'PINTURA 3') 'C - PINTURA 3' 'grade c pintura por texto'
 Assert-Equal (Resolve-CaijGradeSelection -Grade 'C - PINTURA 1') 'C - PINTURA 1' 'grade c pintura ja normalizada'
 Assert-Equal (Resolve-CaijGradeSelection -Grade 'B') 'B' 'grade b preservada'
+Assert-Equal (Resolve-CaijGradeSelection -Grade 'T') 'T - TRIAGEM' 'grade t vira triagem'
+Assert-Equal (Resolve-CaijGradeSelection -Grade 'T - TRIAGEM') 'T - TRIAGEM' 'grade t triagem preservada'
 Assert-True ((Get-ServidorCandidates) -contains 'http://192.168.15.127:9100') 'fallback do servidor usa IP atual'
 Assert-True (-not ((Get-ServidorCandidates) -contains 'http://192.168.15.54:9100')) 'fallback do servidor nao usa IP antigo'
 

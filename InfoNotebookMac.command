@@ -83,6 +83,11 @@ normalize_grade() {
     return
   fi
 
+  if [[ "$grade" =~ '^(GRADE[[:space:]]*)?T([[:space:]]*-[[:space:]]*TRIAGEM)?$' ]]; then
+    echo "T - TRIAGEM"
+    return
+  fi
+
   echo "$grade"
 }
 
@@ -476,7 +481,7 @@ dialog_set_os_manual() {
 
 dialog_print_label() {
   local grade pintura obs include_choice include_os preview confirm payload base
-  grade="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|RMA")"
+  grade="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|T|RMA")"
   [[ "$grade" == "__CAIJ_CANCEL__" ]] && return
 
   if [[ "$grade" == "C" ]]; then
@@ -490,8 +495,8 @@ dialog_print_label() {
   while true; do
     obs="$(dialog_input "Observacoes para etiqueta" "")"
     [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
-    if [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA' ) && -z "$(trim "$obs")" ]]; then
-      dialog_message "CAIJ Info Notebook Mac" "Observacoes sao obrigatorias para Grade B e Grade C - Pintura."
+    if [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA|^T[[:space:]]*-[[:space:]]*TRIAGEM' ) && -z "$(trim "$obs")" ]]; then
+      dialog_message "CAIJ Info Notebook Mac" "Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem."
     else
       break
     fi
@@ -592,7 +597,7 @@ edit_manual() {
 
 print_label() {
   local grade pintura obs inc include_os payload base confirm
-  read "grade?Grade (A/B/C/RMA) [A]: "
+  read "grade?Grade (A/B/C/T/RMA) [A]: "
   if [[ -z "$grade" ]]; then grade="A"; fi
   if [[ "$(trim "$grade" | tr '[:lower:]' '[:upper:]')" == "C" ]]; then
     while true; do
@@ -605,8 +610,8 @@ print_label() {
     grade="$(normalize_grade "$grade" "")"
   fi
   read "obs?Observacoes para etiqueta: "
-  while [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA' ) && -z "$(trim "$obs")" ]]; do
-    echo "Observacoes sao obrigatorias para Grade B e Grade C - Pintura."
+  while [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA|^T[[:space:]]*-[[:space:]]*TRIAGEM' ) && -z "$(trim "$obs")" ]]; do
+    echo "Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem."
     read "obs?Observacoes para etiqueta: "
   done
   read "inc?Incluir OS na etiqueta? (S/n): "

@@ -289,6 +289,7 @@ function Resolve-CaijGradeSelection {
     }
 
     if ($gradeLimpa -eq 'RMA') { return 'RMA' }
+    if ($gradeLimpa -match '^(?:GRADE\s*)?T(?:\s*-\s*TRIAGEM)?$') { return 'T - TRIAGEM' }
     if ($gradeLimpa -in @('A','B')) { return $gradeLimpa }
     return $gradeLimpa
 }
@@ -584,7 +585,7 @@ function Start-InfoNotebookMac {
 
         switch ($op) {
             '1' {
-                $grade = Read-Host 'Grade (A/B/C/RMA) [A]'
+                $grade = Read-Host 'Grade (A/B/C/T/RMA) [A]'
                 if (-not $grade) { $grade = 'A' }
                 if ($grade.Trim() -match '^(?i:C)$') {
                     do {
@@ -598,8 +599,8 @@ function Start-InfoNotebookMac {
                     $grade = Resolve-CaijGradeSelection -Grade $grade
                 }
                 $obs = Read-Host 'Observacoes para etiqueta'
-                while (($grade -eq 'B' -or $grade -match '^C\s*-\s*PINTURA') -and [string]::IsNullOrWhiteSpace($obs)) {
-                    Write-Host 'Observacoes sao obrigatorias para Grade B e Grade C - Pintura.' -ForegroundColor Yellow
+                while (($grade -eq 'B' -or $grade -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obs)) {
+                    Write-Host 'Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem.' -ForegroundColor Yellow
                     $obs = Read-Host 'Observacoes para etiqueta'
                 }
                 $inc = Read-Host 'Incluir OS na etiqueta? (S/n)'

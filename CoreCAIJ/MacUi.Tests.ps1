@@ -61,6 +61,8 @@ assert payload["obs"] == "Pintura tampa"
 assert mod.validate_print_request("A", "") == ""
 assert mod.validate_print_request("B", "") != ""
 assert mod.validate_print_request("C - PINTURA 2", "") != ""
+assert mod.validate_print_request("T - TRIAGEM", "") != ""
+assert mod.validate_print_request("T - TRIAGEM", "Triagem inicial") == ""
 assert mod.normalize_server_url("192.168.15.127") == "http://192.168.15.127:9100"
 print("OK: python mac-ui helpers")
 '@

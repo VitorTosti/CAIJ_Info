@@ -9,7 +9,7 @@ $impressora = 'LABEL'
 $clientePadrao = 'CAIJ SERVICOS E COMERCIO LTDA'
 $clientePadraoId = 39509812
 $almoxarifadoBancadaTecnicaId = 31196
-$tecnicosPermitidos = @('HYURI', 'HYRIDES', 'VITOR', 'LUCAS')
+$tecnicosPermitidos = @('HYURI', 'HYRIDES', 'VITOR', 'LUCAS', 'ERICK')
 $mapaProdutosArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'mapa_produtos.json'
 $desktopUsuario = [Environment]::GetFolderPath('Desktop')
 $produtosCsvPadrao = Join-Path $desktopUsuario 'produtos_1019993.csv'
@@ -853,10 +853,20 @@ function ConvertFrom-AltertagEnvText {
         $values[$parts[0].Trim()] = $parts[1].Trim().Trim('"').Trim("'")
     }
 
+    $apiBaseUrl = if ($values['ALTERTAG_API_BASE_URL']) {
+        [string]$values['ALTERTAG_API_BASE_URL']
+    } elseif ($values['ALTERTAG_BASE_URL'] -and ([string]$values['ALTERTAG_BASE_URL']) -match '/v\d+/?$') {
+        [string]$values['ALTERTAG_BASE_URL']
+    } else {
+        $altertagApiBaseUrlPadrao
+    }
+    $accessToken = if ($values['ALTERTAG_ACCESS_TOKEN']) { [string]$values['ALTERTAG_ACCESS_TOKEN'] } else { [string]$values['ALTERTAG_API_KEY'] }
+    $secretAccessToken = if ($values['ALTERTAG_SECRET_ACCESS_TOKEN']) { [string]$values['ALTERTAG_SECRET_ACCESS_TOKEN'] } else { [string]$values['ALTERTAG_API_SECRET'] }
+
     [pscustomobject]@{
-        ApiBaseUrl = if ($values['ALTERTAG_API_BASE_URL']) { ([string]$values['ALTERTAG_API_BASE_URL']).TrimEnd('/') } else { $altertagApiBaseUrlPadrao }
-        AccessToken = [string]$values['ALTERTAG_API_KEY']
-        SecretAccessToken = [string]$values['ALTERTAG_API_SECRET']
+        ApiBaseUrl = $apiBaseUrl.TrimEnd('/')
+        AccessToken = $accessToken
+        SecretAccessToken = $secretAccessToken
     }
 }
 
@@ -866,7 +876,7 @@ function Read-AltertagApiConfig {
     }
     $cfg = ConvertFrom-AltertagEnvText -Text (Get-Content -LiteralPath $altertagEnvArquivo -Raw)
     if ([string]::IsNullOrWhiteSpace($cfg.AccessToken) -or [string]::IsNullOrWhiteSpace($cfg.SecretAccessToken)) {
-        throw 'ALTERTAG_API_KEY e ALTERTAG_API_SECRET precisam estar preenchidos no altertag.env.'
+        throw 'ALTERTAG_ACCESS_TOKEN/ALTERTAG_SECRET_ACCESS_TOKEN ou ALTERTAG_API_KEY/ALTERTAG_API_SECRET precisam estar preenchidos no altertag.env.'
     }
     return $cfg
 }
@@ -1252,8 +1262,7 @@ function New-VhsysOrdemProdutoPayload {
         [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][string]$Descricao,
         [string]$ValorUnitario = '0.00',
-        [int]$IdAlmoxarifado = $almoxarifadoBancadaTecnicaId,
-        [switch]$SemLocalizacao
+        [int]$IdAlmoxarifado = $almoxarifadoBancadaTecnicaId
     )
 
     $payload = [ordered]@{
@@ -1264,20 +1273,43 @@ function New-VhsysOrdemProdutoPayload {
         id_almoxarifado = $IdAlmoxarifado
     }
 
-    if (-not $SemLocalizacao) {
-        $payload.json_localizacoes = @(
-            [ordered]@{
-                desc_almoxarifado = 'TÉCNICA_BT'
-                id_almoxarifado = ([string]$IdAlmoxarifado)
-                controla_lote = '0'
-                qtde_atual = '1,00'
-                qtde_saida = '1,00'
-                id_lote = '0'
-            }
-        ) | ConvertTo-Json -Compress
-    }
+    $payload.json_localizacoes = @(
+        [ordered]@{
+            desc_almoxarifado = 'TÉCNICA_BT'
+            id_almoxarifado = ([string]$IdAlmoxarifado)
+            controla_lote = '0'
+            qtde_atual = '1,00'
+            qtde_saida = '1,00'
+            id_lote = '0'
+        }
+    ) | ConvertTo-Json -Compress
 
     @([pscustomobject]$payload)
+}
+
+function Test-VhsysProdutoLocalizacao {
+    param(
+        [Parameter(Mandatory=$true)]$Response,
+        [Parameter(Mandatory=$true)][int]$IdProduto,
+        [Parameter(Mandatory=$true)][int]$IdAlmoxarifado
+    )
+
+    foreach ($produto in @($Response.data)) {
+        if ([int]$produto.id_produto -ne $IdProduto) { continue }
+        $jsonLocalizacoes = ([string]$produto.json_localizacoes).Trim()
+        if (-not $jsonLocalizacoes) { return $false }
+        try {
+            foreach ($localizacao in @($jsonLocalizacoes | ConvertFrom-Json)) {
+                if ([int]$localizacao.id_almoxarifado -eq $IdAlmoxarifado) {
+                    return $true
+                }
+            }
+        } catch {
+            return $false
+        }
+        return $false
+    }
+    return $false
 }
 
 function New-VhsysOrdemServicosPayload {
@@ -1363,29 +1395,18 @@ function Add-VhsysProdutoNaOrdemServico {
 
     $prodPath = "/ordens-servico/{0}/produtos" -f $IdOrdem
     $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor -IdAlmoxarifado $almoxarifadoBancadaTecnicaId
-    try {
-        $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
-    } catch {
-        $erroComLocalizacao = $_.Exception.Message
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Produto com localizacao falhou na OS $IdPedido; tentando sem localizacao: $erroComLocalizacao"
-        $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor -IdAlmoxarifado $almoxarifadoBancadaTecnicaId -SemLocalizacao
-        $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
-    }
+    $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
 
-    $produtoConfirmado = $false
-    try {
-        $prodCheck = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Get' -TimeoutSec 15
-        foreach ($p in @($prodCheck.data)) {
-            if ([int]$p.id_produto -eq $IdProduto -or ([string]$p.desc_produto).Trim() -eq $ProdutoDescricao.Trim()) {
-                $produtoConfirmado = $true
-                break
-            }
-        }
-    } catch {
-        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Nao foi possivel confirmar produto da OS ${IdPedido}: $($_.Exception.Message)"
-    }
+    $prodCheck = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Get' -TimeoutSec 15
+    $produtoConfirmado = @($prodCheck.data | Where-Object {
+        [int]$_.id_produto -eq $IdProduto -or
+        ([string]$_.desc_produto).Trim() -eq $ProdutoDescricao.Trim()
+    }).Count -gt 0
     if (-not $produtoConfirmado) {
         throw "OS $IdPedido nao confirmou o produto pela API. Verifique a OS manualmente antes de continuar."
+    }
+    if (-not (Test-VhsysProdutoLocalizacao -Response $prodCheck -IdProduto $IdProduto -IdAlmoxarifado $almoxarifadoBancadaTecnicaId)) {
+        throw "Produto da OS $IdPedido nao confirmou a localizacao TÉCNICA_BT. A OS nao foi concluida; corrija a localizacao manualmente."
     }
 
     return $prodResp
@@ -1447,7 +1468,7 @@ function New-VhsysOrdemServico {
     )
 
     if (-not ($tecnicosPermitidos -contains $Tecnico.Trim().ToUpper())) {
-        throw 'Tecnico invalido. Use: Lucas, Hyrides ou Vitor'
+        throw 'Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick'
     }
     if (-not $Serial.Trim()) { throw 'Campo serial obrigatorio' }
     if ($IdProduto -lt 1) { throw 'Produto sem id_produto valido' }
@@ -2763,7 +2784,7 @@ while ($listener.IsListening) {
                         $json = '{"status":"erro","mensagem":"Campo serial obrigatorio"}'
                         $response.StatusCode = 400
                     } elseif (-not ($tecnicosPermitidos -contains $tecReq)) {
-                        $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides ou Vitor"}'
+                        $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick"}'
                         $response.StatusCode = 400
                     } else {
                         $resProduto = Resolve-ProdutoCodigo -Modelo $modeloReq -Cpu $cpuReq -Ram $ramReq -Disco $discoReq -ProdutoCodigoManual $codManual
@@ -2842,7 +2863,7 @@ while ($listener.IsListening) {
                     $json = '{"status":"erro","mensagem":"Campo serial obrigatorio"}'
                     $response.StatusCode = 400
                 } elseif (-not ($tecnicosPermitidos -contains $tecReq)) {
-                    $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides ou Vitor"}'
+                    $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick"}'
                     $response.StatusCode = 400
                 } else {
                     $resProduto = Resolve-ProdutoCodigo -Modelo $modeloReq -Cpu $cpuReq -Ram $ramReq -Disco $discoReq -ProdutoCodigoManual $codManual
@@ -3065,6 +3086,8 @@ while ($listener.IsListening) {
             if ($gradeRaw -eq 'RNA') { $gradeRaw = 'RMA' }
             if ($gradeRaw -match '^C\s*-\s*PINTURA\s*([123])$') {
                 $grade = "C - PINTURA $($matches[1])"
+            } elseif ($gradeRaw -match '^(?:GRADE\s*)?T(?:\s*-\s*TRIAGEM)?$') {
+                $grade = 'T - TRIAGEM'
             } elseif ($gradeRaw -in @('A','B','RMA')) {
                 $grade = $gradeRaw
             } else {
@@ -3110,6 +3133,8 @@ while ($listener.IsListening) {
             if ($grade) {
                 if ($grade -match '^C\s*-\s*PINTURA\s*([123])$') {
                     $gradeBadge = "GRADE C - PINTURA $($matches[1])"
+                } elseif ($grade -match '^T\s*-\s*TRIAGEM$') {
+                    $gradeBadge = 'GRADE T - TRIAGEM'
                 } else {
                     $gradeBadge = $grade
                 }

@@ -4220,7 +4220,7 @@ $btnImprimir.Add_Click({
 
         # Grade em caixa
         if ($gradeEfetiva) {
-            $gradeTxt = if ($gradeEfetiva -eq 'RMA') { 'RMA' } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') { "GRADE C - PINTURA $($matches[1])" } else { "GRADE: $gradeEfetiva" }
+            $gradeTxt = if ($gradeEfetiva -eq 'RMA') { 'RMA' } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') { "GRADE C - PINTURA $($matches[1])" } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') { 'GRADE T - TRIAGEM' } else { "GRADE: $gradeEfetiva" }
             $gradeFont = if ($gradeTxt.Length -gt 13) { $fNormB } else { $fHeader }
             B 340 11 134 2
             B 340 34 134 2
@@ -4341,6 +4341,7 @@ $btnImprimir.Add_Click({
         'A' = [System.Drawing.Color]::FromArgb(18, 160, 92)
         'B' = [System.Drawing.Color]::FromArgb(214, 154, 36)
         'C' = [System.Drawing.Color]::FromArgb(232, 102, 34)
+        'T' = [System.Drawing.Color]::FromArgb(39, 164, 186)
         'RMA' = [System.Drawing.Color]::FromArgb(208, 58, 82)
     }
     # Variacoes derivadas: fundo tintado (escuro na cor da grade) e texto claro na cor da grade
@@ -4357,6 +4358,7 @@ $btnImprimir.Add_Click({
         @{L='A'; D='Perfeito'},
         @{L='B'; D='Detalhes'},
         @{L='C'; D='Pintura'},
+        @{L='T'; D='Triagem'},
         @{L='RMA'; D='Defeitos'}
     )
 
@@ -4526,8 +4528,8 @@ $btnImprimir.Add_Click({
         $btnG.FlatAppearance.BorderColor = if ($g.L -eq 'A') { $coresGrade[$g.L] } else { $coresGradeBorda[$g.L] }
         $btnG.FlatAppearance.BorderSize  = if ($g.L -eq 'A') { 2 } else { 1 }
         $btnG.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-        $btnG.Location = New-Object System.Drawing.Point((16 + ($gradeIndex * 120)), 358)
-        $btnG.Size     = New-Object System.Drawing.Size(114, 42)
+        $btnG.Location = New-Object System.Drawing.Point((16 + ($gradeIndex * 96)), 358)
+        $btnG.Size     = New-Object System.Drawing.Size(90, 42)
         $btnG.Tag      = $g.L
         $btnG.Cursor   = [System.Windows.Forms.Cursors]::Hand
         $btnG.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(([int]($coresGrade[$g.L].R * 0.24) + 8), ([int]($coresGrade[$g.L].G * 0.24) + 14), ([int]($coresGrade[$g.L].B * 0.24) + 22))
@@ -4550,6 +4552,10 @@ $btnImprimir.Add_Click({
                 $script:pinturaOpcaoAtual = $pintura
                 $script:gradeAtual = "C - $pintura"
                 Set-AppStatus -Texto "Grade C selecionada: $pintura" -Cor $cYellow
+            } elseif ($letraSel -eq 'T') {
+                $script:pinturaOpcaoAtual = ''
+                $script:gradeAtual = 'T - TRIAGEM'
+                Set-AppStatus -Texto 'Grade T selecionada: Triagem' -Cor $cAccent
             } else {
                 $script:pinturaOpcaoAtual = ''
                 $script:gradeAtual = $letraSel
@@ -4559,14 +4565,14 @@ $btnImprimir.Add_Click({
             & $script:UpdateConfirmState
         })
         $btnG.Add_MouseEnter({
-            $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
+            $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'T' -and ([string]$script:gradeAtual) -match '^T\s*-\s*TRIAGEM') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
             if (-not $isSelected) {
                 $this.Location = New-Object System.Drawing.Point($origPos.X, ($origPos.Y - 1))
                 $this.FlatAppearance.BorderSize = 2
             }
         }.GetNewClosure())
         $btnG.Add_MouseLeave({
-            $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
+            $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'T' -and ([string]$script:gradeAtual) -match '^T\s*-\s*TRIAGEM') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
             if (-not $isSelected) {
                 $this.Location = $origPos
                 $this.FlatAppearance.BorderSize = 1
@@ -4584,6 +4590,8 @@ $btnImprimir.Add_Click({
             $btn = $script:btnGrades[$key]
             if ($key -eq 'C') {
                 $btn.Text = if ($script:pinturaOpcaoAtual) { "C`r`n$($script:pinturaOpcaoAtual)" } else { "C`r`nPintura" }
+            } elseif ($key -eq 'T') {
+                $btn.Text = "T`r`nTriagem"
             } elseif ($key -eq 'RMA') {
                 $btn.Text = "RMA`r`nDefeitos"
             }
@@ -4599,7 +4607,7 @@ $btnImprimir.Add_Click({
                     $btn.FlatAppearance.BorderColor = $coresGrade['RMA']
                     $btn.ForeColor = [System.Drawing.Color]::White
                 }
-            } elseif (($btn.Tag -eq $script:gradeAtual) -or ($btn.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA')) {
+            } elseif (($btn.Tag -eq $script:gradeAtual) -or ($btn.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($btn.Tag -eq 'T' -and ([string]$script:gradeAtual) -match '^T\s*-\s*TRIAGEM')) {
                 $btn.Enabled = $true
                 $btn.BackColor = $coresGrade[$key]
                 $btn.FlatAppearance.BorderSize = 2
@@ -5134,6 +5142,7 @@ $btnImprimir.Add_Click({
     [void]$cmbTecnico.Items.Add('Hyrides')
     [void]$cmbTecnico.Items.Add('Vitor')
     [void]$cmbTecnico.Items.Add('Lucas')
+    [void]$cmbTecnico.Items.Add('Erick')
     $cmbTecnico.SelectedIndex = 1
     $triCard.Controls.Add($cmbTecnico)
 
@@ -5240,7 +5249,7 @@ $btnImprimir.Add_Click({
     $btnConfirmar.Location = New-Object System.Drawing.Point(332, 650); $btnConfirmar.Size = New-Object System.Drawing.Size(162, 44)
     $btnConfirmar.Add_Click({
         $obsTexto = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
+        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
             [System.Windows.Forms.MessageBox]::Show(
                 "Para imprimir com grade $($script:gradeAtual), descreva os detalhes encontrados em OBSERVACOES.",
                 'Observacao obrigatoria',
@@ -5779,7 +5788,7 @@ $btnImprimir.Add_Click({
     $btnConfirmar.Size = New-Object System.Drawing.Size(162, 34)
     $script:UpdateConfirmState = {
         $obsTextoSt = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        $needsObs = ($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA')
+        $needsObs = ($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM')
         if ($needsObs -and [string]::IsNullOrWhiteSpace($obsTextoSt)) {
             $btnConfirmar.Text = 'Falta OBS'
             $btnConfirmar.BackColor = [System.Drawing.Color]::FromArgb(95, 72, 12)
@@ -5795,7 +5804,7 @@ $btnImprimir.Add_Click({
         $btnConfirmar.Text = 'Validando...'
         [System.Windows.Forms.Application]::DoEvents()
         $obsTexto = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
+        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
             [System.Windows.Forms.MessageBox]::Show(
                 "Para imprimir com grade $($script:gradeAtual), voce precisa preencher OBSERVACOES com os detalhes encontrados na maquina.",
                 'Observacao obrigatoria',
