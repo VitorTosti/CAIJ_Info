@@ -7,6 +7,8 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $NL = [Environment]::NewLine
 
+. (Join-Path $PSScriptRoot 'GradeRules.ps1')
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
