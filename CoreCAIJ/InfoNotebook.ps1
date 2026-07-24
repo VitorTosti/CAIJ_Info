@@ -4381,73 +4381,124 @@ $btnImprimir.Add_Click({
     # ================================================
     $popup = New-Object System.Windows.Forms.Form
     $popup.Text            = 'Previa de Impressao'
-    $popup.Size            = New-Object System.Drawing.Size(530, 680)
+    $popup.AutoScaleMode   = [System.Windows.Forms.AutoScaleMode]::None
+    $popup.ClientSize      = New-Object System.Drawing.Size(920, 660)
     $popup.StartPosition   = 'CenterScreen'
-    $popup.BackColor       = [System.Drawing.Color]::FromArgb(4, 9, 16)
-    $popup.FormBorderStyle = 'FixedDialog'
+    $popup.BackColor       = [System.Drawing.Color]::FromArgb(5, 11, 19)
+    $popup.FormBorderStyle = 'None'
     $popup.MaximizeBox     = $false
     $popup.MinimizeBox     = $false
     $popup.TopMost         = $true
     $popup.Font            = $fUI
     $popup.KeyPreview      = $true
+    Set-DoubleBuffered $popup
+    Set-RoundedControl -Control $popup -Radius 12
+    $popup.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+    $popup.Add_Paint({
+        param($s, $e)
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(31, 91, 126), 1)
+        $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+        $border.Dispose()
+    })
 
     $headerAccent = New-Object System.Windows.Forms.Panel
-    $headerAccent.Location = New-Object System.Drawing.Point(16, 12)
-    $headerAccent.Size = New-Object System.Drawing.Size(4, 32)
+    $headerAccent.Location = New-Object System.Drawing.Point(0, 0)
+    $headerAccent.Size = New-Object System.Drawing.Size(5, 72)
     $headerAccent.BackColor = $cAccent
     $popup.Controls.Add($headerAccent)
-    Set-RoundedControl -Control $headerAccent -Radius 2
+
+    $headerSurface = New-Object System.Windows.Forms.Panel
+    $headerSurface.Location = New-Object System.Drawing.Point(5, 0)
+    $headerSurface.Size = New-Object System.Drawing.Size(915, 72)
+    $headerSurface.BackColor = [System.Drawing.Color]::FromArgb(8, 20, 32)
+    $popup.Controls.Add($headerSurface)
+    $headerSurface.Add_Paint({
+        param($s, $e)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(24, 185, 255), 2)
+        $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
+        $line.Dispose()
+    })
+
+    $popEyebrow = New-Object System.Windows.Forms.Label
+    $popEyebrow.Text = 'IMPRESSAO / ETIQUETA TERMICA'
+    $popEyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+    $popEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(79, 185, 231)
+    $popEyebrow.Location = New-Object System.Drawing.Point(19, 9)
+    $popEyebrow.Size = New-Object System.Drawing.Size(260, 14)
+    $headerSurface.Controls.Add($popEyebrow)
 
     $popTitle = New-Object System.Windows.Forms.Label
-    $popTitle.Text = 'Previa da etiqueta'
-    $popTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
+    $popTitle.Text = 'Previa de impressao'
+    $popTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
     $popTitle.ForeColor = [System.Drawing.Color]::FromArgb(224, 244, 255)
-    $popTitle.Location = New-Object System.Drawing.Point(28, 8); $popTitle.Size = New-Object System.Drawing.Size(250, 24)
-    $popup.Controls.Add($popTitle)
+    $popTitle.Location = New-Object System.Drawing.Point(17, 25)
+    $popTitle.Size = New-Object System.Drawing.Size(310, 28)
+    $headerSurface.Controls.Add($popTitle)
 
     $popSub = New-Object System.Windows.Forms.Label
-    $popSub.Text = 'Conferencia visual antes da impressao'
-    $popSub.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+    $popSub.Text = 'A imagem abaixo acompanha o layout enviado para a impressora'
+    $popSub.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
     $popSub.ForeColor = $cMuted
-    $popSub.Location = New-Object System.Drawing.Point(28, 31)
-    $popSub.Size = New-Object System.Drawing.Size(240, 16)
-    $popup.Controls.Add($popSub)
+    $popSub.Location = New-Object System.Drawing.Point(20, 52)
+    $popSub.Size = New-Object System.Drawing.Size(410, 15)
+    $headerSurface.Controls.Add($popSub)
 
     $popChip = New-Object System.Windows.Forms.Panel
-    $popChip.Location = New-Object System.Drawing.Point(356, 16)
-    $popChip.Size = New-Object System.Drawing.Size(138, 24)
-    $popChip.BackColor = [System.Drawing.Color]::FromArgb(10, 30, 44)
+    $popChip.Location = New-Object System.Drawing.Point(718, 21)
+    $popChip.Size = New-Object System.Drawing.Size(142, 32)
+    $popChip.BackColor = [System.Drawing.Color]::FromArgb(7, 42, 54)
     $popChip.BorderStyle = 'None'
-    $popup.Controls.Add($popChip)
-    Set-RoundedControl -Control $popChip -Radius 12
+    $headerSurface.Controls.Add($popChip)
+    Set-RoundedControl -Control $popChip -Radius 8
 
     $popChipText = New-Object System.Windows.Forms.Label
-    $popChipText.Text = '78x48 mm'
-    $popChipText.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
-    $popChipText.ForeColor = [System.Drawing.Color]::FromArgb(158, 222, 255)
+    $popChipText.Text = '80 x 50 mm'
+    $popChipText.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+    $popChipText.ForeColor = [System.Drawing.Color]::FromArgb(132, 231, 255)
     $popChipText.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-    $popChipText.Location = New-Object System.Drawing.Point(0, 4)
-    $popChipText.Size = New-Object System.Drawing.Size(138, 14)
+    $popChipText.Location = New-Object System.Drawing.Point(0, 7)
+    $popChipText.Size = New-Object System.Drawing.Size(142, 18)
     $popChip.Controls.Add($popChipText)
 
+    $popClose = New-Object System.Windows.Forms.Button
+    $popClose.Text = 'X'
+    $popClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $popClose.ForeColor = [System.Drawing.Color]::FromArgb(124, 160, 188)
+    $popClose.BackColor = $headerSurface.BackColor
+    $popClose.FlatStyle = 'Flat'
+    $popClose.FlatAppearance.BorderSize = 0
+    $popClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(68, 24, 34)
+    $popClose.Location = New-Object System.Drawing.Point(878, 8)
+    $popClose.Size = New-Object System.Drawing.Size(28, 28)
+    $popClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $popClose.Add_Click({ $popup.DialogResult = 'Cancel'; $popup.Close() })
+    $headerSurface.Controls.Add($popClose)
+
     $previewBack = New-Object System.Windows.Forms.Panel
-    $previewBack.Location = New-Object System.Drawing.Point(12, 54)
-    $previewBack.Size = New-Object System.Drawing.Size(486, 282)
-    $previewBack.BackColor = [System.Drawing.Color]::FromArgb(15, 24, 36)
+    $previewBack.Location = New-Object System.Drawing.Point(20, 88)
+    $previewBack.Size = New-Object System.Drawing.Size(592, 376)
+    $previewBack.BackColor = [System.Drawing.Color]::FromArgb(15, 27, 40)
     $previewBack.BorderStyle = 'None'
     $popup.Controls.Add($previewBack)
     Set-RoundedControl -Control $previewBack -Radius 8
 
     # Painel previa
     $prevPanel = New-Object System.Windows.Forms.Panel
-    $prevPanel.Location = New-Object System.Drawing.Point(16, 58)
-    $prevPanel.Size = New-Object System.Drawing.Size(478, 274)
+    $prevPanel.Location = New-Object System.Drawing.Point(28, 96)
+    $prevPanel.Size = New-Object System.Drawing.Size(576, 360)
     $prevPanel.BackColor = [System.Drawing.Color]::White
-    $prevPanel.BorderStyle = 'FixedSingle'
+    $prevPanel.BorderStyle = 'None'
     $popup.Controls.Add($prevPanel)
-    Set-RoundedControl -Control $prevPanel -Radius 6
 
     $previewBack.SendToBack()
+
+    $controlDeck = New-Object System.Windows.Forms.Panel
+    $controlDeck.Location = New-Object System.Drawing.Point(628, 88)
+    $controlDeck.Size = New-Object System.Drawing.Size(272, 486)
+    $controlDeck.BackColor = [System.Drawing.Color]::FromArgb(8, 18, 29)
+    $popup.Controls.Add($controlDeck)
+    Set-RoundedControl -Control $controlDeck -Radius 8
+    $controlDeck.SendToBack()
 
     $script:gradeAtual = 'A'
     $script:obsAtual   = ''
@@ -4481,31 +4532,53 @@ $btnImprimir.Add_Click({
     $script:DesenharPrevia = {
         param($grade, $obs, $incluirOS)
         $prevPanel.Controls.Clear()
-        $fNorm   = New-Object System.Drawing.Font('Cascadia Mono', 6,  [System.Drawing.FontStyle]::Regular)
-        $fNormB  = New-Object System.Drawing.Font('Cascadia Mono', 6,  [System.Drawing.FontStyle]::Bold)
-        $fMed    = New-Object System.Drawing.Font('Cascadia Mono', 7,  [System.Drawing.FontStyle]::Regular)
-        $fLarge  = New-Object System.Drawing.Font('Cascadia Mono', 11, [System.Drawing.FontStyle]::Bold)
-        $fObs    = New-Object System.Drawing.Font('Cascadia Mono', 8,  [System.Drawing.FontStyle]::Bold)
-        $fHeader = New-Object System.Drawing.Font('Cascadia Mono', 9,  [System.Drawing.FontStyle]::Bold)
-        $preto   = [System.Drawing.Color]::Black
-        $cinza   = [System.Drawing.Color]::FromArgb(80, 80, 80)
-        $cinzaL  = [System.Drawing.Color]::FromArgb(160, 160, 160)
+        $scaleX = $prevPanel.ClientSize.Width / 640.0
+        $scaleY = $prevPanel.ClientSize.Height / 400.0
+        $f1 = New-Object System.Drawing.Font('Cascadia Mono', 5.8, [System.Drawing.FontStyle]::Bold)
+        $f2 = New-Object System.Drawing.Font('Cascadia Mono', 7.2, [System.Drawing.FontStyle]::Bold)
+        $f3 = New-Object System.Drawing.Font('Cascadia Mono', 9.4, [System.Drawing.FontStyle]::Bold)
+        $f4 = New-Object System.Drawing.Font('Cascadia Mono', 13.2, [System.Drawing.FontStyle]::Bold)
+        $preto = [System.Drawing.Color]::Black
+        $cinza = [System.Drawing.Color]::FromArgb(72, 72, 72)
         $gradeEfetiva = if ($script:rnaAtivo) { 'RMA' } elseif ($grade) { [string]$grade } else { '' }
 
         function L($txt, $x, $y, $w, $h, $f, $fc) {
             $l = New-Object System.Windows.Forms.Label
-            $l.Text = $txt; $l.Font = $f; $l.ForeColor = $fc
-            $l.Location = New-Object System.Drawing.Point($x, $y)
-            $l.Size     = New-Object System.Drawing.Size($w, $h)
+            $l.Text = [string]$txt
+            $l.Font = $f
+            $l.ForeColor = $fc
+            $l.Location = New-Object System.Drawing.Point(
+                [int][math]::Round($x * $scaleX),
+                [int][math]::Round($y * $scaleY)
+            )
+            $l.Size = New-Object System.Drawing.Size(
+                [int][math]::Max(1, [math]::Round($w * $scaleX)),
+                [int][math]::Max(1, [math]::Round($h * $scaleY))
+            )
             $l.BackColor = [System.Drawing.Color]::Transparent
-            $prevPanel.Controls.Add($l)
+            $l.AutoEllipsis = $true
+            [void]$prevPanel.Controls.Add($l)
         }
+
         function B($x, $y, $w, $h) {
             $b = New-Object System.Windows.Forms.Panel
             $b.BackColor = $preto
-            $b.Location  = New-Object System.Drawing.Point($x, $y)
-            $b.Size      = New-Object System.Drawing.Size($w, $h)
-            $prevPanel.Controls.Add($b)
+            $b.Location = New-Object System.Drawing.Point(
+                [int][math]::Round($x * $scaleX),
+                [int][math]::Round($y * $scaleY)
+            )
+            $b.Size = New-Object System.Drawing.Size(
+                [int][math]::Max(1, [math]::Round($w * $scaleX)),
+                [int][math]::Max(1, [math]::Round($h * $scaleY))
+            )
+            [void]$prevPanel.Controls.Add($b)
+        }
+
+        function BoxPreview($x1, $y1, $x2, $y2, $thickness) {
+            B $x1 $y1 ($x2 - $x1) $thickness
+            B $x1 ($y2 - $thickness) ($x2 - $x1) $thickness
+            B $x1 $y1 $thickness ($y2 - $y1)
+            B ($x2 - $thickness) $y1 $thickness ($y2 - $y1)
         }
 
         function Wrap-TextLines {
@@ -4554,108 +4627,116 @@ $btnImprimir.Add_Click({
             return @($lines)
         }
 
-        # Moldura completa proporcional ao TSPL real da etiqueta 78x48mm.
-        B 1 3 476 2; B 1 269 476 2; B 1 3 2 268; B 475 3 2 268
+        # Replica o canvas TSPL 640x400 usado pela impressora 80x50mm.
+        BoxPreview 2 4 638 398 2
 
-        # Cabecalho
-        L 'CAIJ INFORMATICA' 14 12 220 14 $fHeader $preto
-
-        # Grade em caixa
-        if ($gradeEfetiva) {
-            $gradeTxt = if ($gradeEfetiva -eq 'RMA') { 'RMA' } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') { "GRADE C - PINTURA $($matches[1])" } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') { 'T - TRIAGEM' } else { "GRADE: $gradeEfetiva" }
-            $gradeFont = if ($gradeTxt.Length -gt 13) { $fNormB } else { $fHeader }
-            B 340 11 134 2
-            B 340 34 134 2
-            B 340 11 2 25
-            B 472 11 2 25
-            L $gradeTxt 348 17 120 13 $gradeFont $preto
-        }
-        if ($incluirOS) {
-            B 340 41 134 2
-            B 340 62 134 2
-            B 340 41 2 23
-            B 472 41 2 23
-            L (Format-OsCodigo -Numero $script:osNumero) 348 46 118 13 $fNormB $preto
-        }
-        if ($script:modoManualEtiqueta) {
-            B 206 10 128 2
-            B 206 30 128 2
-            B 206 10 2 22
-            B 332 10 2 22
-            L 'MODO MANUAL' 214 15 112 12 $fNormB $preto
-        }
-
-        # Separador fino (somente na area esquerda para nao cruzar os boxes de grade/OS)
-        B 14 42 320 1
-
-        # Modelo
-        L $script:modeloEtiqueta 18 48 440 13 $fMed $cinza
-
-        # Separador duplo
-        B 14 68 458 2
-
-        # Serial grande
-        L $script:serialEtiqueta 18 76 450 24 $fLarge $preto
-
-        # Barcode simulado
-        $cx = 18; $bk = $true
-        foreach ($pw in @(2,1,3,1,2,2,1,3,1,2,3,1,2,1,3,2,1,3,1,2,1,3,2,1,2,3,1,2,1,3,2,1)) {
-            if ($bk) { B $cx 108 $pw 22 }
-            $cx += $pw; $bk = !$bk
-        }
-        L $script:serialEtiqueta 18 132 300 11 $fNorm $cinzaL
-
-        # Separador specs
-        B 14 144 458 2
-
-        $mostrarGpuEtiqueta = & $script:IsGpuEtiquetaVisivel $script:gpuEtiqueta
-        $mostrarBatEtiqueta = & $script:IsBateriaEtiquetaVisivel $script:bateriaEtiqueta
-        $specRows = 3
-        if ($mostrarGpuEtiqueta) { $specRows++ }
-        if ($mostrarBatEtiqueta) { $specRows++ }
-        $alturaSpecs = ($specRows * 19) - 3
-
-        # Separador vertical
-        B 72 148 1 $alturaSpecs
-
-        $specY = 152
-        L 'CPU'   18 $specY 50 12 $fNormB $preto
-        L $script:cpuEtiqueta 78 $specY 390 12 $fNorm $preto
-        $specY += 19
-        L 'RAM'   18 $specY 50 12 $fNormB $preto
-        L $script:ramEtiqueta 78 $specY 390 12 $fNorm $preto
-        $specY += 19
-        L 'DISCO' 18 $specY 50 12 $fNormB $preto
-        L $script:memEtiqueta 78 $specY 390 12 $fNorm $preto
-        $specY += 19
-        if ($mostrarGpuEtiqueta) {
-            L 'GPU' 18 $specY 50 12 $fNormB $preto
-            L $script:gpuEtiqueta 78 $specY 390 12 $fNorm $preto
-            $specY += 19
-        }
-        if ($mostrarBatEtiqueta) {
-            L 'BAT' 18 $specY 50 12 $fNormB $preto
-            L $script:bateriaEtiqueta 78 $specY 390 12 $fNorm $preto
-        }
-
-        # Observacao
-        if ($obs -and $obs.Trim() -ne '') {
-            $obsLines = Wrap-TextLines -Text ("Obs: $($obs.Trim())") -MaxLen 62 -MaxLines 3
-            if ($obsLines.Count -gt 0) {
-                $obsY = 242
-                $obsStep = if ($obsLines.Count -ge 3) { 8 } else { 10 }
-                foreach ($line in $obsLines) {
-                    L $line 18 $obsY 450 10 $fNormB $preto
-                    $obsY += $obsStep
-                }
-                $dataY = if ($obsLines.Count -ge 3) { 262 } else { 256 }
-                L (Get-Date -Format 'dd/MM/yy HH:mm') 356 $dataY 100 12 $fNorm $cinza
-            } else {
-                L (Get-Date -Format 'dd/MM/yy HH:mm') 356 256 100 12 $fNorm $cinza
-            }
+        $modeloTxt = ([string]$script:modeloEtiqueta -replace '\s+', ' ').Trim()
+        if ($modeloTxt.Length -le 16) {
+            $modeloTop = $modeloTxt
+            $modeloFont = $f4
+            $modeloY = 22
+        } elseif ($modeloTxt.Length -le 25) {
+            $modeloTop = $modeloTxt
+            $modeloFont = $f3
+            $modeloY = 29
         } else {
-            L (Get-Date -Format 'dd/MM/yy HH:mm') 356 256 100 12 $fNorm $cinza
+            $modeloTop = if ($modeloTxt.Length -gt 42) { $modeloTxt.Substring(0, 42) } else { $modeloTxt }
+            $modeloFont = $f2
+            $modeloY = 29
         }
+        BoxPreview 10 14 430 74 2
+        L $modeloTop 24 $modeloY 394 38 $modeloFont $preto
+
+        $gradeTxt = ''
+        if ($gradeEfetiva) {
+            $gradeTxt = if ($gradeEfetiva -eq 'RMA') {
+                'RMA'
+            } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') {
+                "GRADE C - PINTURA $($matches[1])"
+            } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') {
+                'T - TRIAGEM'
+            } else {
+                [string]$gradeEfetiva
+            }
+            if ($gradeTxt.Length -gt 22) { $gradeTxt = $gradeTxt.Substring(0, 22) }
+            BoxPreview 442 14 630 74 3
+            if ($gradeTxt -match '^GRADE C') {
+                L $gradeTxt 452 27 166 24 $f1 $preto
+            } elseif ($gradeTxt.Length -le 3) {
+                L $gradeTxt 508 23 92 38 $f4 $preto
+            } else {
+                L $gradeTxt 472 27 146 28 $f2 $preto
+            }
+        }
+
+        $serialTop = ([string]$script:serialEtiqueta -replace '\s+', '').Trim()
+        $serialBar = ($serialTop -replace '[^A-Za-z0-9]', '').ToUpper()
+        if ($incluirOS) {
+            if ($serialTop.Length -gt 15) { $serialTop = $serialTop.Substring(0, 15) }
+            BoxPreview 10 84 410 154 3
+            L $serialTop 28 89 368 34 $f4 $preto
+            if ($serialBar.Length -ge 4) {
+                $cx = 28
+                $bk = $true
+                foreach ($pw in @(3,2,1,2,4,1,2,3,1,2,4,2,1,3,2,1,4,2,1,3,1,2,4,1,2,3,1,2,1,3,2,1)) {
+                    if ($bk) { B $cx 128 $pw 18 }
+                    $cx += $pw
+                    $bk = -not $bk
+                }
+            }
+            BoxPreview 430 84 630 154 3
+            L (Format-OsCodigo -Numero $script:osNumero) 454 98 162 38 $f4 $preto
+        } else {
+            if ($serialTop.Length -gt 22) { $serialTop = $serialTop.Substring(0, 22) }
+            BoxPreview 10 84 630 154 3
+            L $serialTop 28 89 580 34 $f4 $preto
+            if ($serialBar.Length -ge 4) {
+                $cx = 28
+                $bk = $true
+                foreach ($pw in @(3,2,1,2,4,1,2,3,1,2,4,2,1,3,2,1,4,2,1,3,1,2,4,1,2,3,1,2,1,3,2,1)) {
+                    if ($bk) { B $cx 128 $pw 18 }
+                    $cx += $pw
+                    $bk = -not $bk
+                }
+            }
+        }
+
+        BoxPreview 10 166 630 384 2
+        B 318 166 2 218
+        B 10 194 620 2
+        L 'CONFIGURACAO' 22 173 270 20 $f2 $preto
+        L 'OBSERVACOES' 334 173 270 20 $f2 $preto
+
+        $specRows = @(
+            @('CPU', [string]$script:cpuEtiqueta),
+            @('RAM', [string]$script:ramEtiqueta),
+            @('DISCO', [string]$script:memEtiqueta),
+            @('GPU', $(if (& $script:IsGpuEtiquetaVisivel $script:gpuEtiqueta) { [string]$script:gpuEtiqueta } else { 'N/A' })),
+            @('BAT', $(if (& $script:IsBateriaEtiquetaVisivel $script:bateriaEtiqueta) { [string]$script:bateriaEtiqueta } else { 'N/A' }))
+        )
+        $specY = 204
+        foreach ($row in $specRows) {
+            $specValue = ([string]$row[1] -replace '\s+', ' ').Trim()
+            if ($specValue.Length -gt 16) { $specValue = $specValue.Substring(0, 16) }
+            L ([string]$row[0]) 22 $specY 48 16 $f1 $preto
+            L $specValue 76 ($specY - 4) 222 24 $f2 $preto
+            if ($specY -lt 332) { B 20 ($specY + 22) 282 1 }
+            $specY += 32
+        }
+
+        $obsLines = @()
+        if ($obs -and $obs.Trim()) {
+            $obsLines = Wrap-TextLines -Text $obs.Trim() -MaxLen 19 -MaxLines 5
+        }
+        $obsY = 204
+        foreach ($line in $obsLines) {
+            L $line 336 $obsY 280 28 $f3 $preto
+            $obsY += 30
+        }
+
+        $diasSemana = @('DOM','SEG','TER','QUA','QUI','SEX','SAB')
+        $dataCurta = "$($diasSemana[[int](Get-Date).DayOfWeek]) $(Get-Date -Format 'dd/MM HH:mm')"
+        L $dataCurta 438 354 178 23 $f2 $cinza
 
         $prevPanel.Refresh()
     }
@@ -4664,17 +4745,18 @@ $btnImprimir.Add_Click({
     # Grade — header com barra de destaque
     $gradeAccentBar = New-Object System.Windows.Forms.Panel
     $gradeAccentBar.BackColor = $cAccent
-    $gradeAccentBar.Location  = New-Object System.Drawing.Point(16, 340)
-    $gradeAccentBar.Size      = New-Object System.Drawing.Size(3, 14)
+    $gradeAccentBar.Location  = New-Object System.Drawing.Point(644, 102)
+    $gradeAccentBar.Size      = New-Object System.Drawing.Size(3, 18)
     $popup.Controls.Add($gradeAccentBar)
 
     $gradeLabel = New-Object System.Windows.Forms.Label
-    $gradeLabel.Text = 'CLASSIFICACAO DO NOTEBOOK'
-    $gradeLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $gradeLabel.Text = 'CLASSIFICACAO'
+    $gradeLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
     $gradeLabel.ForeColor = $cAccent
-    $gradeLabel.Location = New-Object System.Drawing.Point(25, 338); $gradeLabel.Size = New-Object System.Drawing.Size(165, 18)
+    $gradeLabel.Location = New-Object System.Drawing.Point(656, 101)
+    $gradeLabel.Size = New-Object System.Drawing.Size(126, 20)
     $popup.Controls.Add($gradeLabel)
-    [void](New-SectionHairline -Parent $popup -X 196 -Y 347 -W 298)
+    [void](New-SectionHairline -Parent $popup -X 788 -Y 111 -W 96)
 
     $gradeIdleColor = [System.Drawing.Color]::FromArgb(13, 26, 40)
     $gradeHoverColor = [System.Drawing.Color]::FromArgb(23, 42, 60)
@@ -4870,8 +4952,13 @@ $btnImprimir.Add_Click({
         $btnG.FlatAppearance.BorderColor = if ($g.L -eq 'A') { $coresGrade[$g.L] } else { $coresGradeBorda[$g.L] }
         $btnG.FlatAppearance.BorderSize  = if ($g.L -eq 'A') { 2 } else { 1 }
         $btnG.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-        $btnG.Location = New-Object System.Drawing.Point((16 + ($gradeIndex * 96)), 358)
-        $btnG.Size     = New-Object System.Drawing.Size(90, 42)
+        if ($g.L -eq 'RMA') {
+            $btnG.Location = New-Object System.Drawing.Point(644, 238)
+            $btnG.Size = New-Object System.Drawing.Size(240, 44)
+        } else {
+            $btnG.Location = New-Object System.Drawing.Point((644 + (($gradeIndex % 2) * 124)), (128 + ([math]::Floor($gradeIndex / 2) * 54)))
+            $btnG.Size = New-Object System.Drawing.Size(116, 46)
+        }
         $btnG.Tag      = $g.L
         $btnG.Cursor   = [System.Windows.Forms.Cursors]::Hand
         $btnG.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(([int]($coresGrade[$g.L].R * 0.24) + 8), ([int]($coresGrade[$g.L].G * 0.24) + 14), ([int]($coresGrade[$g.L].B * 0.24) + 22))
@@ -4927,7 +5014,7 @@ $btnImprimir.Add_Click({
     }
 
     $script:AtualizarGradeState = {
-        $gradeLabel.Text = if ($script:rnaAtivo) { 'RMA ATIVO' } else { 'GRADE DO NOTEBOOK *' }
+        $gradeLabel.Text = if ($script:rnaAtivo) { 'RMA ATIVO' } else { 'CLASSIFICACAO' }
         foreach ($key in $script:btnGrades.Keys) {
             $btn = $script:btnGrades[$key]
             if ($key -eq 'C') {
@@ -4968,35 +5055,35 @@ $btnImprimir.Add_Click({
 
     # Observacoes
     $obsPanel = New-Object System.Windows.Forms.Panel
-    $obsPanel.Location = New-Object System.Drawing.Point(16, 404)
-    $obsPanel.Size = New-Object System.Drawing.Size(478, 58)
-    $obsPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 32)
+    $obsPanel.Location = New-Object System.Drawing.Point(644, 298)
+    $obsPanel.Size = New-Object System.Drawing.Size(240, 110)
+    $obsPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 23, 36)
     $obsPanel.BorderStyle = 'None'
     $popup.Controls.Add($obsPanel)
     Set-RoundedControl -Control $obsPanel -Radius 8
 
     $obsAccent = New-Object System.Windows.Forms.Panel
     $obsAccent.Location = New-Object System.Drawing.Point(0, 0)
-    $obsAccent.Size = New-Object System.Drawing.Size(4, 58)
+    $obsAccent.Size = New-Object System.Drawing.Size(4, 110)
     $obsAccent.BackColor = $cAccent
     $obsPanel.Controls.Add($obsAccent)
 
     $obsLabel = New-Object System.Windows.Forms.Label
-    $obsLabel.Text = 'OBSERVACOES'
+    $obsLabel.Text = 'OBSERVAÇÕES'
     $obsLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
     $obsLabel.ForeColor = $cAccent
     $obsLabel.Location = New-Object System.Drawing.Point(14, 5)
-    $obsLabel.Size = New-Object System.Drawing.Size(96, 15)
+    $obsLabel.Size = New-Object System.Drawing.Size(110, 16)
     $obsPanel.Controls.Add($obsLabel)
-    [void](New-SectionHairline -Parent $obsPanel -X 116 -Y 12 -W 254)
+    [void](New-SectionHairline -Parent $obsPanel -X 120 -Y 13 -W 48)
 
     $obsCount = New-Object System.Windows.Forms.Label
     $obsCount.Text = '0/220'
     $obsCount.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
     $obsCount.ForeColor = $cDim
     $obsCount.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-    $obsCount.Location = New-Object System.Drawing.Point(380, 5)
-    $obsCount.Size = New-Object System.Drawing.Size(82, 15)
+    $obsCount.Location = New-Object System.Drawing.Point(174, 5)
+    $obsCount.Size = New-Object System.Drawing.Size(52, 15)
     $obsPanel.Controls.Add($obsCount)
 
     $obsBox = New-Object System.Windows.Forms.TextBox
@@ -5004,8 +5091,8 @@ $btnImprimir.Add_Click({
     $obsBox.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 32)
     $obsBox.ForeColor = [System.Drawing.Color]::FromArgb(214, 232, 246)
     $obsBox.BorderStyle = 'None'
-    $obsBox.Location = New-Object System.Drawing.Point(14, 23)
-    $obsBox.Size = New-Object System.Drawing.Size(448, 32)
+    $obsBox.Location = New-Object System.Drawing.Point(14, 27)
+    $obsBox.Size = New-Object System.Drawing.Size(212, 72)
     $obsBox.Multiline = $true
     $obsBox.ScrollBars = 'None'
     $obsBox.MaxLength = 220
@@ -5022,8 +5109,8 @@ $btnImprimir.Add_Click({
     $obsPanel.Controls.Add($obsBox)
 
     $osCard = New-Object System.Windows.Forms.Panel
-    $osCard.Location = New-Object System.Drawing.Point(16, 470)
-    $osCard.Size = New-Object System.Drawing.Size(478, 36)
+    $osCard.Location = New-Object System.Drawing.Point(644, 420)
+    $osCard.Size = New-Object System.Drawing.Size(240, 52)
     $osCard.BackColor = $cCard
     $osCard.BorderStyle = 'None'
     $osCard.Cursor = [System.Windows.Forms.Cursors]::Hand
@@ -5032,16 +5119,16 @@ $btnImprimir.Add_Click({
 
     $osCardBar = New-Object System.Windows.Forms.Panel
     $osCardBar.Location = New-Object System.Drawing.Point(0, 0)
-    $osCardBar.Size = New-Object System.Drawing.Size(5, 36)
+    $osCardBar.Size = New-Object System.Drawing.Size(4, 52)
     $osCardBar.BackColor = $cAccent
     $osCard.Controls.Add($osCardBar)
 
     $osCardTitle = New-Object System.Windows.Forms.Label
-    $osCardTitle.Text = 'Imprimir OS na etiqueta'
-    $osCardTitle.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $osCardTitle.Text = 'INCLUIR OS NA ETIQUETA'
+    $osCardTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
     $osCardTitle.ForeColor = $cAccent
-    $osCardTitle.Location = New-Object System.Drawing.Point(14, 9)
-    $osCardTitle.Size = New-Object System.Drawing.Size(260, 16)
+    $osCardTitle.Location = New-Object System.Drawing.Point(14, 7)
+    $osCardTitle.Size = New-Object System.Drawing.Size(210, 16)
     $osCardTitle.Cursor = [System.Windows.Forms.Cursors]::Hand
     $osCard.Controls.Add($osCardTitle)
 
@@ -5072,15 +5159,15 @@ $btnImprimir.Add_Click({
     $osCard.Controls.Add($chkOS)
 
     $osStatusPill = New-Object System.Windows.Forms.Panel
-    $osStatusPill.Location = New-Object System.Drawing.Point(304, 6)
-    $osStatusPill.Size = New-Object System.Drawing.Size(78, 24)
+    $osStatusPill.Location = New-Object System.Drawing.Point(106, 24)
+    $osStatusPill.Size = New-Object System.Drawing.Size(70, 22)
     $osStatusPill.BackColor = [System.Drawing.Color]::FromArgb(9, 64, 43)
     $osStatusPill.BorderStyle = 'None'
     $osCard.Controls.Add($osStatusPill)
     Set-RoundedControl -Control $osStatusPill -Radius 12
 
     $osStatusDot = New-Object System.Windows.Forms.Panel
-    $osStatusDot.Location = New-Object System.Drawing.Point(9, 8)
+    $osStatusDot.Location = New-Object System.Drawing.Point(8, 7)
     $osStatusDot.Size = New-Object System.Drawing.Size(8, 8)
     $osStatusDot.BackColor = [System.Drawing.Color]::FromArgb(128, 255, 206)
     $osStatusPill.Controls.Add($osStatusDot)
@@ -5090,12 +5177,12 @@ $btnImprimir.Add_Click({
     $osToggleTxt.Text = 'ATIVO'
     $osToggleTxt.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
     $osToggleTxt.ForeColor = [System.Drawing.Color]::FromArgb(192, 255, 225)
-    $osToggleTxt.Location = New-Object System.Drawing.Point(22, 4)
-    $osToggleTxt.Size = New-Object System.Drawing.Size(48, 15)
+    $osToggleTxt.Location = New-Object System.Drawing.Point(21, 3)
+    $osToggleTxt.Size = New-Object System.Drawing.Size(42, 15)
     $osStatusPill.Controls.Add($osToggleTxt)
 
     $osToggleWrap = New-Object System.Windows.Forms.Panel
-    $osToggleWrap.Location = New-Object System.Drawing.Point(408, 6)
+    $osToggleWrap.Location = New-Object System.Drawing.Point(182, 23)
     $osToggleWrap.Size = New-Object System.Drawing.Size(50, 24)
     $osToggleWrap.BackColor = [System.Drawing.Color]::FromArgb(12, 92, 58)
     $osToggleWrap.BorderStyle = 'None'
@@ -5895,8 +5982,8 @@ $btnImprimir.Add_Click({
     $btnCancelar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(92, 28, 38)
     $btnCancelar.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(42, 14, 22)
     $btnCancelar.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnCancelar.Location = New-Object System.Drawing.Point(16, 600)
-    $btnCancelar.Size = New-Object System.Drawing.Size(130, 34)
+    $btnCancelar.Location = New-Object System.Drawing.Point(20, 608)
+    $btnCancelar.Size = New-Object System.Drawing.Size(132, 36)
     $btnCancelar.Add_Click({ $popup.DialogResult = 'Cancel'; $popup.Close() })
     $popup.Controls.Add($btnCancelar)
     Set-RoundedControl -Control $btnCancelar -Radius 8
@@ -5910,8 +5997,8 @@ $btnImprimir.Add_Click({
     $btnManual.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(34, 58, 82)
     $btnManual.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 38, 56)
     $btnManual.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnManual.Location = New-Object System.Drawing.Point(270, 560)
-    $btnManual.Size = New-Object System.Drawing.Size(115, 28)
+    $btnManual.Location = New-Object System.Drawing.Point(796, 514)
+    $btnManual.Size = New-Object System.Drawing.Size(88, 30)
     $btnManual.Add_Click({
         $manualForm = New-Object System.Windows.Forms.Form
         $manualForm.Text = 'Preencher dados manualmente'
@@ -6061,8 +6148,8 @@ $btnImprimir.Add_Click({
     $btnAuto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(54, 96, 130)
     $btnAuto.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(18, 42, 64)
     $btnAuto.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnAuto.Location = New-Object System.Drawing.Point(129, 560)
-    $btnAuto.Size = New-Object System.Drawing.Size(135, 28)
+    $btnAuto.Location = New-Object System.Drawing.Point(644, 514)
+    $btnAuto.Size = New-Object System.Drawing.Size(146, 30)
     $btnAuto.Add_Click({
         $script:modeloEtiqueta = $info.Modelo
         $script:serialEtiqueta = $info.Serial
@@ -6083,15 +6170,15 @@ $btnImprimir.Add_Click({
     $lblFonteDados.Font      = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
     $lblFonteDados.ForeColor = [System.Drawing.Color]::FromArgb(70, 105, 138)
     $lblFonteDados.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $lblFonteDados.Location  = New-Object System.Drawing.Point(16, 560)
-    $lblFonteDados.Size      = New-Object System.Drawing.Size(105, 28)
+    $lblFonteDados.Location  = New-Object System.Drawing.Point(644, 486)
+    $lblFonteDados.Size      = New-Object System.Drawing.Size(240, 22)
     $popup.Controls.Add($lblFonteDados)
 
     # Divisor acima do rodape
     $footerDivider = New-Object System.Windows.Forms.Panel
     $footerDivider.BackColor = [System.Drawing.Color]::FromArgb(20, 42, 62)
-    $footerDivider.Location  = New-Object System.Drawing.Point(16, 596)
-    $footerDivider.Size      = New-Object System.Drawing.Size(478, 1)
+    $footerDivider.Location  = New-Object System.Drawing.Point(20, 590)
+    $footerDivider.Size      = New-Object System.Drawing.Size(880, 1)
     $popup.Controls.Add($footerDivider)
 
     # Estado visual do seletor de fonte (chip ativo acende)
@@ -6126,8 +6213,8 @@ $btnImprimir.Add_Click({
     $btnConfirmar.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 148, 84)
     $btnConfirmar.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 104, 60)
     $btnConfirmar.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnConfirmar.Location = New-Object System.Drawing.Point(332, 600)
-    $btnConfirmar.Size = New-Object System.Drawing.Size(162, 34)
+    $btnConfirmar.Location = New-Object System.Drawing.Point(738, 608)
+    $btnConfirmar.Size = New-Object System.Drawing.Size(162, 36)
     $script:UpdateConfirmState = {
         $obsTextoSt = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
         $needsObs = Test-CaijGradeRequiresObs $script:gradeAtual

@@ -55,7 +55,16 @@ foreach ($confirmLabel in @('PRODUTO', 'SERIAL', 'REFERENCIA', 'QUANTIDADE', 'LO
 Assert-True ($scriptText -match 'Show-CadastroOsConfirm\s+`\s*\r?\n\s*-Owner\s+\$dlg') 'cadastro abre modal moderno'
 Assert-True ($scriptText -notmatch "'Confirmar cadastro',\s*\r?\n\s*\[System\.Windows\.Forms\.MessageBoxButtons\]::YesNo") 'cadastro nao usa MessageBox antigo'
 Assert-True ($scriptText -match 'Test-CaijGradeRequiresObs') 'validacao de OBS usa regra central'
-Assert-True ($scriptText -match "\`$gradeTxt\s*=\s*.*'T - TRIAGEM'") 'previa encurta selo da triagem'
+Assert-True ($scriptText -match "(?s)\`$gradeTxt\s*=.*?'T - TRIAGEM'") 'previa encurta selo da triagem'
+Assert-True ($scriptText -match '\$popup\.ClientSize\s*=\s*New-Object System\.Drawing\.Size\(920,\s*660\)') 'popup usa layout horizontal moderno'
+Assert-True ($scriptText -match '\$prevPanel\.Size\s*=\s*New-Object System\.Drawing\.Size\(576,\s*360\)') 'previa preserva proporcao 80x50'
+Assert-True ($scriptText -match 'BoxPreview\s+10\s+14\s+430\s+74\s+2') 'previa replica caixa superior do modelo'
+Assert-True ($scriptText -match 'BoxPreview\s+10\s+84\s+410\s+154\s+3') 'previa replica caixa separada do serial'
+Assert-True ($scriptText -match 'BoxPreview\s+430\s+84\s+630\s+154\s+3') 'previa replica caixa separada da OS'
+Assert-True ($scriptText -match 'BoxPreview\s+10\s+166\s+630\s+384\s+2') 'previa replica area inferior'
+Assert-True ($scriptText -match 'B\s+318\s+166\s+2\s+218') 'previa divide configuracao e observacoes'
+Assert-True ($scriptText -match "L\s+'CONFIGURACAO'\s+22\s+173") 'previa identifica configuracao'
+Assert-True ($scriptText -match "L\s+'OBSERVACOES'\s+334\s+173") 'previa identifica observacoes'
 
 $serverPath = Join-Path $PSScriptRoot 'ServidorImpressao.ps1'
 $serverText = Get-Content -Path $serverPath -Raw
