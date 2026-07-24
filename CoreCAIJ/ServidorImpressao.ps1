@@ -3134,7 +3134,7 @@ while ($listener.IsListening) {
                 if ($grade -match '^C\s*-\s*PINTURA\s*([123])$') {
                     $gradeBadge = "GRADE C - PINTURA $($matches[1])"
                 } elseif ($grade -match '^T\s*-\s*TRIAGEM$') {
-                    $gradeBadge = 'GRADE T - TRIAGEM'
+                    $gradeBadge = 'T - TRIAGEM'
                 } else {
                     $gradeBadge = $grade
                 }

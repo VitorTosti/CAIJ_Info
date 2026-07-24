@@ -4244,7 +4244,7 @@ $btnImprimir.Add_Click({
 
         # Grade em caixa
         if ($gradeEfetiva) {
-            $gradeTxt = if ($gradeEfetiva -eq 'RMA') { 'RMA' } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') { "GRADE C - PINTURA $($matches[1])" } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') { 'GRADE T - TRIAGEM' } else { "GRADE: $gradeEfetiva" }
+            $gradeTxt = if ($gradeEfetiva -eq 'RMA') { 'RMA' } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') { "GRADE C - PINTURA $($matches[1])" } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') { 'T - TRIAGEM' } else { "GRADE: $gradeEfetiva" }
             $gradeFont = if ($gradeTxt.Length -gt 13) { $fNormB } else { $fHeader }
             B 340 11 134 2
             B 340 34 134 2
@@ -5273,7 +5273,7 @@ $btnImprimir.Add_Click({
     $btnConfirmar.Location = New-Object System.Drawing.Point(332, 650); $btnConfirmar.Size = New-Object System.Drawing.Size(162, 44)
     $btnConfirmar.Add_Click({
         $obsTexto = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
+        if ((Test-CaijGradeRequiresObs $script:gradeAtual) -and [string]::IsNullOrWhiteSpace($obsTexto)) {
             [System.Windows.Forms.MessageBox]::Show(
                 "Para imprimir com grade $($script:gradeAtual), descreva os detalhes encontrados em OBSERVACOES.",
                 'Observacao obrigatoria',
@@ -5812,7 +5812,7 @@ $btnImprimir.Add_Click({
     $btnConfirmar.Size = New-Object System.Drawing.Size(162, 34)
     $script:UpdateConfirmState = {
         $obsTextoSt = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        $needsObs = ($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM')
+        $needsObs = Test-CaijGradeRequiresObs $script:gradeAtual
         if ($needsObs -and [string]::IsNullOrWhiteSpace($obsTextoSt)) {
             $btnConfirmar.Text = 'Falta OBS'
             $btnConfirmar.BackColor = [System.Drawing.Color]::FromArgb(95, 72, 12)
@@ -5828,7 +5828,7 @@ $btnImprimir.Add_Click({
         $btnConfirmar.Text = 'Validando...'
         [System.Windows.Forms.Application]::DoEvents()
         $obsTexto = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
-        if (($script:gradeAtual -eq 'B' -or ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obsTexto)) {
+        if ((Test-CaijGradeRequiresObs $script:gradeAtual) -and [string]::IsNullOrWhiteSpace($obsTexto)) {
             [System.Windows.Forms.MessageBox]::Show(
                 "Para imprimir com grade $($script:gradeAtual), voce precisa preencher OBSERVACOES com os detalhes encontrados na maquina.",
                 'Observacao obrigatoria',
