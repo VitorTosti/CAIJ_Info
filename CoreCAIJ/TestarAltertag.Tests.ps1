@@ -222,17 +222,14 @@ Assert-Equal $draftOs.problema_ordem 'Cadastro automatico CAIJ' 'payload os prob
 Assert-True (-not $draftOs.Contains('obs_interno_pedido')) 'payload os sem obs interna'
 Assert-Equal $draftOs.status_pedido 'Em Aberto' 'payload os status'
 
-$draftProduto = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.00' -IdAlmoxarifado 31196
+$draftProduto = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.00'
 Assert-Equal $draftProduto[0].id_produto 82530104 'payload produto id'
 Assert-Equal $draftProduto[0].desc_produto '5420 I5 16GB 256GB' 'payload produto descricao'
 Assert-Equal $draftProduto[0].qtde_produto '1' 'payload produto quantidade'
 Assert-Equal $draftProduto[0].valor_unit_produto '0.00' 'payload produto valor'
-Assert-Equal $draftProduto[0].id_almoxarifado 31196 'payload produto almoxarifado'
-$draftProdutoLoc = $draftProduto[0].json_localizacoes | ConvertFrom-Json
-Assert-Equal $draftProdutoLoc[0].id_almoxarifado '31196' 'payload produto localizacao almoxarifado'
-Assert-Equal $draftProdutoLoc[0].desc_almoxarifado 'TÉCNICA_BT' 'payload produto localizacao nome'
-Assert-Equal $draftProdutoLoc[0].qtde_saida '1,00' 'payload produto localizacao quantidade'
-$draftProdutoValorRuim = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.000000 2950.000000 3000.000000' -IdAlmoxarifado 31196
+Assert-True (-not $draftProduto[0].PSObject.Properties['id_almoxarifado']) 'payload produto sem campo nao documentado de almoxarifado'
+Assert-True (-not $draftProduto[0].PSObject.Properties['json_localizacoes']) 'payload produto sem campo nao documentado de localizacao'
+$draftProdutoValorRuim = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.000000 2950.000000 3000.000000'
 Assert-Equal $draftProdutoValorRuim[0].valor_unit_produto '0.00' 'payload produto valor invalido normalizado'
 
 $produtoComLocalizacao = @{
@@ -272,8 +269,11 @@ Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoSemLocalizacao
 Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoEmOutroAlmoxarifado -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita outro almoxarifado'
 
 $serverText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ServidorImpressao.ps1') -Raw
-Assert-True ($serverText -match 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor valida resposta do cadastro do produto'
+Assert-True ($serverText -notmatch 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor nao rejeita produto criado por localizacao ausente na resposta oficial'
 Assert-True ($serverText -notmatch '\$prodCheck\s*=\s*Invoke-VhsysJson') 'servidor nao consulta rota de produtos proibida depois do cadastro'
+Assert-True ($serverText -match "New-VhsysOrdemServicoPayload.*-Equipamento\s+''") 'cadastro nao duplica produto no campo equipamento'
+Assert-True ($serverText -match '\$produtoErro\s*=\s*\$null') 'cadastro acompanha falha parcial do produto'
+Assert-True ($serverText -match 'produtoErro\s*=\s*\$produtoErro') 'resposta devolve pendencia do produto'
 
 $draftServicos = New-VhsysOrdemServicosPayload -Servicos @('troca de bateria', 'Troca SSD', '', 'troca de tela')
 Assert-Equal $draftServicos.Count 3 'payload servicos count'

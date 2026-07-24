@@ -4252,13 +4252,16 @@ function Show-CadastroOsAltertagDraft {
                 cliente = [string]$resp.cliente
                 tecnico = [string]$resp.tecnico
                 statusOs = 'Em Aberto'
-                equipamento = [string]$resp.produto
+                equipamento = ''
                 garantia = [string]$resp.garantia
                 referencia = [string]$resp.referencia
             }
             $script:incluirOSAtual = $true
             Set-AppStatus -Texto "OS criada no Altertag: $($resp.osCodigo)" -Cor $cGreen
             $msgOk = "OS criada com sucesso:`n$($resp.osCodigo)"
+            if ($resp.produtoErro) {
+                $msgOk += "`n`nAviso: a OS foi criada, mas o produto nao foi adicionado automaticamente.`n$($resp.produtoErro)"
+            }
             if ($resp.servicosErro) {
                 $msgOk += "`n`nAviso: a OS foi criada, mas os servicos nao foram adicionados automaticamente.`n$($resp.servicosErro)"
             }

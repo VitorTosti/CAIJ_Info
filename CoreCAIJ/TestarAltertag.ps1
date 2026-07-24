@@ -411,8 +411,7 @@ function New-VhsysOrdemProdutoPayload {
     param(
         [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][string]$Descricao,
-        [string]$ValorUnitario = '0.00',
-        [int]$IdAlmoxarifado = 31196
+        [string]$ValorUnitario = '0.00'
     )
 
     $payload = [ordered]@{
@@ -420,19 +419,7 @@ function New-VhsysOrdemProdutoPayload {
         id_produto = $IdProduto
         valor_unit_produto = Normalize-VhsysValorUnitario $ValorUnitario
         desc_produto = ([string]$Descricao).Trim()
-        id_almoxarifado = $IdAlmoxarifado
     }
-
-    $payload.json_localizacoes = @(
-        [ordered]@{
-            desc_almoxarifado = 'TÉCNICA_BT'
-            id_almoxarifado = ([string]$IdAlmoxarifado)
-            controla_lote = '0'
-            qtde_atual = '1,00'
-            qtde_saida = '1,00'
-            id_lote = '0'
-        }
-    ) | ConvertTo-Json -Compress
 
     @([pscustomobject]$payload)
 }

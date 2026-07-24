@@ -67,15 +67,18 @@ Assert-True ($scriptText -match "L\s+'CONFIGURACAO'\s+22\s+173") 'previa identif
 Assert-True ($scriptText -match "L\s+'OBSERVACOES'\s+334\s+173") 'previa identifica observacoes'
 Assert-True ($scriptText -match '\$controlDeck\.SendToBack\(\)\s*\r?\n\s*foreach\s*\(\$previewControl') 'painel direito fica atras dos controles'
 Assert-True ($scriptText -match '\$previewControl\.BringToFront\(\)') 'controles da previa voltam para frente'
+Assert-True ($scriptText -match '\$resp\.produtoErro') 'interface informa pendencia ao adicionar produto'
 
 $serverPath = Join-Path $PSScriptRoot 'ServidorImpressao.ps1'
 $serverText = Get-Content -Path $serverPath -Raw
 Assert-True ($serverText -match "'ERICK'") 'servidor permite tecnico Erick'
 Assert-True ($serverText -match 'T - TRIAGEM') 'servidor reconhece Grade T - Triagem'
 Assert-True ($serverText -match "\`$gradeBadge\s*=\s*'T - TRIAGEM'") 'impressao encurta selo da triagem'
-Assert-True ($serverText -match 'Test-VhsysProdutoLocalizacao') 'servidor confirma localizacao depois do cadastro'
+Assert-True ($serverText -notmatch 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor aceita resposta oficial do produto sem localizacao'
 Assert-True ($serverText -notmatch '-SemLocalizacao') 'servidor nao permite fallback sem localizacao'
 Assert-True ($serverText -notmatch 'tentando sem localizacao') 'servidor nao mascara falha da localizacao'
-Assert-True ($serverText -match 'Produto da OS .* nao confirmou a localizacao T.+CNICA_BT') 'servidor informa localizacao ausente'
+Assert-True ($serverText -notmatch 'Produto da OS .* nao confirmou a localizacao T.+CNICA_BT') 'servidor nao transforma produto criado em erro de localizacao'
+Assert-True ($serverText -match 'OS \$idPedido criada, mas o produto falhou') 'servidor registra pendencia sem negar criacao da OS'
+Assert-True ($serverText -match 'produtoErro=\$out\.produtoErro') 'rota informa pendencia do produto'
 
 'OK: InfoNotebookPreview tests'

@@ -1261,8 +1261,7 @@ function New-VhsysOrdemProdutoPayload {
     param(
         [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][string]$Descricao,
-        [string]$ValorUnitario = '0.00',
-        [int]$IdAlmoxarifado = $almoxarifadoBancadaTecnicaId
+        [string]$ValorUnitario = '0.00'
     )
 
     $payload = [ordered]@{
@@ -1270,19 +1269,7 @@ function New-VhsysOrdemProdutoPayload {
         id_produto = $IdProduto
         valor_unit_produto = Normalize-VhsysValorUnitario $ValorUnitario
         desc_produto = ([string]$Descricao).Trim()
-        id_almoxarifado = $IdAlmoxarifado
     }
-
-    $payload.json_localizacoes = @(
-        [ordered]@{
-            desc_almoxarifado = 'TÉCNICA_BT'
-            id_almoxarifado = ([string]$IdAlmoxarifado)
-            controla_lote = '0'
-            qtde_atual = '1,00'
-            qtde_saida = '1,00'
-            id_lote = '0'
-        }
-    ) | ConvertTo-Json -Compress
 
     @([pscustomobject]$payload)
 }
@@ -1397,12 +1384,8 @@ function Add-VhsysProdutoNaOrdemServico {
     )
 
     $prodPath = "/ordens-servico/{0}/produtos" -f $IdOrdem
-    $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor -IdAlmoxarifado $almoxarifadoBancadaTecnicaId
+    $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor
     $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
-
-    if (-not (Test-VhsysProdutoLocalizacao -Response $prodResp -IdProduto $IdProduto -IdAlmoxarifado $almoxarifadoBancadaTecnicaId)) {
-        throw "Produto da OS $IdPedido nao confirmou a localizacao TÉCNICA_BT. A OS nao foi concluida; corrija a localizacao manualmente."
-    }
 
     return $prodResp
 }
@@ -1470,13 +1453,20 @@ function New-VhsysOrdemServico {
     if (-not $ProdutoDescricao.Trim()) { throw 'Descricao do produto obrigatoria' }
 
     $cfg = Read-AltertagApiConfig
-    $osPayload = New-VhsysOrdemServicoPayload -Tecnico $Tecnico -Serial $Serial -Referencia $Referencia -Equipamento $ProdutoDescricao
+    $osPayload = New-VhsysOrdemServicoPayload -Tecnico $Tecnico -Serial $Serial -Referencia $Referencia -Equipamento ''
     $osResp = Invoke-VhsysJson -Config $cfg -Path '/ordens-servico' -Method 'Post' -Body $osPayload -TimeoutSec 25
     $idOrdem = [int]$osResp.data.id_ordem
     $idPedido = [int]$osResp.data.id_pedido
     if ($idOrdem -lt 1) { throw 'API vhsys nao retornou id_ordem ao criar OS.' }
 
-    $prodResp = Add-VhsysProdutoNaOrdemServico -Config $cfg -IdOrdem $idOrdem -IdPedido $idPedido -IdProduto $IdProduto -ProdutoDescricao $ProdutoDescricao -ProdutoValor $ProdutoValor
+    $prodResp = $null
+    $produtoErro = $null
+    try {
+        $prodResp = Add-VhsysProdutoNaOrdemServico -Config $cfg -IdOrdem $idOrdem -IdPedido $idPedido -IdProduto $IdProduto -ProdutoDescricao $ProdutoDescricao -ProdutoValor $ProdutoValor
+    } catch {
+        $produtoErro = $_.Exception.Message
+        Write-Host "[$(Get-Date -Format 'HH:mm:ss')] OS $idPedido criada, mas o produto falhou: $produtoErro"
+    }
     $servOut = Add-VhsysServicosNaOrdemServico -Config $cfg -IdOrdem $idOrdem -IdPedido $idPedido -Servicos $Servicos
 
     try {
@@ -1495,6 +1485,7 @@ function New-VhsysOrdemServico {
         produto = $ProdutoDescricao.Trim()
         idProduto = $IdProduto
         idAlmoxarifado = $almoxarifadoBancadaTecnicaId
+        produtoErro = $produtoErro
         servicos = @($servOut.servicos)
         servicosErro = $servOut.servicosErro
         produtoResposta = $prodResp
@@ -2456,7 +2447,7 @@ while ($listener.IsListening) {
             $json = (@{
                 status='ok'
                 mensagem='Servidor CAIJ ativo'
-                versao='v6-api-servico-unitario'
+                versao='v6.1-produto-os'
                 modoImpressao='assincrono'
                 servidorIp=[string]$script:caijServerIp
                 porta=[int]$porta
@@ -2748,6 +2739,7 @@ while ($listener.IsListening) {
                         produto=$out.produto
                         idProduto=$out.idProduto
                         idAlmoxarifado=$out.idAlmoxarifado
+                        produtoErro=$out.produtoErro
                         servicos=@($out.servicos)
                         servicosErro=$out.servicosErro
                     } | ConvertTo-Json -Depth 6 -Compress)
