@@ -48,6 +48,9 @@ Assert-True ($scriptText -match '\$gradeItem\.Size\s*=\s*New-Object System\.Draw
 Assert-True ($scriptText -match '\$gradeMenuOs\.Add_Opening') 'menu sincroniza grade selecionada ao abrir'
 Assert-True ($scriptText -match '\$item\.Checked\s*=\s*\(\[string\]\$item\.Tag -eq \[string\]\$script:gradeCadastroOs\)') 'marcador representa grade atual'
 Assert-True ($scriptText -match 'function\s+Show-CadastroOsConfirm') 'cadastro usa modal moderno de confirmacao'
+Assert-True ($scriptText -match 'function\s+Show-CadastroOsResult') 'cadastro usa modal moderno de resultado'
+Assert-True ($scriptText -match 'Show-CadastroOsResult\s+`\s*\r?\n\s*-Owner\s+\$dlg') 'resultado substitui caixa padrao do Windows'
+Assert-True ($scriptText -notmatch 'MessageBox\]\:\:Show\(\$msgOk') 'resultado nao usa mensagem padrao de sucesso'
 Assert-True ($scriptText -match 'ALTERTAG / NOVA OS') 'modal identifica fluxo Altertag'
 foreach ($confirmLabel in @('PRODUTO', 'SERIAL', 'REFERENCIA', 'QUANTIDADE', 'LOCALIZACAO', 'SERVICOS')) {
     Assert-True ($scriptText -match [regex]::Escape("'$confirmLabel'")) "modal mostra campo $confirmLabel"

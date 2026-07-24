@@ -1316,7 +1316,7 @@ function New-VhsysOrdemServicosPayload {
             desc_servico = $nome
         })
     }
-    return ,$out
+    return $out
 }
 
 function Invoke-VhsysJson {
@@ -2447,7 +2447,7 @@ while ($listener.IsListening) {
             $json = (@{
                 status='ok'
                 mensagem='Servidor CAIJ ativo'
-                versao='v6.1-produto-os'
+                versao='v6.2-popup-servicos'
                 modoImpressao='assincrono'
                 servidorIp=[string]$script:caijServerIp
                 porta=[int]$porta

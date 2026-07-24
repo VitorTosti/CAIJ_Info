@@ -466,7 +466,7 @@ function New-VhsysOrdemServicosPayload {
             desc_servico = $nome
         })
     }
-    return ,$out
+    return $out
 }
 
 function Get-VhsysOsStatusFromOrdens {

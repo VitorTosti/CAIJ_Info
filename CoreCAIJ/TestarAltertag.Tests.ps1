@@ -277,6 +277,8 @@ Assert-True ($serverText -match 'produtoErro\s*=\s*\$produtoErro') 'resposta dev
 
 $draftServicos = New-VhsysOrdemServicosPayload -Servicos @('troca de bateria', 'Troca SSD', '', 'troca de tela')
 Assert-Equal $draftServicos.Count 3 'payload servicos count'
+$draftServicosVazio = @(New-VhsysOrdemServicosPayload -Servicos @())
+Assert-Equal $draftServicosVazio.Count 0 'payload sem servicos permanece vazio'
 Assert-Equal $draftServicos[0].desc_servico 'Troca de bateria' 'payload servico bateria'
 Assert-Equal $draftServicos[0].horas_servico '1' 'payload servico bateria horas'
 Assert-Equal $draftServicos[0].id_servico 0 'payload servico bateria id livre'

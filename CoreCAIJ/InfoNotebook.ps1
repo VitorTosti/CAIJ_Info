@@ -2550,6 +2550,175 @@ function Show-CadastroOsConfirm {
     return ($resultConfirm -eq [System.Windows.Forms.DialogResult]::OK)
 }
 
+function Show-CadastroOsResult {
+    param(
+        [System.Windows.Forms.Form]$Owner,
+        [string]$OsCodigo,
+        [string]$ProdutoErro,
+        [string]$ServicosErro
+    )
+
+    $avisos = @()
+    if (-not [string]::IsNullOrWhiteSpace($ProdutoErro)) {
+        $avisos += "Produto nao adicionado automaticamente: $ProdutoErro"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ServicosErro)) {
+        $avisos += "Servicos nao adicionados automaticamente: $ServicosErro"
+    }
+    $temAviso = ($avisos.Count -gt 0)
+    $altura = if ($temAviso) { 350 } else { 292 }
+
+    $formResult = New-Object System.Windows.Forms.Form
+    $formResult.Text = 'OS cadastrada'
+    $formResult.ClientSize = New-Object System.Drawing.Size(520, $altura)
+    $formResult.StartPosition = 'CenterParent'
+    $formResult.BackColor = [System.Drawing.Color]::FromArgb(6, 13, 22)
+    $formResult.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $formResult.FormBorderStyle = 'None'
+    $formResult.ShowInTaskbar = $false
+    $formResult.KeyPreview = $true
+    Set-DoubleBuffered $formResult
+    Set-RoundedControl -Control $formResult -Radius 12
+    $formResult.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+    $formResult.Add_Paint({
+        param($s, $e)
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(34, 114, 94), 1)
+        $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+        $border.Dispose()
+    })
+
+    $header = New-Object System.Windows.Forms.Panel
+    $header.Location = New-Object System.Drawing.Point(0, 0)
+    $header.Size = New-Object System.Drawing.Size(520, 82)
+    $header.BackColor = [System.Drawing.Color]::FromArgb(8, 22, 32)
+    [void]$formResult.Controls.Add($header)
+    $header.Add_Paint({
+        param($s, $e)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(66, 232, 176), 2)
+        $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
+        $line.Dispose()
+    })
+
+    $rail = New-Object System.Windows.Forms.Panel
+    $rail.Location = New-Object System.Drawing.Point(0, 0)
+    $rail.Size = New-Object System.Drawing.Size(4, 82)
+    $rail.BackColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    [void]$header.Controls.Add($rail)
+
+    $eyebrow = New-Object System.Windows.Forms.Label
+    $eyebrow.Text = 'ALTERTAG / CADASTRO'
+    $eyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $eyebrow.Location = New-Object System.Drawing.Point(24, 13)
+    $eyebrow.Size = New-Object System.Drawing.Size(250, 15)
+    [void]$header.Controls.Add($eyebrow)
+
+    $title = New-Object System.Windows.Forms.Label
+    $title.Text = 'OS cadastrada'
+    $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $title.Location = New-Object System.Drawing.Point(21, 34)
+    $title.Size = New-Object System.Drawing.Size(330, 31)
+    [void]$header.Controls.Add($title)
+
+    $close = New-Object System.Windows.Forms.Button
+    $close.Text = 'X'
+    $close.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $close.ForeColor = [System.Drawing.Color]::FromArgb(112, 150, 180)
+    $close.BackColor = [System.Drawing.Color]::FromArgb(8, 22, 32)
+    $close.FlatStyle = 'Flat'
+    $close.FlatAppearance.BorderSize = 0
+    $close.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(24, 55, 52)
+    $close.Location = New-Object System.Drawing.Point(486, 8)
+    $close.Size = New-Object System.Drawing.Size(26, 26)
+    $close.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $close.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    [void]$header.Controls.Add($close)
+
+    $statusPanel = New-Object System.Windows.Forms.Panel
+    $statusPanel.Location = New-Object System.Drawing.Point(20, 102)
+    $statusPanel.Size = New-Object System.Drawing.Size(480, 88)
+    $statusPanel.BackColor = [System.Drawing.Color]::FromArgb(5, 42, 38)
+    [void]$formResult.Controls.Add($statusPanel)
+    Set-RoundedControl -Control $statusPanel -Radius 8
+
+    $statusCaption = New-Object System.Windows.Forms.Label
+    $statusCaption.Text = 'CADASTRO CONCLUIDO'
+    $statusCaption.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $statusCaption.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $statusCaption.Location = New-Object System.Drawing.Point(18, 13)
+    $statusCaption.Size = New-Object System.Drawing.Size(220, 16)
+    [void]$statusPanel.Controls.Add($statusCaption)
+
+    $osValue = New-Object System.Windows.Forms.Label
+    $osValue.Text = $OsCodigo
+    $osValue.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 21, [System.Drawing.FontStyle]::Bold)
+    $osValue.ForeColor = [System.Drawing.Color]::FromArgb(191, 255, 226)
+    $osValue.Location = New-Object System.Drawing.Point(15, 34)
+    $osValue.Size = New-Object System.Drawing.Size(270, 40)
+    [void]$statusPanel.Controls.Add($osValue)
+
+    $statusText = New-Object System.Windows.Forms.Label
+    $statusText.Text = if ($temAviso) { 'Criada com pendencias' } else { 'Criada com sucesso' }
+    $statusText.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+    $statusText.ForeColor = if ($temAviso) {
+        [System.Drawing.Color]::FromArgb(255, 208, 96)
+    } else {
+        [System.Drawing.Color]::FromArgb(144, 218, 190)
+    }
+    $statusText.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $statusText.Location = New-Object System.Drawing.Point(290, 38)
+    $statusText.Size = New-Object System.Drawing.Size(168, 30)
+    [void]$statusPanel.Controls.Add($statusText)
+
+    if ($temAviso) {
+        $warningPanel = New-Object System.Windows.Forms.Panel
+        $warningPanel.Location = New-Object System.Drawing.Point(20, 204)
+        $warningPanel.Size = New-Object System.Drawing.Size(480, 64)
+        $warningPanel.BackColor = [System.Drawing.Color]::FromArgb(42, 34, 14)
+        [void]$formResult.Controls.Add($warningPanel)
+        Set-RoundedControl -Control $warningPanel -Radius 7
+
+        $warningLabel = New-Object System.Windows.Forms.Label
+        $warningLabel.Text = $avisos -join "`n"
+        $warningLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+        $warningLabel.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 132)
+        $warningLabel.Location = New-Object System.Drawing.Point(14, 10)
+        $warningLabel.Size = New-Object System.Drawing.Size(450, 44)
+        $warningLabel.AutoEllipsis = $true
+        [void]$warningPanel.Controls.Add($warningLabel)
+    }
+
+    $footerY = if ($temAviso) { 286 } else { 208 }
+    $footer = New-Object System.Windows.Forms.Panel
+    $footer.Location = New-Object System.Drawing.Point(0, $footerY)
+    $footer.Size = New-Object System.Drawing.Size(520, ($altura - $footerY))
+    $footer.BackColor = [System.Drawing.Color]::FromArgb(8, 17, 28)
+    [void]$formResult.Controls.Add($footer)
+
+    $btnDone = New-Object System.Windows.Forms.Button
+    $btnDone.Text = 'Concluir'
+    $btnDone.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+    $btnDone.ForeColor = [System.Drawing.Color]::White
+    $btnDone.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 82)
+    $btnDone.FlatStyle = 'Flat'
+    $btnDone.FlatAppearance.BorderSize = 1
+    $btnDone.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $btnDone.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 150, 100)
+    $btnDone.Location = New-Object System.Drawing.Point(364, 18)
+    $btnDone.Size = New-Object System.Drawing.Size(136, 40)
+    $btnDone.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnDone.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    [void]$footer.Controls.Add($btnDone)
+    Set-RoundedControl -Control $btnDone -Radius 7
+
+    $formResult.AcceptButton = $btnDone
+    $formResult.CancelButton = $close
+    if ($Owner) { [void]$formResult.ShowDialog($Owner) } else { [void]$formResult.ShowDialog() }
+    $formResult.Dispose()
+}
+
 
 function Show-CadastroOsAltertagDraft {
     $dlg = New-Object System.Windows.Forms.Form
@@ -4258,14 +4427,11 @@ function Show-CadastroOsAltertagDraft {
             }
             $script:incluirOSAtual = $true
             Set-AppStatus -Texto "OS criada no Altertag: $($resp.osCodigo)" -Cor $cGreen
-            $msgOk = "OS criada com sucesso:`n$($resp.osCodigo)"
-            if ($resp.produtoErro) {
-                $msgOk += "`n`nAviso: a OS foi criada, mas o produto nao foi adicionado automaticamente.`n$($resp.produtoErro)"
-            }
-            if ($resp.servicosErro) {
-                $msgOk += "`n`nAviso: a OS foi criada, mas os servicos nao foram adicionados automaticamente.`n$($resp.servicosErro)"
-            }
-            [System.Windows.Forms.MessageBox]::Show($msgOk, 'Cadastrar OS', 'OK', 'Information') | Out-Null
+            Show-CadastroOsResult `
+                -Owner $dlg `
+                -OsCodigo ([string]$resp.osCodigo) `
+                -ProdutoErro ([string]$resp.produtoErro) `
+                -ServicosErro ([string]$resp.servicosErro)
             $dlg.Close()
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Falha ao criar OS:`n$($_.Exception.Message)", 'Cadastrar OS', 'OK', 'Error') | Out-Null
