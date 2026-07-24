@@ -61,7 +61,7 @@ public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
         if (menuItem != null && menuItem.Checked)
         {
             using (var marker = new SolidBrush(Text))
-                e.Graphics.FillEllipse(marker, 12, Math.Max(2, (bounds.Height - 5) / 2), 5, 5);
+                e.Graphics.FillEllipse(marker, bounds.Width - 12, Math.Max(2, (bounds.Height - 5) / 2), 5, 5);
         }
     }
 
@@ -2492,12 +2492,25 @@ function Show-CadastroOsAltertagDraft {
     [void]$cardGrade.Controls.Add($btnGradeOs)
 
     $gradeMenuOs = New-Object System.Windows.Forms.ContextMenuStrip
-    $gradeMenuOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
-    $gradeMenuOs.ForeColor = [System.Drawing.Color]::White
+    $gradeMenuOs.AutoSize = $true
+    $gradeMenuOs.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 33)
+    $gradeMenuOs.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $gradeMenuOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5)
+    $gradeMenuOs.ShowImageMargin = $false
+    $gradeMenuOs.ShowCheckMargin = $false
+    $gradeMenuOs.DropShadowEnabled = $true
+    $gradeMenuOs.Padding = New-Object System.Windows.Forms.Padding(1, 4, 1, 4)
+    $gradeMenuOs.MinimumSize = New-Object System.Drawing.Size(178, 0)
+    $gradeMenuOs.Renderer = New-Object CaijGradeMenuRenderer
     foreach ($gradeOpcao in @(Get-CaijGradeOptions)) {
         $gradeItem = New-Object System.Windows.Forms.ToolStripMenuItem
         $gradeItem.Text = (Format-CaijGradeReference $gradeOpcao)
         $gradeItem.Tag = $gradeOpcao
+        $gradeItem.AutoSize = $false
+        $gradeItem.Size = New-Object System.Drawing.Size(176, 30)
+        $gradeItem.Padding = New-Object System.Windows.Forms.Padding(18, 0, 6, 0)
+        $gradeItem.Margin = [System.Windows.Forms.Padding]::Empty
+        $gradeItem.CheckOnClick = $false
         $gradeItem.Add_Click({
             $script:gradeCadastroOs = [string]$this.Tag
             $script:gradeAtual = [string]$this.Tag
@@ -2506,6 +2519,11 @@ function Show-CadastroOsAltertagDraft {
         })
         [void]$gradeMenuOs.Items.Add($gradeItem)
     }
+    $gradeMenuOs.Add_Opening({
+        foreach ($item in @($gradeMenuOs.Items)) {
+            $item.Checked = ([string]$item.Tag -eq [string]$script:gradeCadastroOs)
+        }
+    })
     $btnGradeOs.Add_Click({
         $gradeMenuOs.Show($btnGradeOs, (New-Object System.Drawing.Point(0, $btnGradeOs.Height)))
     })
