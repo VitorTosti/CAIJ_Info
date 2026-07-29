@@ -589,6 +589,8 @@ $dataHora = Get-Date -Format 'dd/MM/yyyy HH:mm'
 # Numero da Ordem de Servico (OS) - persistido em arquivo local
 $script:osArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_os_counter.txt'
 $script:historicoArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_historico_notebooks.json'
+$script:modelosManuaisArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_modelos_manuais.json'
+$script:modelosManuaisHistorico = @()
 $script:registroBaseDir = $null
 $script:registroBaseDirFallback = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'CAIJ\Registros'
 $script:ultimoStatusServidor = 'nao verificado'
@@ -612,6 +614,48 @@ function Save-OsNumero {
     param([int]$Numero)
     try { Set-Content -Path $script:osArquivo -Value $Numero -Encoding UTF8 } catch {}
 }
+
+function Import-ModelosManuaisHistorico {
+    $script:modelosManuaisHistorico = @()
+    if (-not (Test-Path -LiteralPath $script:modelosManuaisArquivo)) { return }
+    try {
+        $raw = Get-Content -LiteralPath $script:modelosManuaisArquivo -Raw -ErrorAction Stop
+        if (-not [string]::IsNullOrWhiteSpace($raw)) {
+            $script:modelosManuaisHistorico = @(
+                $raw |
+                    ConvertFrom-Json -ErrorAction Stop |
+                    ForEach-Object { ([string]$_).Trim() } |
+                    Where-Object { $_ -and $_ -notmatch '^(?i:N/?A)$' } |
+                    Select-Object -Unique -First 200
+            )
+        }
+    } catch {
+        $script:modelosManuaisHistorico = @()
+    }
+}
+
+function Add-ModeloManualHistorico {
+    param([string]$Modelo)
+
+    $modeloLimpo = if ($Modelo) { $Modelo.Trim() } else { '' }
+    if (-not $modeloLimpo -or $modeloLimpo -match '^(?i:N/?A)$') { return }
+
+    $restantes = @(
+        $script:modelosManuaisHistorico |
+            Where-Object { -not [string]::Equals(([string]$_).Trim(), $modeloLimpo, [System.StringComparison]::OrdinalIgnoreCase) }
+    )
+    $script:modelosManuaisHistorico = @($modeloLimpo) + $restantes
+    if ($script:modelosManuaisHistorico.Count -gt 200) {
+        $script:modelosManuaisHistorico = @($script:modelosManuaisHistorico | Select-Object -First 200)
+    }
+    try {
+        $script:modelosManuaisHistorico |
+            ConvertTo-Json -Depth 3 |
+            Set-Content -LiteralPath $script:modelosManuaisArquivo -Encoding UTF8 -ErrorAction Stop
+    } catch {}
+}
+
+Import-ModelosManuaisHistorico
 
 function Get-RegistroBaseDir {
     if ($script:registroBaseDir -and $script:registroBaseDir.Trim() -ne '') { return $script:registroBaseDir }
@@ -4477,6 +4521,9 @@ $btnTestes.Add_Click({
 
 $btnImprimir.Add_Click({
     $btnImprimir.Enabled = $false
+    $reusarPreviaManual = [bool]$script:reabrindoPreviaManual
+    $script:reabrindoPreviaManual = $false
+    $impressaoConcluida = $false
     [System.Windows.Forms.Application]::DoEvents()
 
     # Prepara dados
@@ -4669,23 +4716,25 @@ $btnImprimir.Add_Click({
     Set-RoundedControl -Control $controlDeck -Radius 8
     $controlDeck.SendToBack()
 
-    $script:gradeAtual = 'A'
-    $script:obsAtual   = ''
-    $script:incluirOSAtual = $false
-    $script:triagemServicos = @()
-    $script:osDefinidaPorTriagem = $false
-    $script:modeloEtiqueta = $info.Modelo
-    $script:serialEtiqueta = $info.Serial
-    $script:cpuEtiqueta    = $cpuCurto
-    $script:memEtiqueta    = $discoCurto
-    $script:ramEtiqueta    = $ramCurto
-    $script:gpuEtiqueta    = $gpuCurta
-    $script:bateriaEtiqueta = if ($info.MostrarBateria) { $info.BatSaude } else { $null }
-    $script:modoManualEtiqueta = $false
-    $script:rnaAtivo = $false
-    $script:rnaItensOk = @()
-    $script:gradeAnteriorRma = 'A'
-    $script:pinturaOpcaoAtual = ''
+    if (-not $reusarPreviaManual) {
+        $script:gradeAtual = 'A'
+        $script:obsAtual   = ''
+        $script:incluirOSAtual = $false
+        $script:triagemServicos = @()
+        $script:osDefinidaPorTriagem = $false
+        $script:modeloEtiqueta = $info.Modelo
+        $script:serialEtiqueta = $info.Serial
+        $script:cpuEtiqueta    = $cpuCurto
+        $script:memEtiqueta    = $discoCurto
+        $script:ramEtiqueta    = $ramCurto
+        $script:gpuEtiqueta    = $gpuCurta
+        $script:bateriaEtiqueta = if ($info.MostrarBateria) { $info.BatSaude } else { $null }
+        $script:modoManualEtiqueta = $false
+        $script:rnaAtivo = $false
+        $script:rnaItensOk = @()
+        $script:gradeAnteriorRma = 'A'
+        $script:pinturaOpcaoAtual = ''
+    }
 
     $script:GetObsImpressao = {
         $baseObs = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
@@ -5266,6 +5315,8 @@ $btnImprimir.Add_Click({
     $obsBox.ScrollBars = 'None'
     $obsBox.MaxLength = 220
     $obsBox.Cursor = [System.Windows.Forms.Cursors]::IBeam
+    $obsBox.Text = if ($script:obsAtual) { [string]$script:obsAtual } else { '' }
+    $obsCount.Text = "$($obsBox.Text.Length)/220"
     $obsBox.Add_Enter({ $obsAccent.BackColor = [System.Drawing.Color]::FromArgb(86, 213, 255) })
     $obsBox.Add_Leave({ $obsAccent.BackColor = $cAccent })
     $obsBox.Add_TextChanged({
@@ -5293,7 +5344,7 @@ $btnImprimir.Add_Click({
     $osCard.Controls.Add($osCardBar)
 
     $osCardTitle = New-Object System.Windows.Forms.Label
-    $osCardTitle.Text = 'INCLUIR OS NA ETIQUETA'
+    $osCardTitle.Text = 'OS NA ETIQUETA'
     $osCardTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
     $osCardTitle.ForeColor = $cAccent
     $osCardTitle.Location = New-Object System.Drawing.Point(14, 7)
@@ -5310,9 +5361,35 @@ $btnImprimir.Add_Click({
     $osCardDesc.Visible = $false
     $osCard.Controls.Add($osCardDesc)
 
+    $btnAlterarOsPreview = New-Object System.Windows.Forms.Button
+    $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $script:osNumero)
+    $btnAlterarOsPreview.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
+    $btnAlterarOsPreview.ForeColor = [System.Drawing.Color]::FromArgb(162, 224, 255)
+    $btnAlterarOsPreview.BackColor = [System.Drawing.Color]::FromArgb(11, 38, 56)
+    $btnAlterarOsPreview.FlatStyle = 'Flat'
+    $btnAlterarOsPreview.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(38, 104, 142)
+    $btnAlterarOsPreview.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(17, 55, 78)
+    $btnAlterarOsPreview.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnAlterarOsPreview.Location = New-Object System.Drawing.Point(14, 24)
+    $btnAlterarOsPreview.Size = New-Object System.Drawing.Size(86, 22)
+    $btnAlterarOsPreview.Add_Click({
+        $popup.TopMost = $false
+        Prompt-OsManual
+        $popup.TopMost = $true
+        $popup.Activate() | Out-Null
+        $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $script:osNumero)
+        $chkOS.Checked = $true
+        & $script:UpdateOsToggle
+        & $script:DesenharPrevia $script:gradeAtual (& $script:GetObsImpressao) $script:incluirOSAtual
+    })
+    $osCard.Controls.Add($btnAlterarOsPreview)
+    Set-RoundedControl -Control $btnAlterarOsPreview -Radius 5
+    $osPreviewTip = New-Object System.Windows.Forms.ToolTip
+    $osPreviewTip.SetToolTip($btnAlterarOsPreview, 'Alterar o numero da OS')
+
     $chkOS = New-Object System.Windows.Forms.CheckBox
     $chkOS.Text = 'Ativo'
-    $chkOS.Checked = $false
+    $chkOS.Checked = [bool]$script:incluirOSAtual
     $chkOS.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
     $chkOS.ForeColor = [System.Drawing.Color]::FromArgb(0, 220, 120)
     $chkOS.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
@@ -6224,6 +6301,15 @@ $btnImprimir.Add_Click({
         }
 
         $txtModelo = New-ManualField 'Nome do modelo' 12  $script:modeloEtiqueta
+        $modeloAutoComplete = New-Object System.Windows.Forms.AutoCompleteStringCollection
+        foreach ($modeloSalvo in @($script:modelosManuaisHistorico)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$modeloSalvo)) {
+                [void]$modeloAutoComplete.Add([string]$modeloSalvo)
+            }
+        }
+        $txtModelo.AutoCompleteMode = [System.Windows.Forms.AutoCompleteMode]::SuggestAppend
+        $txtModelo.AutoCompleteSource = [System.Windows.Forms.AutoCompleteSource]::CustomSource
+        $txtModelo.AutoCompleteCustomSource = $modeloAutoComplete
         $txtSerial = New-ManualField 'Serial'         62  $script:serialEtiqueta
         $txtCpu    = New-ManualField 'Processador'    112 $script:cpuEtiqueta
         $txtMem    = New-ManualField 'Memoria'        162 $script:memEtiqueta
@@ -6295,6 +6381,7 @@ $btnImprimir.Add_Click({
             $script:gpuEtiqueta    = $gpu
             $script:bateriaEtiqueta = $bat
             $script:modoManualEtiqueta = $true
+            Add-ModeloManualHistorico -Modelo $modelo
             $manualForm.DialogResult = 'OK'
             $manualForm.Close()
         })
@@ -6466,7 +6553,7 @@ $btnImprimir.Add_Click({
     [System.Windows.Forms.Application]::DoEvents()
 
     # Monta JSON com dados + grade + obs
-    if ($script:incluirOSAtual -and -not $script:osDefinidaPorTriagem -and -not $script:osDefinidaPorAltertag) {
+    if ($script:incluirOSAtual -and -not $script:osDefinidaPorTriagem -and -not $script:osDefinidaPorAltertag -and -not $script:osDefinidaManual) {
         try {
             $respReserva = Invoke-CaijServer -Path '/proxima-os' -Method POST -Body '{}' -TimeoutSec 12 -Retries 3
             if ($respReserva -and [string]$respReserva.status -eq 'ok' -and $respReserva.osNumero) {
@@ -6517,6 +6604,7 @@ $btnImprimir.Add_Click({
         if (-not $printSent) {
             if ($lastErr) { throw $lastErr } else { throw 'Falha ao enviar etiqueta apos 2 tentativas.' }
         }
+        $impressaoConcluida = $true
         $btnImprimir.Text      = 'Etiqueta Enviada!'
         $btnImprimir.BackColor = [System.Drawing.Color]::FromArgb(0, 110, 50)
         Add-HistoricoNotebook -Acao 'impressao' -Status 'ok' -Mensagem 'Etiqueta enviada com sucesso' -Grade $script:gradeAtual -Obs $script:obsAtual
@@ -6569,6 +6657,22 @@ $btnImprimir.Add_Click({
         $this.Dispose()
     })
     $resetImpTimer.Start()
+
+    if ($impressaoConcluida -and $script:modoManualEtiqueta) {
+        $script:reabrindoPreviaManual = $true
+        if ($script:reabrirPreviaTimer) {
+            try { $script:reabrirPreviaTimer.Stop(); $script:reabrirPreviaTimer.Dispose() } catch {}
+        }
+        $script:reabrirPreviaTimer = New-Object System.Windows.Forms.Timer
+        $script:reabrirPreviaTimer.Interval = 250
+        $script:reabrirPreviaTimer.Add_Tick({
+            $this.Stop()
+            $this.Dispose()
+            $script:reabrirPreviaTimer = $null
+            $btnImprimir.PerformClick()
+        })
+        $script:reabrirPreviaTimer.Start()
+    }
 })
 # ================================================
 # BARRA INFERIOR
