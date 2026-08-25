@@ -64,7 +64,8 @@ $hardwareJson = @'
   "SPPowerDataType": [
     {
       "sppower_battery_health_info": {
-        "sppower_battery_health": "Normal"
+        "sppower_battery_health": "Normal",
+        "sppower_battery_cycle_count": "540"
       },
       "sppower_battery_charge_info": {
         "sppower_battery_max_capacity": "91"
@@ -84,6 +85,16 @@ Assert-Equal $info.GPU 'Apple M1 Pro (Integrada)' 'gpu'
 Assert-Equal $info.Tela '3024 x 1964 Retina' 'tela'
 Assert-Equal $info.Discos '512GB SSD - APPLE SSD AP0512R' 'disco normalizado'
 Assert-Equal $info.BatSaude '91% (Normal)' 'bateria'
+Assert-Equal $info.BatCiclos 540 'ciclos da bateria'
+
+$batteryIoreg = @'
+"AppleRawMaxCapacity" = 0
+"AppleRawDesignCapacity" = 0
+"BatteryData" = {"AppleRawMaxCapacity"=4380,"AppleRawDesignCapacity"=5100}
+"CycleCount" = 540
+'@
+Assert-Equal (ConvertFrom-IoregBatteryHealth -IoregText $batteryIoreg) '86%' 'bateria ignora primeira ocorrencia zerada'
+Assert-Equal (ConvertFrom-IoregBatteryCycleCount -IoregText $batteryIoreg) 540 'ciclos via ioreg'
 
 Assert-Equal (Get-IntelCpuShort 'Intel(R) Core(TM) i5-1035G1 CPU') 'I5 10' 'intel curto'
 Assert-Equal (Get-RamShort '16GB DDR4 3200 MHz') '16GB DDR4' 'ram curto ddr'
@@ -108,6 +119,7 @@ Assert-Equal $payload.cpu 'Apple M1 Pro' 'payload cpu'
 Assert-Equal $payload.gpu 'Apple M1 Pro' 'payload gpu'
 Assert-Equal $payload.ram '16GB Unificada' 'payload ram'
 Assert-Equal $payload.disco '512GB SSD' 'payload disco'
+Assert-Equal $payload.bateria '91% (Normal) | 540 ciclos' 'payload inclui ciclos da bateria'
 
 $info.GPU = 'Nao identificada'
 $payloadSemGpu = New-CaijPrintPayload -Info $info -OsNumero 235 -Grade 'A' -Obs '' -IncludeOs:$true -Manual:$false

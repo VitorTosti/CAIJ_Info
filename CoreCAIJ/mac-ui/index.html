@@ -51,11 +51,11 @@
         </div>
 
         <div class="grade-row" id="gradeRow">
-          <button data-grade="A" class="grade active">A</button>
-          <button data-grade="B" class="grade">B</button>
-          <button data-grade="C" class="grade">C</button>
-          <button data-grade="T" class="grade">T</button>
-          <button data-grade="RMA" class="grade">RMA</button>
+          <button data-grade="A" class="grade active"><strong>A</strong><span>Perfeito</span></button>
+          <button data-grade="B" class="grade"><strong>B</strong><span>Detalhes</span></button>
+          <button data-grade="C" class="grade"><strong>C</strong><span>Pintura</span></button>
+          <button data-grade="T" class="grade"><strong>T</strong><span>Triagem</span></button>
+          <button data-grade="RMA" class="grade"><strong>RMA</strong><span>Defeitos</span></button>
         </div>
 
         <div class="paint-row hidden" id="paintRow">
@@ -66,7 +66,7 @@
         </div>
 
         <label class="obs-label">Observacoes
-          <textarea id="obs" rows="3" placeholder="Obrigatorio para Grade B, C - Pintura e T - Triagem"></textarea>
+          <textarea id="obs" rows="3" placeholder="Obrigatorio para Grade B e C - Pintura"></textarea>
         </label>
 
         <div class="preview">
@@ -78,6 +78,7 @@
 
         <div class="actions">
           <button id="syncOs" class="secondary">Sincronizar OS</button>
+          <button id="openCreateOs" class="secondary">Cadastrar OS</button>
           <button id="printBtn" class="primary">Imprimir etiqueta</button>
         </div>
       </section>
@@ -85,6 +86,80 @@
 
     <section class="status-line" id="statusLine">Pronto.</section>
   </main>
+
+  <dialog class="create-os-dialog" id="createOsDialog" aria-labelledby="createOsTitle">
+    <form method="dialog" class="create-os-card" id="createOsForm">
+      <header class="create-os-head">
+        <div>
+          <p class="dialog-eyebrow">ALTERTAG / ORDEM DE SERVICO</p>
+          <h2 id="createOsTitle">Cadastrar OS</h2>
+        </div>
+        <button type="button" class="icon-btn" id="closeCreateOs" aria-label="Fechar">Fechar</button>
+      </header>
+
+      <section class="create-section">
+        <span class="field-title">Tecnico</span>
+        <div class="technician-grid" id="technicianGrid">
+          <button type="button" data-technician="Vitor">Vitor</button>
+          <button type="button" data-technician="Lucas">Lucas</button>
+          <button type="button" data-technician="Hyrides">Hyrides</button>
+          <button type="button" data-technician="Erick">Erick</button>
+          <button type="button" data-technician="Outro">Outro</button>
+        </div>
+        <input id="otherTechnician" class="hidden" autocomplete="off" placeholder="Nome do tecnico">
+      </section>
+
+      <section class="create-section">
+        <label class="field-title" for="productSearch">Produto</label>
+        <div class="product-search-row">
+          <input id="productSearch" autocomplete="off" placeholder="Modelo ou codigo Altertag">
+          <button type="button" class="secondary" id="searchProducts">Buscar</button>
+        </div>
+        <div class="product-results" id="productResults">
+          <p>Pesquise e selecione um produto.</p>
+        </div>
+      </section>
+
+      <section class="create-fields">
+        <label>Serial<input id="createSerial" autocomplete="off"></label>
+        <label>Referencia
+          <select id="createReference">
+            <option>GRADE A</option>
+            <option>GRADE B</option>
+            <option>GRADE C - PINTURA 1</option>
+            <option>GRADE C - PINTURA 2</option>
+            <option>GRADE C - PINTURA 3</option>
+            <option selected>GRADE T - TRIAGEM</option>
+            <option>RMA</option>
+          </select>
+        </label>
+      </section>
+
+      <label class="create-observation">Observacao
+        <textarea id="createObservation" rows="2"></textarea>
+      </label>
+
+      <p class="create-os-status" id="createOsStatus">Selecione o tecnico e o produto.</p>
+      <footer class="dialog-actions">
+        <button type="button" class="secondary" id="cancelCreateOs">Cancelar</button>
+        <button type="submit" class="primary" id="submitCreateOs" disabled>Criar OS</button>
+      </footer>
+    </form>
+  </dialog>
+
+  <section class="os-alert hidden" id="osAlert" role="alertdialog" aria-modal="true" aria-labelledby="osAlertTitle">
+    <div class="os-alert-card">
+      <div class="alert-signal" aria-hidden="true"><span></span></div>
+      <p class="alert-eyebrow">SINCRONIZACAO EM TEMPO REAL</p>
+      <h2 id="osAlertTitle">Nova OS criada</h2>
+      <p class="alert-copy">A ordem <strong id="alertCreatedOs">C000000</strong> foi criada em outra estação.</p>
+      <div class="alert-next">
+        <span>Próxima OS disponível</span>
+        <strong id="alertNextOs">C000001</strong>
+      </div>
+      <button id="dismissOsAlert" class="primary">Entendido</button>
+    </div>
+  </section>
   <script src="/app.js"></script>
 </body>
 </html>

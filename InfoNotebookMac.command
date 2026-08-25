@@ -12,6 +12,12 @@ FALLBACK_LOG_ROOT="$HOME/Documents/CAIJ/Registros"
 SERVER_CACHE=""
 LAST_SERVER_STATUS="nao verificado"
 LAST_OS_SYNC=""
+LAST_CONFIRMED_SEEN=""
+
+UPDATER="$CORE/AtualizarCAIJ.command"
+if [[ -f "$UPDATER" ]]; then
+  /bin/zsh "$UPDATER" --app-root "$DIR" >/dev/null 2>&1
+fi
 
 hide_windows_launchers_in_finder() {
   chflags hidden "$DIR/InfoNotebook.bat" "$DIR/TestarNotebook.bat" >/dev/null 2>&1
@@ -47,7 +53,7 @@ save_os_number() {
 }
 
 format_os() {
-  echo "C000$1"
+  printf 'C%06d\n' "$1"
 }
 
 json_escape() {
@@ -147,7 +153,7 @@ normalize_size() {
 }
 
 collect_info() {
-  local hw displays storage power
+  local hw displays storage power cpu_brand bat_ioreg bat_health bat_max bat_design bat_pct bat_cycles
   hw="$(system_profiler SPHardwareDataType 2>/dev/null)"
   displays="$(system_profiler SPDisplaysDataType 2>/dev/null)"
   storage="$(system_profiler SPStorageDataType 2>/dev/null)"
@@ -159,6 +165,10 @@ collect_info() {
   CHIP="$(sp_match "$hw" "^ *Chip$")"
   if [[ -z "$CHIP" ]]; then
     CHIP="$(sp_match "$hw" "Processor Name|Nome do Processador|Processador")"
+  fi
+  if [[ "$CHIP" != Apple* ]]; then
+    cpu_brand="$(sysctl -n machdep.cpu.brand_string 2>/dev/null)"
+    if [[ -n "$cpu_brand" ]]; then CHIP="$cpu_brand"; fi
   fi
   CORES="$(sp_match "$hw" "Total Number of Cores|Nucleos|cleos")"
   MEMORY="$(sp_match "$hw" "Memory|Mem")"
@@ -172,6 +182,8 @@ collect_info() {
   DISK_NAME="$(sp_match "$storage" "Medium Type|Tipo de Midia|Media Type|Nome do Dispositivo|Device Name")"
   BAT_CAP="$(sp_match "$power" "Maximum Capacity|Capacidade.*xima")"
   BAT_COND="$(sp_match "$power" "Condition|Condi")"
+  bat_cycles="$(sp_match "$power" "Cycle Count|Contagem.*Ciclos|Numero.*Ciclos")"
+  bat_cycles="$(sed 's/[^0-9]//g' <<< "$bat_cycles")"
 
   if [[ -z "$MODEL_NAME" ]]; then MODEL_NAME="MacBook"; fi
   if [[ "$CHIP" =~ 'Apple[[:space:]]+(M[0-9])' && "$MODEL_NAME" != *"${match[1]}"* ]]; then
@@ -179,6 +191,7 @@ collect_info() {
   else
     MODEL="Apple $MODEL_NAME"
   fi
+  if [[ -n "$MODEL_ID" ]]; then MODEL="Apple $MODEL_NAME ($MODEL_ID)"; fi
   if [[ -z "$SERIAL" ]]; then
     SERIAL="$(ioreg -l 2>/dev/null | awk -F' = ' '/IOPlatformSerialNumber/ { gsub(/"/, "", $2); print $2; exit }')"
   fi
@@ -186,7 +199,11 @@ collect_info() {
   if [[ -z "$CHIP" ]]; then CHIP="N/A"; fi
   if [[ -n "$CORES" ]]; then NUCLEOS="$CORES nucleos"; else NUCLEOS="N/A"; fi
   if [[ "$MEMORY" =~ '([0-9]+)[[:space:]]*GB' ]]; then
-    RAM="${match[1]}GB Unificada"
+    if [[ "$CHIP" == Apple* ]]; then
+      RAM="${match[1]}GB Unificada"
+    else
+      RAM="${match[1]}GB"
+    fi
   elif [[ -n "$MEMORY" ]]; then
     RAM="$MEMORY"
   else
@@ -201,11 +218,48 @@ collect_info() {
   else
     DISK="$STORAGE_SIZE SSD - Apple Storage"
   fi
-  if [[ -n "$BAT_CAP" ]]; then
+  if [[ "$BAT_CAP" =~ '([0-9]+)' && "${match[1]}" -gt 0 ]]; then
     BATTERY="$BAT_CAP"
     if [[ -n "$BAT_COND" ]]; then BATTERY="$BATTERY ($BAT_COND)"; fi
   else
-    BATTERY="N/A"
+    bat_ioreg="$(ioreg -r -c AppleSmartBattery 2>/dev/null)"
+    bat_health="$(awk '/"StateOfHealth"/ {line=$0; sub(/^.*"StateOfHealth"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+    bat_max="$(awk '/"AppleRawMaxCapacity"/ {line=$0; sub(/^.*"AppleRawMaxCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+    bat_design="$(awk '/"AppleRawDesignCapacity"/ {line=$0; sub(/^.*"AppleRawDesignCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+    if [[ "$bat_health" == <-> && "$bat_health" -gt 0 && "$bat_health" -le 100 ]]; then
+      BATTERY="${bat_health}%"
+      if [[ -n "$BAT_COND" ]]; then BATTERY="$BATTERY ($BAT_COND)"; fi
+    else
+      if [[ "$bat_max" != <-> || "$bat_max" -le 0 || "$bat_design" != <-> || "$bat_design" -le 0 ]]; then
+        bat_max="$(awk '/"NominalChargeCapacity"/ {line=$0; sub(/^.*"NominalChargeCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+        bat_design="$(awk '/"DesignCapacity"/ {line=$0; sub(/^.*"DesignCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+      fi
+      if [[ "$bat_max" != <-> || "$bat_max" -le 0 || "$bat_design" != <-> || "$bat_design" -le 0 ]]; then
+        bat_max="$(awk '/"MaxCapacity"/ {line=$0; sub(/^.*"MaxCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+        bat_design="$(awk '/"DesignCapacity"/ {line=$0; sub(/^.*"DesignCapacity"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+      fi
+      if [[ "$bat_max" == <-> && "$bat_max" -gt 0 && "$bat_design" == <-> && "$bat_design" -gt 0 ]]; then
+        bat_pct=$(( (100 * bat_max + bat_design / 2) / bat_design ))
+        if (( bat_pct > 100 )); then bat_pct=100; fi
+        BATTERY="${bat_pct}%"
+        if [[ -n "$BAT_COND" ]]; then BATTERY="$BATTERY ($BAT_COND)"; fi
+      else
+        BATTERY="N/A"
+        {
+          echo "=== system_profiler SPPowerDataType ==="
+          grep -Ei 'Capacity|Capacidade|Condition|Condi|Cycle Count|Ciclos' <<< "$power"
+          echo "=== ioreg AppleSmartBattery ==="
+          grep -Ei 'Capacity|StateOfHealth|CycleCount|Condition' <<< "$bat_ioreg"
+        } > "$CORE/mac-ui/battery-diagnostic.txt" 2>/dev/null
+      fi
+    fi
+  fi
+  if [[ "$bat_cycles" != <-> || "$bat_cycles" -le 0 ]]; then
+    if [[ -z "$bat_ioreg" ]]; then bat_ioreg="$(ioreg -r -c AppleSmartBattery 2>/dev/null)"; fi
+    bat_cycles="$(awk '/"CycleCount"/ {line=$0; sub(/^.*"CycleCount"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
+  fi
+  if [[ "$bat_cycles" == <-> && "$bat_cycles" -gt 0 ]]; then
+    BATTERY="$BATTERY | $bat_cycles ciclos"
   fi
 }
 
@@ -324,6 +378,36 @@ reserve_os() {
   return 1
 }
 
+check_os_alert() {
+  local mode="$1" base resp confirmed next
+  base="$(get_server_base_url)"
+  resp="$(curl -fsS --max-time 5 "$base/status-os-local" 2>/dev/null)"
+  confirmed="$(sed -nE 's/.*"ultimoConfirmado"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<< "$resp")"
+  next="$(sed -nE 's/.*"proximoDisponivel"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<< "$resp")"
+  [[ -z "$confirmed" || -z "$next" ]] && return 1
+
+  if [[ -z "$LAST_CONFIRMED_SEEN" ]]; then
+    LAST_CONFIRMED_SEEN="$confirmed"
+    save_os_number "$next"
+    return 0
+  fi
+
+  if (( confirmed > LAST_CONFIRMED_SEEN )); then
+    LAST_CONFIRMED_SEEN="$confirmed"
+    save_os_number "$next"
+    LAST_SERVER_STATUS="online"
+    LAST_OS_SYNC="$(date '+%d/%m %H:%M')"
+    if [[ "$mode" == "dialog" ]]; then
+      dialog_message "Nova OS criada" "$(format_os "$confirmed") foi criada em outra estacao.
+
+Proxima OS disponivel: $(format_os "$next")"
+    else
+      echo "ALERTA: $(format_os "$confirmed") criada | proxima OS: $(format_os "$next")"
+    fi
+  fi
+  return 0
+}
+
 make_payload() {
   local include_os="$1"
   local grade="$2"
@@ -340,7 +424,7 @@ make_payload() {
   serial_json="$(json_escape "$SERIAL")"
 
   cat <<JSON
-{"os":$os_json,"modelo":"$(json_escape "$MODEL")","serial":"$serial_json","cpu":"$(json_escape "$(cpu_short "$CHIP")")","gpu":$gpu_json,"ram":"$(json_escape "$(ram_short "$RAM")")","ramMods":"$(json_escape "$(ram_short "$RAM")")","disco":"$(json_escape "$(disk_short "$DISK")")","modoManual":false,"bateria":"$(json_escape "$BATTERY")","grade":"$(json_escape "$grade")","obs":"$(json_escape "$obs")"}
+{"os":$os_json,"modelo":"$(json_escape "$MODEL")","serial":"$serial_json","tipoEquipamento":"Notebook","cpu":"$(json_escape "$(cpu_short "$CHIP")")","gpu":$gpu_json,"ram":"$(json_escape "$(ram_short "$RAM")")","ramMods":"$(json_escape "$(ram_short "$RAM")")","disco":"$(json_escape "$(disk_short "$DISK")")","fichaCpu":"$(json_escape "$CHIP")","fichaGpu":"$(json_escape "$GPU")","fichaRam":"$(json_escape "$RAM")","fichaDisco":"$(json_escape "$DISK")","modoManual":false,"bateria":"$(json_escape "$BATTERY")","grade":"$(json_escape "$grade")","obs":"$(json_escape "$obs")"}
 JSON
 }
 
@@ -453,6 +537,88 @@ end run
 APPLESCRIPT
 }
 
+start_native_os_monitor() {
+  (
+    local last_seen="" base resp confirmed next local_os
+    while true; do
+      base="$(get_server_base_url)"
+      resp="$(curl -fsS --max-time 5 "$base/status-os-local" 2>/dev/null)"
+      confirmed="$(sed -nE 's/.*"ultimoConfirmado"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<< "$resp")"
+      next="$(sed -nE 's/.*"proximoDisponivel"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<< "$resp")"
+      if [[ -n "$confirmed" && -n "$next" ]]; then
+        local_os="$(sed -nE 's/[^0-9]*([0-9]+).*/\1/p' "$OS_FILE" 2>/dev/null)"
+        if [[ -n "$last_seen" ]] && (( confirmed > last_seen )) && [[ "$confirmed" != "$local_os" ]]; then
+          osascript - "$(format_os "$confirmed")" "$(format_os "$next")" <<'APPLESCRIPT' >/dev/null 2>&1
+on run argv
+  tell application "System Events"
+    activate
+    display dialog ((item 1 of argv) & " foi criada em outra estacao." & return & return & "Proxima OS disponivel: " & (item 2 of argv)) with title "InfoNotebook - Nova OS" buttons {"Entendido"} default button 1 with icon note
+  end tell
+end run
+APPLESCRIPT
+        fi
+        last_seen="$confirmed"
+      fi
+      sleep 4
+    done
+  ) &
+  NATIVE_OS_MONITOR_PID=$!
+}
+
+stop_native_os_monitor() {
+  if [[ -n "$NATIVE_OS_MONITOR_PID" ]]; then
+    kill "$NATIVE_OS_MONITOR_PID" >/dev/null 2>&1 || true
+    wait "$NATIVE_OS_MONITOR_PID" >/dev/null 2>&1 || true
+    NATIVE_OS_MONITOR_PID=""
+  fi
+}
+
+dialog_create_os() {
+  local tecnico serial codigo descricao referencia obs confirm base payload resp criada mensagem
+  tecnico="$(dialog_choose "Quem esta realizando a OS?" "Vitor|Lucas|Hyrides|Erick|Outro")"
+  [[ "$tecnico" == "__CAIJ_CANCEL__" ]] && return
+  if [[ "$tecnico" == "Outro" ]]; then
+    tecnico="$(dialog_input "Nome do tecnico" "")"
+    [[ "$tecnico" == "__CAIJ_CANCEL__" || -z "$(trim "$tecnico")" ]] && return
+  fi
+  serial="$(dialog_input "Serial do equipamento" "$SERIAL")"
+  [[ "$serial" == "__CAIJ_CANCEL__" || -z "$(trim "$serial")" ]] && return
+  codigo="$(dialog_input "Codigo do produto no Altertag" "")"
+  [[ "$codigo" == "__CAIJ_CANCEL__" || -z "$(trim "$codigo")" ]] && return
+  descricao="$(dialog_input "Descricao do produto" "$MODEL")"
+  [[ "$descricao" == "__CAIJ_CANCEL__" ]] && return
+  referencia="$(dialog_choose "Referencia" "GRADE A|GRADE B|GRADE C - PINTURA 1|GRADE C - PINTURA 2|GRADE C - PINTURA 3|GRADE T - TRIAGEM|RMA")"
+  [[ "$referencia" == "__CAIJ_CANCEL__" ]] && return
+  obs="$(dialog_input "Observacao" "")"
+  [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
+  confirm="$(dialog_confirm "Tecnico: $tecnico
+Serial: $serial
+Produto: $codigo - $descricao
+Referencia: $referencia" "Criar OS")"
+  [[ "$confirm" == "__CAIJ_CANCEL__" ]] && return
+
+  payload="{\"tecnico\":\"$(json_escape "$tecnico")\",\"serial\":\"$(json_escape "$serial")\",\"referencia\":\"$(json_escape "$referencia")\",\"idProduto\":0,\"produtoCodigo\":\"$(json_escape "$codigo")\",\"produtoDescricao\":\"$(json_escape "$descricao")\",\"produtoValor\":\"0.00\",\"servicos\":[],\"tipoEquipamento\":\"Notebook\",\"observacao\":\"$(json_escape "$obs")\"}"
+  base="$(get_server_base_url)"
+  resp="$(curl -fsS --max-time 45 -X POST -H 'Content-Type: application/json; charset=utf-8' -d "$payload" "$base/criar-os-altertag" 2>/dev/null)"
+  criada="$(sed -nE 's/.*"osNumero"[[:space:]]*:[[:space:]]*([0-9]+).*/\1/p' <<< "$resp")"
+  mensagem="$(sed -nE 's/.*"mensagem"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p' <<< "$resp")"
+  if [[ -n "$criada" ]]; then
+    save_os_number "$criada"
+    LAST_CONFIRMED_SEEN="$criada"
+    local prev_model prev_serial
+    prev_model="$MODEL"
+    prev_serial="$SERIAL"
+    MODEL="$descricao"
+    SERIAL="$serial"
+    dialog_print_label "$referencia" "$obs" "sim" "sim"
+    MODEL="$prev_model"
+    SERIAL="$prev_serial"
+    dialog_message "OS criada" "$(format_os "$criada") criada com sucesso para $tecnico."
+  else
+    dialog_message "Falha ao criar OS" "${mensagem:-Nao foi possivel criar a OS no Altertag.}"
+  fi
+}
+
 dialog_edit_manual() {
   local v
   v="$(dialog_input "Modelo" "$MODEL")"; [[ "$v" == "__CAIJ_CANCEL__" ]] && return 1; [[ -n "$v" ]] && MODEL="$v"
@@ -480,30 +646,46 @@ dialog_set_os_manual() {
 }
 
 dialog_print_label() {
+  local default_grade="$1"
+  local default_obs="$2"
+  local default_include_os="$3"
+  local skip_reserve="$4"
   local grade pintura obs include_choice include_os preview confirm payload base
-  grade="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|T|RMA")"
-  [[ "$grade" == "__CAIJ_CANCEL__" ]] && return
 
-  if [[ "$grade" == "C" ]]; then
-    pintura="$(dialog_choose "Selecione o tipo de pintura" "1|2|3")"
-    [[ "$pintura" == "__CAIJ_CANCEL__" ]] && return
-    grade="$(normalize_grade "C" "$pintura")"
+  if [[ -n "$default_grade" ]]; then
+    grade="$(normalize_grade "$default_grade" "")"
   else
-    grade="$(normalize_grade "$grade" "")"
+    grade="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|T|RMA")"
+    [[ "$grade" == "__CAIJ_CANCEL__" ]] && return
+    if [[ "$grade" == "C" ]]; then
+      pintura="$(dialog_choose "Selecione o tipo de pintura" "1|2|3")"
+      [[ "$pintura" == "__CAIJ_CANCEL__" ]] && return
+      grade="$(normalize_grade "C" "$pintura")"
+    else
+      grade="$(normalize_grade "$grade" "")"
+    fi
   fi
 
-  while true; do
-    obs="$(dialog_input "Observacoes para etiqueta" "")"
-    [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
-    if [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA|^T[[:space:]]*-[[:space:]]*TRIAGEM' ) && -z "$(trim "$obs")" ]]; then
-      dialog_message "CAIJ Info Notebook Mac" "Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem."
-    else
-      break
-    fi
-  done
+  if [[ -n "$default_obs" ]]; then
+    obs="$default_obs"
+  else
+    while true; do
+      obs="$(dialog_input "Observacoes para etiqueta" "")"
+      [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
+      if [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA' ) && -z "$(trim "$obs")" ]]; then
+        dialog_message "CAIJ Info Notebook Mac" "Observacoes sao obrigatorias para Grade B e Grade C - Pintura."
+      else
+        break
+      fi
+    done
+  fi
 
-  include_choice="$(dialog_confirm "Incluir OS na etiqueta?" "Incluir")"
-  if [[ "$include_choice" == "__CAIJ_CANCEL__" ]]; then include_os="nao"; else include_os="sim"; fi
+  if [[ -n "$default_include_os" ]]; then
+    include_os="$default_include_os"
+  else
+    include_choice="$(dialog_confirm "Incluir OS na etiqueta?" "Incluir")"
+    if [[ "$include_choice" == "__CAIJ_CANCEL__" ]]; then include_os="nao"; else include_os="sim"; fi
+  fi
 
   preview="OS: $([[ "$include_os" == "sim" ]] && format_os "$OS_NUMBER" || echo "sem OS")
 Modelo: $MODEL
@@ -518,7 +700,7 @@ Obs: $obs"
   confirm="$(dialog_confirm "$preview" "Imprimir")"
   [[ "$confirm" == "__CAIJ_CANCEL__" ]] && return
 
-  if [[ "$include_os" == "sim" ]]; then
+  if [[ "$include_os" == "sim" && "$skip_reserve" != "sim" ]]; then
     reserve_os >/dev/null 2>&1 || true
   fi
 
@@ -541,13 +723,16 @@ launch_dialog_ui() {
   if [[ "${CAIJ_MAC_TERMINAL:-}" == "1" ]]; then return 1; fi
   if ! command -v osascript >/dev/null 2>&1; then return 1; fi
 
+  start_native_os_monitor
+  trap stop_native_os_monitor EXIT INT TERM
   while true; do
     op="$(dialog_choose "CAIJ Info Notebook Mac
 
 OS: $(format_os "$OS_NUMBER")
 Modelo: $MODEL
-Serial: $SERIAL" "Imprimir etiqueta|Editar dados|Definir OS manual|Sincronizar OS|Recoletar dados|Sair")"
+Serial: $SERIAL" "Cadastrar OS|Imprimir etiqueta|Editar dados|Definir OS manual|Sincronizar OS|Recoletar dados|Sair")"
     case "$op" in
+      "Cadastrar OS") dialog_create_os ;;
       "Imprimir etiqueta") dialog_print_label ;;
       "Editar dados") dialog_edit_manual ;;
       "Definir OS manual") dialog_set_os_manual ;;
@@ -559,7 +744,7 @@ Serial: $SERIAL" "Imprimir etiqueta|Editar dados|Definir OS manual|Sincronizar O
         fi
         ;;
       "Recoletar dados") collect_info; dialog_message "Dados atualizados" "Dados do MacBook coletados novamente." ;;
-      "Sair"|"__CAIJ_CANCEL__") exit 0 ;;
+      "Sair"|"__CAIJ_CANCEL__") stop_native_os_monitor; exit 0 ;;
     esac
   done
 }
@@ -610,8 +795,8 @@ print_label() {
     grade="$(normalize_grade "$grade" "")"
   fi
   read "obs?Observacoes para etiqueta: "
-  while [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA|^T[[:space:]]*-[[:space:]]*TRIAGEM' ) && -z "$(trim "$obs")" ]]; do
-    echo "Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem."
+  while [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA' ) && -z "$(trim "$obs")" ]]; do
+    echo "Observacoes sao obrigatorias para Grade B e Grade C - Pintura."
     read "obs?Observacoes para etiqueta: "
   done
   read "inc?Incluir OS na etiqueta? (S/n): "
@@ -669,6 +854,7 @@ echo "Interface visual indisponivel; abrindo modo terminal."
 sleep 1
 
 while true; do
+  check_os_alert "terminal"
   show_info
   echo ""
   echo "[1] Imprimir etiqueta via rede"

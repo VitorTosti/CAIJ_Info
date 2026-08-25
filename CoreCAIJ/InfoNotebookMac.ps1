@@ -114,6 +114,63 @@ function ConvertTo-CaijStorageSize {
     return $t
 }
 
+function Get-IoregPositiveValue {
+    param([string]$IoregText, [string]$Key)
+    $values = [regex]::Matches($IoregText, ('"{0}"\s*=\s*(\d+)' -f [regex]::Escape($Key))) |
+        ForEach-Object { [double]$_.Groups[1].Value } |
+        Where-Object { $_ -gt 0 }
+    if (-not $values) { return 0 }
+    return [double](($values | Measure-Object -Maximum).Maximum)
+}
+
+function ConvertFrom-IoregBatteryHealth {
+    param([string]$IoregText)
+    if (-not $IoregText) { return '' }
+    $healthPercent = Get-IoregPositiveValue $IoregText 'StateOfHealth'
+    if ($healthPercent -gt 0 -and $healthPercent -le 100) { return "$([math]::Round($healthPercent))%" }
+    foreach ($pair in @(
+        @('AppleRawMaxCapacity', 'AppleRawDesignCapacity'),
+        @('NominalChargeCapacity', 'DesignCapacity'),
+        @('MaxCapacity', 'DesignCapacity')
+    )) {
+        $maxCapacity = Get-IoregPositiveValue $IoregText $pair[0]
+        $designCapacity = Get-IoregPositiveValue $IoregText $pair[1]
+        if ($maxCapacity -le 0 -or $designCapacity -le 0) { continue }
+        $percent = [math]::Min(100, [math]::Round(($maxCapacity / $designCapacity) * 100))
+        if ($percent -gt 0) { return "$percent%" }
+    }
+    return ''
+}
+
+function ConvertFrom-IoregBatteryCycleCount {
+    param([string]$IoregText)
+    if (-not $IoregText) { return 0 }
+    return [int](Get-IoregPositiveValue $IoregText 'CycleCount')
+}
+
+function Get-MacBatteryHealthFallback {
+    try {
+        $ioregText = (& ioreg -r -c AppleSmartBattery 2>$null) -join [Environment]::NewLine
+        return ConvertFrom-IoregBatteryHealth -IoregText $ioregText
+    } catch { return '' }
+}
+
+function Get-MacBatteryCycleCountFallback {
+    try {
+        $ioregText = (& ioreg -r -c AppleSmartBattery 2>$null) -join [Environment]::NewLine
+        return ConvertFrom-IoregBatteryCycleCount -IoregText $ioregText
+    } catch { return 0 }
+}
+
+function Get-MacBatterySummary {
+    param([Parameter(Mandatory=$true)]$Info)
+    $health = if ($Info.BatSaude) { ([string]$Info.BatSaude).Trim() } else { 'N/A' }
+    $cycles = 0
+    if ($Info.PSObject.Properties.Name -contains 'BatCiclos') { $cycles = [int]$Info.BatCiclos }
+    if ($cycles -gt 0) { return "$health | $cycles ciclos" }
+    return $health
+}
+
 function ConvertFrom-MacSystemProfilerJson {
     param([Parameter(Mandatory=$true)][string]$JsonText)
 
@@ -139,8 +196,14 @@ function ConvertFrom-MacSystemProfilerJson {
     $info.ClockMax = 'N/A'
 
     if ($memory -match '(?i)(\d+)\s*GB') {
-        $info.RAM = "$($matches[1])GB Unificada"
-        $info.RAMMods = "$($matches[1])GB (Unificada)"
+        $memoryGb = $matches[1]
+        if ($chip -match '(?i)Apple\s+M') {
+            $info.RAM = "${memoryGb}GB Unificada"
+            $info.RAMMods = "${memoryGb}GB (Unificada)"
+        } else {
+            $info.RAM = "${memoryGb}GB"
+            $info.RAMMods = "${memoryGb}GB"
+        }
     } elseif ($memory) {
         $info.RAM = $memory.Trim()
         $info.RAMMods = $memory.Trim()
@@ -171,13 +234,16 @@ function ConvertFrom-MacSystemProfilerJson {
 
     $health = ''
     $capacity = ''
+    $cycles = ''
     try { $health = [string]$power.sppower_battery_health_info.sppower_battery_health } catch {}
+    try { $cycles = [string]$power.sppower_battery_health_info.sppower_battery_cycle_count } catch {}
     try { $capacity = [string]$power.sppower_battery_charge_info.sppower_battery_max_capacity } catch {}
-    if ($capacity -match '\d+') {
+    if ($capacity -match '\d+' -and [int]$matches[0] -gt 0) {
         $info.BatSaude = if ($health) { "$($matches[0])% ($health)" } else { "$($matches[0])%" }
     } else {
-        $info.BatSaude = if ($health) { $health } else { 'N/A' }
+        $info.BatSaude = 'N/A'
     }
+    $info.BatCiclos = if ($cycles -match '\d+') { [int]$matches[0] } else { 0 }
 
     return [pscustomobject]$info
 }
@@ -193,7 +259,21 @@ function Invoke-SystemProfilerJson {
 
 function Get-MacNotebookInfo {
     try {
-        return ConvertFrom-MacSystemProfilerJson -JsonText (Invoke-SystemProfilerJson)
+        $info = ConvertFrom-MacSystemProfilerJson -JsonText (Invoke-SystemProfilerJson)
+        if ($info.CPU -match '(?i)Intel' -and $info.CPU -notmatch '\d{4,5}') {
+            try {
+                $cpuBrand = ([string](& sysctl -n machdep.cpu.brand_string 2>$null)).Trim()
+                if ($cpuBrand) { $info.CPU = $cpuBrand }
+            } catch {}
+        }
+        if (-not $info.BatSaude -or $info.BatSaude -match '^(?i:N/?A)$') {
+            $batteryFallback = Get-MacBatteryHealthFallback
+            if ($batteryFallback) { $info.BatSaude = $batteryFallback }
+        }
+        if (-not $info.BatCiclos -or $info.BatCiclos -le 0) {
+            $info.BatCiclos = Get-MacBatteryCycleCountFallback
+        }
+        return $info
     } catch {
         Write-Host "Nao foi possivel coletar todos os dados automaticamente: $($_.Exception.Message)" -ForegroundColor Yellow
         return [pscustomobject][ordered]@{
@@ -208,6 +288,7 @@ function Get-MacNotebookInfo {
             Tela = 'N/A'
             Discos = 'N/A'
             BatSaude = 'N/A'
+            BatCiclos = 0
         }
     }
 }
@@ -304,17 +385,23 @@ function New-CaijPrintPayload {
         [switch]$Manual
     )
     $gpu = Get-GpuShort $Info.GPU
+    $discoCompleto = (($Info.Discos -split $NL) | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
     return [ordered]@{
         os = if ($IncludeOs) { $OsNumero } else { $null }
         modelo = $Info.Modelo
         serial = if ($Info.Serial -and $Info.Serial.Trim() -ne '') { $Info.Serial } else { 'XXXXXX' }
+        tipoEquipamento = 'Notebook'
         cpu = Get-IntelCpuShort $Info.CPU
         gpu = if ($gpu) { $gpu } else { $null }
         ram = Get-RamShort $Info.RAM
         ramMods = Get-RamShort $Info.RAM
-        disco = Get-DiskShort (($Info.Discos -split $NL) | Select-Object -First 1)
+        disco = Get-DiskShort $discoCompleto
+        fichaCpu = $Info.CPU
+        fichaGpu = $Info.GPU
+        fichaRam = $Info.RAM
+        fichaDisco = $discoCompleto
         modoManual = [bool]$Manual
-        bateria = $Info.BatSaude
+        bateria = Get-MacBatterySummary -Info $Info
         grade = Resolve-CaijGradeSelection -Grade $Grade
         obs = if ($Obs) { $Obs } else { '' }
     }
@@ -451,7 +538,7 @@ function Add-HistoricoNotebook {
         ram = $Info.RAM
         disco = (($Info.Discos -split $NL) | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
         gpu = $Info.GPU
-        bateria = $Info.BatSaude
+        bateria = Get-MacBatterySummary -Info $Info
         grade = $Grade
         obs = $Obs
         servidor = $script:ultimoStatusServidor
@@ -509,7 +596,7 @@ function Show-NotebookInfo {
     Write-Host "GPU:      $($Info.GPU)"
     Write-Host "Tela:     $($Info.Tela)"
     Write-Host "Disco:    $($Info.Discos)"
-    Write-Host "Bateria:  $($Info.BatSaude)"
+    Write-Host "Bateria:  $(Get-MacBatterySummary -Info $Info)"
     Write-Host '=============================================' -ForegroundColor Cyan
 }
 
@@ -517,7 +604,7 @@ function Edit-NotebookInfoManual {
     param([Parameter(Mandatory=$true)]$Info)
     Write-Host ''
     Write-Host 'Edicao manual: Enter mantem o valor atual.' -ForegroundColor Yellow
-    foreach ($field in @('Modelo','Serial','CPU','RAM','GPU','Discos','BatSaude')) {
+    foreach ($field in @('Modelo','Serial','CPU','RAM','GPU','Discos','BatSaude','BatCiclos')) {
         $current = [string]$Info.$field
         $value = Read-Host "$field [$current]"
         if ($value -and $value.Trim() -ne '') { $Info.$field = $value.Trim() }
@@ -599,8 +686,8 @@ function Start-InfoNotebookMac {
                     $grade = Resolve-CaijGradeSelection -Grade $grade
                 }
                 $obs = Read-Host 'Observacoes para etiqueta'
-                while (($grade -eq 'B' -or $grade -match '^C\s*-\s*PINTURA|^T\s*-\s*TRIAGEM') -and [string]::IsNullOrWhiteSpace($obs)) {
-                    Write-Host 'Observacoes sao obrigatorias para Grade B, Grade C - Pintura e Grade T - Triagem.' -ForegroundColor Yellow
+                while (($grade -eq 'B' -or $grade -match '^C\s*-\s*PINTURA') -and [string]::IsNullOrWhiteSpace($obs)) {
+                    Write-Host 'Observacoes sao obrigatorias para Grade B e Grade C - Pintura.' -ForegroundColor Yellow
                     $obs = Read-Host 'Observacoes para etiqueta'
                 }
                 $inc = Read-Host 'Incluir OS na etiqueta? (S/n)'

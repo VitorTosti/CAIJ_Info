@@ -5,7 +5,9 @@ import mimetypes
 import os
 import pathlib
 import re
+import shutil
 import socket
+import subprocess
 import threading
 import time
 import urllib.error
@@ -16,6 +18,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORTA_SERVIDOR = 9100
 FALLBACK_SERVER = "http://192.168.15.127:9100"
+
+
+def format_os(value):
+    return "C{:06d}".format(max(int(value), 0))
 
 
 def normalize_server_url(value):
@@ -90,11 +96,16 @@ def build_print_payload(info, os_numero, grade, obs, include_os):
         "os": int(os_numero) if include_os else None,
         "modelo": info.get("modelo") or "Apple MacBook",
         "serial": serial if serial != "N/A" else "XXXXXX",
+        "tipoEquipamento": "Notebook",
         "cpu": cpu_short(info.get("cpu")),
         "gpu": gpu_short(info.get("gpu")),
         "ram": ram_short(info.get("ram")),
         "ramMods": ram_short(info.get("ram")),
         "disco": disk_short(info.get("disco")),
+        "fichaCpu": info.get("cpu") or "N/A",
+        "fichaGpu": info.get("gpu") or "N/A",
+        "fichaRam": info.get("ram") or "N/A",
+        "fichaDisco": info.get("disco") or "N/A",
         "modoManual": False,
         "bateria": info.get("bateria") or "N/A",
         "grade": (grade or "A").strip().upper(),
@@ -109,8 +120,6 @@ def validate_print_request(grade, obs):
         return "Observacoes sao obrigatorias para Grade B."
     if re.match(r"^C\s*-\s*PINTURA", grade_text) and not obs_text:
         return "Observacoes sao obrigatorias para Grade C - Pintura."
-    if re.match(r"^T\s*-\s*TRIAGEM", grade_text) and not obs_text:
-        return "Observacoes sao obrigatorias para Grade T - Triagem."
     return ""
 
 
@@ -124,6 +133,8 @@ class AppState:
         self.history_path = self.core_dir / "caij_historico_notebooks.json"
         self.lock = threading.RLock()
         self.data = self.load_runtime_data()
+        self.last_seen_confirmed = None
+        self.pending_browser_event = None
 
     def load_runtime_data(self):
         try:
@@ -183,10 +194,11 @@ class AppState:
             return {
                 "info": self.data.get("info", {}),
                 "osNumero": self.data["osNumero"],
-                "osFormatada": "C000{}".format(self.data["osNumero"]),
+                "osFormatada": format_os(self.data["osNumero"]),
                 "serverUrl": self.server_url(),
                 "lastServerStatus": self.data.get("lastServerStatus", "nao verificado"),
                 "lastOsSync": self.data.get("lastOsSync", ""),
+                "pendingCreatedOs": int(self.data.get("pendingCreatedOs") or 0),
             }
 
     def update_info(self, info):
@@ -217,10 +229,136 @@ class AppState:
             return self.set_os_number(int(num))
         return self.read_os_number()
 
+    def watch_os(self):
+        resp = self.request_server("/status-os-local", timeout=5)
+        confirmed = int(resp.get("ultimoConfirmado") or 0)
+        next_num = int(resp.get("proximoDisponivel") or (confirmed + 1))
+        with self.lock:
+            previous = self.last_seen_confirmed
+            is_new = previous is not None and confirmed > previous
+            self.last_seen_confirmed = max(previous or 0, confirmed)
+            pending_created = int(self.data.get("pendingCreatedOs") or 0)
+            if not pending_created and next_num > 0 and next_num != self.read_os_number():
+                self.set_os_number(next_num)
+            self.data["lastServerStatus"] = "online"
+            self.data["lastOsSync"] = time.strftime("%d/%m %H:%M")
+            self.save_runtime_data()
+            event_data = {
+                "ok": True,
+                "event": is_new,
+                "osCriadaNumero": confirmed,
+                "osCriada": format_os(confirmed) if confirmed else "",
+                "proximaOsNumero": next_num,
+                "proximaOs": format_os(next_num),
+                "state": self.public_state(),
+            }
+            if is_new:
+                self.pending_browser_event = event_data
+                self.show_native_os_alert(event_data)
+            return event_data
+
+    def consume_os_event(self):
+        with self.lock:
+            if self.pending_browser_event:
+                event_data = self.pending_browser_event
+                self.pending_browser_event = None
+                return event_data
+            return {"ok": True, "event": False, "state": self.public_state()}
+
+    def show_native_os_alert(self, event_data):
+        osascript = shutil.which("osascript")
+        if not osascript:
+            return
+        created = str(event_data.get("osCriada") or "Nova OS")
+        next_os = str(event_data.get("proximaOs") or "")
+        message = "{} foi criada em outra estacao.\n\nProxima OS disponivel: {}".format(created, next_os)
+        message = message.replace("\\", "\\\\").replace('"', '\\"')
+        script = (
+            'tell application "System Events"\n'
+            'activate\n'
+            'display dialog "{}" with title "InfoNotebook - Nova OS" '
+            'buttons {{"Continuar com {}"}} default button 1 with icon note\n'
+            'end tell'
+        ).format(message, next_os.replace('"', '\\"'))
+        try:
+            subprocess.Popen(
+                [osascript, "-e", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception:
+            pass
+
+    def search_products(self, term):
+        query = str(term or "").strip()
+        if len(query) < 2:
+            return {"ok": False, "message": "Digite pelo menos 2 caracteres.", "produtos": []}
+        response = self.request_server(
+            "/buscar-opcoes-altertag",
+            method="POST",
+            payload={"tipo": "produto", "termo": query, "modo": "catalogo"},
+            timeout=25,
+        )
+        if str(response.get("status") or "").lower() != "ok":
+            return {"ok": False, "message": response.get("mensagem") or "Nenhum produto encontrado.", "produtos": []}
+        return {
+            "ok": True,
+            "message": response.get("mensagem") or "Produtos encontrados.",
+            "fonte": response.get("fonte") or "Altertag",
+            "produtos": response.get("produtos") or [],
+        }
+
+    def create_os(self, request_data):
+        technician = str(request_data.get("tecnico") or "").strip()
+        serial = str(request_data.get("serial") or "").strip()
+        product = request_data.get("produto") or {}
+        reference = str(request_data.get("referencia") or "GRADE T - TRIAGEM").strip()
+        if not technician:
+            return {"ok": False, "message": "Selecione o tecnico."}
+        if not serial:
+            return {"ok": False, "message": "Informe o serial."}
+        if not product:
+            return {"ok": False, "message": "Selecione um produto do Altertag."}
+
+        payload = {
+            "tecnico": technician,
+            "serial": serial,
+            "referencia": reference,
+            "idProduto": int(product.get("idProduto") or 0),
+            "produtoCodigo": str(product.get("codigo") or product.get("produtoCodigo") or ""),
+            "produtoDescricao": str(product.get("descricao") or product.get("nome") or ""),
+            "produtoValor": str(product.get("valor") or "0.00"),
+            "servicos": request_data.get("servicos") or [],
+            "tipoEquipamento": "Notebook",
+            "observacao": str(request_data.get("observacao") or "").strip(),
+        }
+        response = self.request_server("/criar-os-altertag", method="POST", payload=payload, timeout=45)
+        if str(response.get("status") or "").lower() != "ok":
+            return {"ok": False, "message": response.get("mensagem") or "Falha ao criar OS."}
+
+        created = int(response.get("osNumero") or 0)
+        next_num = int(response.get("proximoDisponivel") or (created + 1))
+        if created:
+            self.set_os_number(created)
+            self.last_seen_confirmed = max(self.last_seen_confirmed or 0, created)
+        with self.lock:
+            self.data["pendingCreatedOs"] = created
+            self.data["lastServerStatus"] = "online"
+            self.data["lastOsSync"] = time.strftime("%d/%m %H:%M")
+            self.save_runtime_data()
+        return {
+            "ok": True,
+            "message": "OS {} criada com sucesso.".format(format_os(created)),
+            "osCriada": format_os(created),
+            "proximaOs": format_os(next_num),
+            "response": response,
+            "state": self.public_state(),
+        }
+
     def add_log(self, status, message, grade, obs):
         entry = {
             "dataHora": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "os": "C000{}".format(self.read_os_number()),
+            "os": format_os(self.read_os_number()),
             "osNumero": self.read_os_number(),
             "status": status,
             "acao": "impressao",
@@ -253,7 +391,8 @@ class AppState:
         with self.lock:
             if request_data.get("info"):
                 self.update_info(request_data["info"])
-            if include_os:
+            pending_created = int(self.data.get("pendingCreatedOs") or 0)
+            if include_os and not pending_created:
                 try:
                     self.reserve_os()
                 except Exception:
@@ -266,6 +405,9 @@ class AppState:
                 self.save_runtime_data()
             self.add_log("ok", "Etiqueta enviada com sucesso", payload["grade"], payload["obs"])
             if include_os:
+                with self.lock:
+                    self.data["pendingCreatedOs"] = 0
+                    self.save_runtime_data()
                 try:
                     self.sync_os()
                 except Exception:
@@ -312,6 +454,8 @@ def make_handler(app_state, stop_event):
                 return self.serve_file(app_state.core_dir / "caij-logo.png")
             if self.path == "/api/state":
                 return self.send_json(200, app_state.public_state())
+            if self.path == "/api/os-watch":
+                return self.send_json(200, app_state.consume_os_event())
             return self.send_json(404, {"ok": False, "message": "Nao encontrado"})
 
         def do_POST(self):
@@ -322,6 +466,11 @@ def make_handler(app_state, stop_event):
                     return self.send_json(200, app_state.update_info(self.read_json().get("info", {})))
                 if self.path == "/api/sync-os":
                     return self.send_json(200, app_state.sync_os())
+                if self.path == "/api/products":
+                    return self.send_json(200, app_state.search_products(self.read_json().get("term", "")))
+                if self.path == "/api/create-os":
+                    result = app_state.create_os(self.read_json())
+                    return self.send_json(200 if result.get("ok") else 400, result)
                 if self.path == "/api/set-os":
                     num = self.read_json().get("osNumero")
                     return self.send_json(200, {"osNumero": app_state.set_os_number(int(num)), "state": app_state.public_state()})
@@ -358,6 +507,17 @@ def main():
 
     stop_event = threading.Event()
     app_state = AppState(args.core, args.data)
+
+    def monitor_os():
+        while not stop_event.is_set():
+            try:
+                app_state.watch_os()
+            except Exception:
+                pass
+            stop_event.wait(4)
+
+    monitor_thread = threading.Thread(target=monitor_os, name="caij-os-monitor", daemon=True)
+    monitor_thread.start()
     httpd = ThreadingHTTPServer((args.host, args.port), make_handler(app_state, stop_event))
     url = "http://{}:{}/".format(httpd.server_address[0], httpd.server_address[1])
     print("Interface CAIJ aberta em {}".format(url), flush=True)
