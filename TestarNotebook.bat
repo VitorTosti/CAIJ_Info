@@ -1,2 +1,3 @@
 @echo off
-start "" powershell.exe -ExecutionPolicy Bypass -WindowStyle Hidden -File "%~dp0CoreCAIJ\TestarNotebook.ps1"
+start "" /b wscript.exe //B //Nologo "%~dp0TestarNotebook.vbs"
+exit /b
