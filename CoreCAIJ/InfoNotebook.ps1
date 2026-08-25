@@ -7,11 +7,277 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 $NL = [Environment]::NewLine
 
+$lenovoPreflightPath = Join-Path $PSScriptRoot 'PrepararLenovo.ps1'
+$runLenovoPreflight = $true
+try {
+    # Caminho rapido: o fabricante e o mapeamento ficam no Registro e podem ser
+    # conferidos sem abrir outro PowerShell nem inicializar o provedor CIM/WMI.
+    $manufacturerFast = ([string](Get-ItemPropertyValue `
+        -LiteralPath 'HKLM:\HARDWARE\DESCRIPTION\System\BIOS' `
+        -Name 'SystemManufacturer' `
+        -ErrorAction Stop)).Trim()
+    if ($manufacturerFast -and $manufacturerFast -notmatch '(?i)Lenovo') {
+        $runLenovoPreflight = $false
+    } elseif ($manufacturerFast -match '(?i)Lenovo') {
+        $desiredLenovoMap = [byte[]](
+            0x00,0x00,0x00,0x00, 0x00,0x00,0x00,0x00,
+            0x02,0x00,0x00,0x00, 0x73,0x00,0x1D,0xE0,
+            0x00,0x00,0x00,0x00
+        )
+        $currentLenovoMap = [byte[]](Get-ItemPropertyValue `
+            -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Keyboard Layout' `
+            -Name 'Scancode Map' `
+            -ErrorAction Stop)
+        if ($currentLenovoMap.Length -eq $desiredLenovoMap.Length) {
+            $mapMatches = $true
+            for ($mapIndex = 0; $mapIndex -lt $desiredLenovoMap.Length; $mapIndex++) {
+                if ($currentLenovoMap[$mapIndex] -ne $desiredLenovoMap[$mapIndex]) {
+                    $mapMatches = $false
+                    break
+                }
+            }
+            if ($mapMatches) { $runLenovoPreflight = $false }
+        }
+    }
+} catch {
+    # Sem informacao confiavel no Registro, preserva a verificacao completa.
+    $runLenovoPreflight = $true
+}
+
+if ($runLenovoPreflight -and (Test-Path -LiteralPath $lenovoPreflightPath -PathType Leaf)) {
+    try {
+        $appRootPreflight = Split-Path -Parent $PSScriptRoot
+        $preflightArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "{0}" -AppRoot "{1}"' -f `
+            $lenovoPreflightPath.Replace('"', '""'), $appRootPreflight.Replace('"', '""')
+        $preflightProcess = Start-Process powershell.exe -ArgumentList $preflightArgs -WindowStyle Hidden -Wait -PassThru
+        if ($preflightProcess.ExitCode -ne 0) { exit $preflightProcess.ExitCode }
+    } catch {
+        Add-Type -AssemblyName System.Windows.Forms
+        [System.Windows.Forms.MessageBox]::Show(
+            "Nao foi possivel verificar a correcao do teclado Lenovo.`n`n$($_.Exception.Message)",
+            'InfoNotebook - Verificacao Lenovo',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error
+        ) | Out-Null
+        exit 24
+    }
+}
+
 . (Join-Path $PSScriptRoot 'GradeRules.ps1')
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
+
+if (-not ('CaijDpiAwareness' -as [type])) {
+    $dpiAwarenessSource = @'
+using System;
+using System.Runtime.InteropServices;
+
+public static class CaijDpiAwareness
+{
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDpiAwarenessContext(IntPtr value);
+
+    [DllImport("shcore.dll")]
+    private static extern int SetProcessDpiAwareness(int value);
+
+    [DllImport("user32.dll")]
+    private static extern bool SetProcessDPIAware();
+
+    public static void Enable()
+    {
+        try {
+            if (SetProcessDpiAwarenessContext(new IntPtr(-4))) return;
+        } catch { }
+        try {
+            if (SetProcessDpiAwareness(2) == 0) return;
+        } catch { }
+        try { SetProcessDPIAware(); } catch { }
+    }
+}
+'@
+    Add-Type -TypeDefinition $dpiAwarenessSource -WarningAction SilentlyContinue
+}
+
+try { [CaijDpiAwareness]::Enable() } catch {}
+
+$script:caijPrivateFonts = New-Object System.Drawing.Text.PrivateFontCollection
+$script:caijInterFamily = $null
+$script:caijOrbitronFamily = $null
+foreach ($fontSpec in @(
+    @{ Path = (Join-Path $PSScriptRoot 'assets\fonts\Inter-Variable.ttf'); Target = 'Inter' },
+    @{ Path = (Join-Path $PSScriptRoot 'assets\fonts\Orbitron-Variable.ttf'); Target = 'Orbitron' }
+)) {
+    try {
+        if (Test-Path -LiteralPath $fontSpec.Path) {
+            $script:caijPrivateFonts.AddFontFile($fontSpec.Path)
+            $family = @($script:caijPrivateFonts.Families | Where-Object { $_.Name -eq $fontSpec.Target } | Select-Object -First 1)
+            if ($fontSpec.Target -eq 'Inter' -and $family.Count -gt 0) { $script:caijInterFamily = $family[0] }
+            if ($fontSpec.Target -eq 'Orbitron' -and $family.Count -gt 0) { $script:caijOrbitronFamily = $family[0] }
+        }
+    } catch {}
+}
+
+function New-CaijFont {
+    param(
+        [ValidateSet('UI','Display')][string]$Kind = 'UI',
+        [float]$Size = 9,
+        [System.Drawing.FontStyle]$Style = [System.Drawing.FontStyle]::Regular
+    )
+
+    # Fontes nativas ficam mais nitidas no WinForms do que fontes variaveis privadas.
+    $fontName = if ($Kind -eq 'Display') {
+        'Segoe UI Variable Display'
+    } elseif ($Size -le 8) {
+        'Segoe UI Variable Small'
+    } else {
+        'Segoe UI Variable Text'
+    }
+    try {
+        $nativeFont = New-Object System.Drawing.Font($fontName, $Size, $Style, [System.Drawing.GraphicsUnit]::Point)
+        if ($nativeFont.Name -eq $fontName) { return $nativeFont }
+        $nativeFont.Dispose()
+    } catch {}
+
+    $fallback = if ($Kind -eq 'Display') { 'Segoe UI Semibold' } else { 'Segoe UI' }
+    try {
+        return New-Object System.Drawing.Font($fallback, $Size, $Style, [System.Drawing.GraphicsUnit]::Point)
+    } catch {
+        return New-Object System.Drawing.Font('Arial', $Size, $Style, [System.Drawing.GraphicsUnit]::Point)
+    }
+}
+
+function Set-CaijWindowsTypography {
+    param([System.Windows.Forms.Control]$Root)
+    if (-not $Root) { return }
+
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($Root)
+    while ($queue.Count -gt 0) {
+        $control = [System.Windows.Forms.Control]$queue.Dequeue()
+        foreach ($child in $control.Controls) { $queue.Enqueue($child) }
+        if (-not $control.Font -or $control.Font.Name -match 'Symbol|Barcode|Code 128') { continue }
+
+        $kind = 'UI'
+        if (
+            $control -is [System.Windows.Forms.Label] -and
+            $control.Font.Bold -and
+            $control.Font.Size -ge 13 -and
+            ([string]$control.Text).Length -ge 10 -and
+            [string]$control.Text -match '[A-Za-z]'
+        ) {
+            $kind = 'Display'
+        }
+        try {
+            $fontSize = [float]$control.Font.Size
+            $newFont = New-CaijFont -Kind $kind -Size $fontSize -Style $control.Font.Style
+            if ($kind -eq 'Display' -and $control.Width -gt 20 -and [string]$control.Text) {
+                $maxWidth = [Math]::Max(16, $control.Width - 6)
+                while (
+                    $fontSize -gt 9 -and
+                    [System.Windows.Forms.TextRenderer]::MeasureText([string]$control.Text, $newFont).Width -gt $maxWidth
+                ) {
+                    $newFont.Dispose()
+                    $fontSize -= 0.5
+                    $newFont = New-CaijFont -Kind $kind -Size $fontSize -Style $control.Font.Style
+                }
+            }
+            $control.Font = $newFont
+            if ($control -is [System.Windows.Forms.Button]) {
+                $control.UseCompatibleTextRendering = $false
+                Set-DoubleBuffered -Control $control
+            }
+        } catch {}
+    }
+
+    if ($Root -is [System.Windows.Forms.Form]) {
+        Set-CaijDpiLayout -Form $Root
+    }
+}
+
+function Get-CaijDpiScale {
+    $graphics = $null
+    try {
+        $graphics = [System.Drawing.Graphics]::FromHwnd([IntPtr]::Zero)
+        return [Math]::Max(1.0, [Math]::Min(2.0, ([double]$graphics.DpiX / 96.0)))
+    } catch {
+        return 1.0
+    } finally {
+        if ($graphics) { $graphics.Dispose() }
+    }
+}
+
+function Set-CaijDpiLayout {
+    param([System.Windows.Forms.Form]$Form)
+    if (-not $Form) { return }
+    if ($Form.PSObject.Properties['CaijDpiLayoutApplied']) { return }
+
+    $dpiScale = Get-CaijDpiScale
+    $Form | Add-Member -NotePropertyName CaijDpiLayoutApplied -NotePropertyValue $true
+    if ($dpiScale -le 1.01) { return }
+
+    $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    $maxScaleX = [Math]::Max(1.0, (($workingArea.Width - 32.0) / [Math]::Max(1, $Form.Width)))
+    $maxScaleY = [Math]::Max(1.0, (($workingArea.Height - 32.0) / [Math]::Max(1, $Form.Height)))
+    $scale = [Math]::Min($dpiScale, [Math]::Min($maxScaleX, $maxScaleY))
+
+    # Se uma janela alta precisar de escala menor, fonte e geometria continuam proporcionais.
+    $fontRatio = $scale / $dpiScale
+    if ($fontRatio -lt 0.995) {
+        $fontQueue = New-Object System.Collections.Queue
+        $fontQueue.Enqueue($Form)
+        while ($fontQueue.Count -gt 0) {
+            $fontControl = [System.Windows.Forms.Control]$fontQueue.Dequeue()
+            foreach ($child in $fontControl.Controls) { $fontQueue.Enqueue($child) }
+            if (-not $fontControl.Font -or $fontControl.Font.Name -match 'Symbol|Barcode|Code 128') { continue }
+            try {
+                $fontControl.Font = New-Object System.Drawing.Font(
+                    $fontControl.Font.FontFamily,
+                    ([float]($fontControl.Font.Size * $fontRatio)),
+                    $fontControl.Font.Style,
+                    [System.Drawing.GraphicsUnit]::Point
+                )
+            } catch {}
+        }
+    }
+
+    $hadMinimumSize = ($Form.MinimumSize.Width -gt 0 -or $Form.MinimumSize.Height -gt 0)
+    if ($Form.Name -eq 'InfoNotebookMain') { $script:mainLayoutSuspended = $true }
+    try {
+        $Form.SuspendLayout()
+        $Form.AutoScaleMode = [System.Windows.Forms.AutoScaleMode]::None
+        $Form.Scale((New-Object System.Drawing.SizeF([float]$scale, [float]$scale)))
+        if ($hadMinimumSize) { $Form.MinimumSize = $Form.Size }
+    } finally {
+        $Form.ResumeLayout($true)
+    }
+
+    if ($Form.Name -eq 'InfoNotebookMain') {
+        $script:mainLayoutWidth = $Form.ClientSize.Width
+        $script:mainLayoutHeight = $Form.ClientSize.Height
+        $script:mainDpiScaleApplied = $scale
+        $script:mainResponsiveScaleX = 1.0
+        $script:mainResponsiveScaleY = 1.0
+        foreach ($item in $script:mainLayoutControls) {
+            $item.X = $item.Control.Left
+            $item.Y = $item.Control.Top
+        }
+        $script:mainLayoutSuspended = $false
+    }
+
+    # Regions do WinForms nao acompanham Control.Scale; recria os recortes no tamanho novo.
+    $regionQueue = New-Object System.Collections.Queue
+    $regionQueue.Enqueue($Form)
+    while ($regionQueue.Count -gt 0) {
+        $regionControl = [System.Windows.Forms.Control]$regionQueue.Dequeue()
+        foreach ($child in $regionControl.Controls) { $regionQueue.Enqueue($child) }
+        $radiusProperty = $regionControl.PSObject.Properties['CaijBaseCornerRadius']
+        if ($radiusProperty) {
+            Set-RoundedControl -Control $regionControl -Radius ([Math]::Max(1, [int][Math]::Round(([int]$radiusProperty.Value * $scale))))
+        }
+    }
+}
 
 if (-not ('CaijGradeMenuRenderer' -as [type])) {
     $gradeMenuRendererSource = @'
@@ -21,10 +287,10 @@ using System.Windows.Forms;
 
 public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
 {
-    private static readonly Color Background = Color.FromArgb(10, 20, 33);
-    private static readonly Color Hover = Color.FromArgb(20, 48, 70);
-    private static readonly Color Border = Color.FromArgb(36, 70, 104);
-    private static readonly Color Text = Color.FromArgb(236, 245, 255);
+    private static readonly Color Background = Color.FromArgb(9, 14, 29);
+    private static readonly Color Hover = Color.FromArgb(38, 27, 70);
+    private static readonly Color Border = Color.FromArgb(53, 45, 79);
+    private static readonly Color Text = Color.FromArgb(244, 241, 255);
 
     public CaijGradeMenuRenderer()
     {
@@ -34,12 +300,12 @@ public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
     private static Color GetAccent(object rawTag)
     {
         string tag = Convert.ToString(rawTag).Trim().ToUpperInvariant();
-        if (tag == "A") return Color.FromArgb(66, 232, 176);
-        if (tag == "B") return Color.FromArgb(255, 208, 96);
-        if (tag.StartsWith("C - PINTURA")) return Color.FromArgb(255, 156, 98);
-        if (tag.StartsWith("T - TRIAGEM")) return Color.FromArgb(24, 185, 255);
-        if (tag == "RMA") return Color.FromArgb(241, 95, 122);
-        return Color.FromArgb(102, 134, 165);
+        if (tag == "A") return Color.FromArgb(34, 197, 94);
+        if (tag == "B") return Color.FromArgb(245, 158, 11);
+        if (tag.StartsWith("C - PINTURA")) return Color.FromArgb(249, 115, 22);
+        if (tag.StartsWith("T - TRIAGEM")) return Color.FromArgb(139, 92, 246);
+        if (tag == "RMA") return Color.FromArgb(244, 63, 94);
+        return Color.FromArgb(112, 105, 133);
     }
 
     protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e)
@@ -67,7 +333,7 @@ public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
 
     protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e)
     {
-        e.TextColor = e.Item.Enabled ? Text : Color.FromArgb(102, 134, 165);
+        e.TextColor = e.Item.Enabled ? Text : Color.FromArgb(112, 105, 133);
         base.OnRenderItemText(e);
     }
 
@@ -78,8 +344,33 @@ public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
             e.Graphics.DrawRectangle(pen, border);
     }
 }
+
 '@
     Add-Type -TypeDefinition $gradeMenuRendererSource -ReferencedAssemblies @('System.Windows.Forms', 'System.Drawing') -WarningAction SilentlyContinue
+}
+
+if (-not ('CaijWindowTheme' -as [type])) {
+    $windowThemeSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
+
+public static class CaijWindowTheme
+{
+    [DllImport("dwmapi.dll")]
+    private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attribute, ref int value, int size);
+
+    public static void UseDarkTitleBar(Form form)
+    {
+        if (form == null) return;
+        int enabled = 1;
+        IntPtr handle = form.Handle;
+        if (DwmSetWindowAttribute(handle, 20, ref enabled, sizeof(int)) != 0)
+            DwmSetWindowAttribute(handle, 19, ref enabled, sizeof(int));
+    }
+}
+'@
+    Add-Type -TypeDefinition $windowThemeSource -ReferencedAssemblies @('System.Windows.Forms') -WarningAction SilentlyContinue
 }
 
 function Set-DoubleBuffered {
@@ -98,10 +389,10 @@ function Set-DoubleBuffered {
 # SPLASH SCREEN - aparece imediatamente
 # ================================================
 $splash = New-Object System.Windows.Forms.Form
-$splash.Text            = 'Caij Informatica'
-$splash.Size            = New-Object System.Drawing.Size(560, 360)
+$splash.Text            = 'InfoNotebook'
+$splash.ClientSize      = New-Object System.Drawing.Size(520, 300)
 $splash.StartPosition   = 'CenterScreen'
-$splash.BackColor       = [System.Drawing.Color]::FromArgb(15, 24, 36)
+$splash.BackColor       = [System.Drawing.Color]::FromArgb(7, 9, 17)
 $splash.FormBorderStyle = 'None'
 $splash.MaximizeBox     = $false
 $splash.MinimizeBox     = $false
@@ -110,29 +401,17 @@ Set-DoubleBuffered $splash
 
 $splash.Add_Paint({
     param($sender, $e)
-    $rect = New-Object System.Drawing.Rectangle(0, 0, $sender.ClientSize.Width, $sender.ClientSize.Height)
-    $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $rect,
-        [System.Drawing.Color]::FromArgb(8, 14, 24),
-        [System.Drawing.Color]::FromArgb(3, 8, 14),
-        [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
-    )
-    $e.Graphics.FillRectangle($brush, $rect)
-    $brush.Dispose()
+    $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+    $e.Graphics.DrawRectangle($border, 0, 0, $sender.ClientSize.Width - 1, $sender.ClientSize.Height - 1)
+    $border.Dispose()
 })
 
 $splashCard = New-Object System.Windows.Forms.Panel
-$splashCard.BackColor = [System.Drawing.Color]::FromArgb(15, 24, 36)
-$splashCard.Location  = New-Object System.Drawing.Point(0, 0)
-$splashCard.Size      = New-Object System.Drawing.Size(560, 360)
+$splashCard.BackColor = [System.Drawing.Color]::FromArgb(7, 9, 17)
+$splashCard.Location  = New-Object System.Drawing.Point(1, 1)
+$splashCard.Size      = New-Object System.Drawing.Size(518, 298)
 $splashCard.BorderStyle = 'None'
 $splash.Controls.Add($splashCard)
-
-$splashAccent = New-Object System.Windows.Forms.Panel
-$splashAccent.BackColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-$splashAccent.Location  = New-Object System.Drawing.Point(0, 0)
-$splashAccent.Size      = New-Object System.Drawing.Size(4, 360)
-$splashCard.Controls.Add($splashAccent)
 
 $baseDir = Split-Path -Parent $PSCommandPath
 $logoCandidates = @(
@@ -150,33 +429,31 @@ foreach ($cand in $logoCandidates) {
     }
 }
 if (-not $logoPath) {
-    try {
-        $pickLogo = New-Object System.Windows.Forms.OpenFileDialog
-        $pickLogo.Title = 'Selecionar logo da CAIJ'
-        $pickLogo.Filter = 'Imagens (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp'
-        $pickLogo.InitialDirectory = $baseDir
-        $pickLogo.Multiselect = $false
-        if ($pickLogo.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and (Test-Path $pickLogo.FileName)) {
-            $destLogo = Join-Path $baseDir 'caij-logo.png'
-            Copy-Item -Path $pickLogo.FileName -Destination $destLogo -Force
-            if (Test-Path $destLogo) { $logoPath = $destLogo }
-        }
-    } catch {}
+    $logoPath = $null
 }
+
+$splashEyebrow = New-Object System.Windows.Forms.Label
+$splashEyebrow.Text      = 'CAIJ INFORMATICA  /  GESTAO TECNICA'
+$splashEyebrow.Font      = New-CaijFont -Kind UI -Size 8 -Style ([System.Drawing.FontStyle]::Bold)
+$splashEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+$splashEyebrow.Location  = New-Object System.Drawing.Point(34, 24)
+$splashEyebrow.Size      = New-Object System.Drawing.Size(330, 18)
+$splashCard.Controls.Add($splashEyebrow)
 $splashLogoImg = New-Object System.Windows.Forms.PictureBox
-$splashLogoImg.Location = New-Object System.Drawing.Point(120, 22)
-$splashLogoImg.Size = New-Object System.Drawing.Size(280, 120)
+$splashLogoImg.Location = New-Object System.Drawing.Point(384, 20)
+$splashLogoImg.Size = New-Object System.Drawing.Size(100, 48)
 $splashLogoImg.SizeMode = 'Zoom'
 $splashLogoImg.BackColor = [System.Drawing.Color]::Transparent
 $splashCard.Controls.Add($splashLogoImg)
 
 $splashLogo = New-Object System.Windows.Forms.Label
-$splashLogo.Text      = 'CAIJ'
-$splashLogo.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 36, [System.Drawing.FontStyle]::Bold)
-$splashLogo.ForeColor = [System.Drawing.Color]::FromArgb(236, 246, 255)
+$splashLogo.Text      = 'IN'
+$splashLogo.Font      = New-CaijFont -Kind Display -Size 18 -Style ([System.Drawing.FontStyle]::Bold)
+$splashLogo.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+$splashLogo.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
 $splashLogo.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-$splashLogo.Location  = New-Object System.Drawing.Point(120, 44)
-$splashLogo.Size      = New-Object System.Drawing.Size(280, 66)
+$splashLogo.Location  = New-Object System.Drawing.Point(438, 20)
+$splashLogo.Size      = New-Object System.Drawing.Size(46, 46)
 $splashCard.Controls.Add($splashLogo)
 if (Test-Path $logoPath) {
     try {
@@ -185,77 +462,92 @@ if (Test-Path $logoPath) {
     } catch {}
 }
 
+$splashTagline = New-Object System.Windows.Forms.Label
+$splashTagline.Text      = 'Preparando o InfoNotebook'
+$splashTagline.Font      = New-CaijFont -Kind Display -Size 22 -Style ([System.Drawing.FontStyle]::Bold)
+$splashTagline.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+$splashTagline.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+$splashTagline.Location  = New-Object System.Drawing.Point(34, 58)
+$splashTagline.Size      = New-Object System.Drawing.Size(390, 42)
+$splashCard.Controls.Add($splashTagline)
+
 $splashSub = New-Object System.Windows.Forms.Label
-$splashSub.Text      = 'INFORMATICA'
-$splashSub.Font      = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
-$splashSub.ForeColor = [System.Drawing.Color]::FromArgb(70, 184, 255)
-$splashSub.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-$splashSub.Location  = New-Object System.Drawing.Point(120, 118)
-$splashSub.Size      = New-Object System.Drawing.Size(280, 20)
+$splashSub.Text      = 'Inventario, diagnostico e etiquetagem em um unico fluxo.'
+$splashSub.Font      = New-CaijFont -Kind UI -Size 9
+$splashSub.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+$splashSub.Location  = New-Object System.Drawing.Point(36, 101)
+$splashSub.Size      = New-Object System.Drawing.Size(448, 20)
 $splashCard.Controls.Add($splashSub)
 
-$splashTagline = New-Object System.Windows.Forms.Label
-$splashTagline.Text      = 'InfoNotebook - Diagnostico e Etiquetagem'
-$splashTagline.Font      = New-Object System.Drawing.Font('Segoe UI', 9)
-$splashTagline.ForeColor = [System.Drawing.Color]::FromArgb(146, 173, 198)
-$splashTagline.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
-$splashTagline.Location  = New-Object System.Drawing.Point(54, 150)
-$splashTagline.Size      = New-Object System.Drawing.Size(412, 18)
-$splashCard.Controls.Add($splashTagline)
+$splashStatusCard = New-Object System.Windows.Forms.Panel
+$splashStatusCard.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
+$splashStatusCard.Location  = New-Object System.Drawing.Point(34, 142)
+$splashStatusCard.Size      = New-Object System.Drawing.Size(450, 76)
+$splashCard.Controls.Add($splashStatusCard)
 
 $splashSpinner = New-Object System.Windows.Forms.Label
 $splashSpinner.Text      = '●'
-$splashSpinner.Font      = New-Object System.Drawing.Font('Segoe UI Symbol', 13, [System.Drawing.FontStyle]::Bold)
-$splashSpinner.ForeColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-$splashSpinner.Location  = New-Object System.Drawing.Point(54, 196)
+$splashSpinner.Font      = New-Object System.Drawing.Font('Segoe UI Symbol', 11, [System.Drawing.FontStyle]::Bold)
+$splashSpinner.ForeColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+$splashSpinner.Location  = New-Object System.Drawing.Point(18, 17)
 $splashSpinner.Size      = New-Object System.Drawing.Size(18, 20)
-$splashCard.Controls.Add($splashSpinner)
+$splashStatusCard.Controls.Add($splashSpinner)
 
 $splashMsg = New-Object System.Windows.Forms.Label
 $splashMsg.Text      = 'Coletando informacoes de hardware...'
-$splashMsg.Font      = New-Object System.Drawing.Font('Segoe UI', 10)
-$splashMsg.ForeColor = [System.Drawing.Color]::FromArgb(193, 215, 233)
+$splashMsg.Font      = New-CaijFont -Kind UI -Size 9 -Style ([System.Drawing.FontStyle]::Bold)
+$splashMsg.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
 $splashMsg.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$splashMsg.Location  = New-Object System.Drawing.Point(78, 196)
-$splashMsg.Size      = New-Object System.Drawing.Size(388, 22)
-$splashCard.Controls.Add($splashMsg)
+$splashMsg.Location  = New-Object System.Drawing.Point(42, 14)
+$splashMsg.Size      = New-Object System.Drawing.Size(340, 24)
+$splashStatusCard.Controls.Add($splashMsg)
 
 $splashPercent = New-Object System.Windows.Forms.Label
 $splashPercent.Text      = '0%'
-$splashPercent.Font      = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-$splashPercent.ForeColor = [System.Drawing.Color]::FromArgb(128, 204, 255)
+$splashPercent.Font      = New-CaijFont -Kind UI -Size 9 -Style ([System.Drawing.FontStyle]::Bold)
+$splashPercent.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
 $splashPercent.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
-$splashPercent.Location  = New-Object System.Drawing.Point(426, 232)
-$splashPercent.Size      = New-Object System.Drawing.Size(54, 16)
-$splashCard.Controls.Add($splashPercent)
+$splashPercent.Location  = New-Object System.Drawing.Point(384, 17)
+$splashPercent.Size      = New-Object System.Drawing.Size(48, 20)
+$splashStatusCard.Controls.Add($splashPercent)
 
 $splashBarTrack = New-Object System.Windows.Forms.Panel
-$splashBarTrack.BackColor = [System.Drawing.Color]::FromArgb(20, 36, 52)
-$splashBarTrack.Location  = New-Object System.Drawing.Point(54, 234)
-$splashBarTrack.Size      = New-Object System.Drawing.Size(366, 10)
-$splashBarTrack.BorderStyle = 'FixedSingle'
-$splashCard.Controls.Add($splashBarTrack)
+$splashBarTrack.BackColor = [System.Drawing.Color]::FromArgb(28, 32, 48)
+$splashBarTrack.Location  = New-Object System.Drawing.Point(18, 51)
+$splashBarTrack.Size      = New-Object System.Drawing.Size(414, 6)
+$splashBarTrack.BorderStyle = 'None'
+$splashStatusCard.Controls.Add($splashBarTrack)
 
 $splashBar = New-Object System.Windows.Forms.Label
-$splashBar.BackColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-$splashBar.Location  = New-Object System.Drawing.Point(1, 1)
+$splashBar.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+$splashBar.Location  = New-Object System.Drawing.Point(0, 0)
 $splashBar.Size      = New-Object System.Drawing.Size(0, 6)
 $splashBarTrack.Controls.Add($splashBar)
 
 $splashFoot = New-Object System.Windows.Forms.Label
-$splashFoot.Text      = 'Inicializando modulos e verificando ambiente...'
-$splashFoot.Font      = New-Object System.Drawing.Font('Segoe UI', 8)
-$splashFoot.ForeColor = [System.Drawing.Color]::FromArgb(98, 124, 147)
-$splashFoot.Location  = New-Object System.Drawing.Point(54, 254)
-$splashFoot.Size      = New-Object System.Drawing.Size(412, 16)
+$splashFoot.Text      = 'Leitura local e segura do equipamento'
+$splashFoot.Font      = New-CaijFont -Kind UI -Size 8
+$splashFoot.ForeColor = [System.Drawing.Color]::FromArgb(112, 117, 133)
+$splashFoot.Location  = New-Object System.Drawing.Point(34, 238)
+$splashFoot.Size      = New-Object System.Drawing.Size(330, 18)
 $splashCard.Controls.Add($splashFoot)
 
+$splashVersion = New-Object System.Windows.Forms.Label
+$splashVersion.Text      = 'v4.1'
+$splashVersion.Font      = New-CaijFont -Kind UI -Size 8 -Style ([System.Drawing.FontStyle]::Bold)
+$splashVersion.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+$splashVersion.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+$splashVersion.Location  = New-Object System.Drawing.Point(418, 238)
+$splashVersion.Size      = New-Object System.Drawing.Size(66, 18)
+$splashCard.Controls.Add($splashVersion)
+
+Set-CaijWindowsTypography -Root $splash
 $splash.Show()
 [System.Windows.Forms.Application]::DoEvents()
 
 # Animacao da barra de progresso
 $timer = New-Object System.Windows.Forms.Timer
-$timer.Interval = 32
+$timer.Interval = 80
 $script:barW = 0
 $script:splashProgress = 0
 $script:spinnerFrames = @('●','◕','◑','◔')
@@ -273,7 +565,7 @@ $timer.Add_Tick({
     [System.Windows.Forms.Application]::DoEvents()
 })
 $timer.Start()
-$script:splashBarMaxW = 364
+$script:splashBarMaxW = 414
 $script:UpdateSplashProgress = {
     param([int]$Percent, [string]$Message)
     $pct = [math]::Max($script:splashProgress, [math]::Min(100, $Percent))
@@ -324,8 +616,16 @@ function Get-EquipamentoTipo {
     return 'Notebook'
 }
 
+function Test-IsGenericVideoAdapterName {
+    param([string]$Name)
+
+    if ([string]::IsNullOrWhiteSpace($Name)) { return $true }
+    return ($Name -match '(?i)(Citrix|LogMeIn|TeamViewer|Remote|Virtual|Microsoft\s+Basic|Basic\s+Display|Adaptador\s+de\s+V.deo\s+B.sico)')
+}
+
 function Get-NotebookInfo {
     $info = [ordered]@{}
+    $videoControllers = @()
     & $script:UpdateSplashProgress 8 'Lendo BIOS e identificacao do notebook...'
 
     try {
@@ -356,14 +656,57 @@ function Get-NotebookInfo {
     & $script:UpdateSplashProgress 28 'Analisando placa de video...'
 
     try {
-        $gpus = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object {
-            $_ -and $_.Name -and $_.Name.ToString().Trim() -ne '' -and
-            $_.Name -notmatch '(?i)(Citrix|Microsoft Basic|LogMeIn|TeamViewer|Virtual)'
+        $videoControllers = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue)
+        $gpus = @($videoControllers | Where-Object {
+            $_ -and $_.Name -and -not (Test-IsGenericVideoAdapterName ([string]$_.Name))
         })
         $gpuList = @(); $hasDedicated = $false; $gpuDedicada = $null
+        $nvidiaGpuMemorias = @()
+
+        # AdapterRAM e um UInt32 e pode saturar perto de 4 GB em placas maiores.
+        # Para NVIDIA, o driver fornece a VRAM real pelo nvidia-smi.
+        try {
+            $nvidiaSmiCmd = Get-Command 'nvidia-smi.exe' -ErrorAction SilentlyContinue | Select-Object -First 1
+            $nvidiaSmiPath = if ($nvidiaSmiCmd) { [string]$nvidiaSmiCmd.Source } else { '' }
+            if (-not $nvidiaSmiPath) {
+                $nvidiaSmiPadrao = Join-Path $env:ProgramFiles 'NVIDIA Corporation\NVSMI\nvidia-smi.exe'
+                if (Test-Path -LiteralPath $nvidiaSmiPadrao) {
+                    $nvidiaSmiPath = $nvidiaSmiPadrao
+                }
+            }
+            if ($nvidiaSmiPath) {
+                $linhasNvidiaSmi = @(& $nvidiaSmiPath '--query-gpu=name,memory.total' '--format=csv,noheader,nounits' 2>$null)
+                foreach ($linhaNvidiaSmi in $linhasNvidiaSmi) {
+                    $partesNvidiaSmi = @([string]$linhaNvidiaSmi -split ',', 2)
+                    if ($partesNvidiaSmi.Count -lt 2) { continue }
+                    $memoriaMbTexto = ([string]$partesNvidiaSmi[1]).Trim()
+                    if ($memoriaMbTexto -notmatch '^\d+$') { continue }
+                    $nvidiaGpuMemorias += [pscustomobject]@{
+                        Nome = ([string]$partesNvidiaSmi[0]).Trim()
+                        MemoriaMb = [int64]$memoriaMbTexto
+                    }
+                }
+            }
+        } catch {}
 
         function Get-VramTexto($gpuObj) {
             try {
+                $nomeGpuVram = ([string]$gpuObj.Name).Trim()
+                if ($nomeGpuVram -match '(?i)NVIDIA|GeForce|RTX|GTX|Quadro' -and $nvidiaGpuMemorias.Count -gt 0) {
+                    $memoriaNvidia = @($nvidiaGpuMemorias | Where-Object {
+                        ([string]$_.Nome).Equals($nomeGpuVram, [System.StringComparison]::OrdinalIgnoreCase) -or
+                        $nomeGpuVram.IndexOf([string]$_.Nome, [System.StringComparison]::OrdinalIgnoreCase) -ge 0 -or
+                        ([string]$_.Nome).IndexOf($nomeGpuVram, [System.StringComparison]::OrdinalIgnoreCase) -ge 0
+                    } | Select-Object -First 1)
+                    if ($memoriaNvidia.Count -eq 0 -and $nvidiaGpuMemorias.Count -eq 1) {
+                        $memoriaNvidia = @($nvidiaGpuMemorias[0])
+                    }
+                    if ($memoriaNvidia.Count -gt 0 -and [int64]$memoriaNvidia[0].MemoriaMb -gt 0) {
+                        $vramNvidiaGb = [math]::Round(([double]$memoriaNvidia[0].MemoriaMb / 1024), 1)
+                        if (($vramNvidiaGb % 1) -eq 0) { return ('{0}GB' -f [int]$vramNvidiaGb) }
+                        return ('{0}GB' -f $vramNvidiaGb.ToString('0.#', [System.Globalization.CultureInfo]::InvariantCulture))
+                    }
+                }
                 if ($null -ne $gpuObj.AdapterRAM -and [double]$gpuObj.AdapterRAM -gt 0) {
                     $vramGb = [math]::Round(([double]$gpuObj.AdapterRAM / 1GB), 1)
                     if ($vramGb -ge 1) {
@@ -398,7 +741,7 @@ function Get-NotebookInfo {
                 $pnp = Get-PnpDevice -Class Display -ErrorAction SilentlyContinue |
                     Where-Object {
                         $_ -and $_.FriendlyName -and
-                        $_.FriendlyName -notmatch '(?i)(Citrix|Microsoft Basic|Remote|Virtual)' -and
+                        -not (Test-IsGenericVideoAdapterName ([string]$_.FriendlyName)) -and
                         $_.Status -ne 'Unknown'
                     } |
                     Select-Object -First 1
@@ -407,8 +750,8 @@ function Get-NotebookInfo {
 
             if (-not $gpuFallback) {
                 try {
-                    $vc2 = Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-                        Where-Object { $_.Name -and $_.Name -notmatch '(?i)Microsoft Basic' } |
+                    $vc2 = $videoControllers |
+                        Where-Object { $_.Name -and -not (Test-IsGenericVideoAdapterName ([string]$_.Name)) } |
                         Select-Object -First 1
                     if ($vc2 -and $vc2.Name) { $gpuFallback = [string]$vc2.Name }
                 } catch {}
@@ -417,6 +760,8 @@ function Get-NotebookInfo {
             if ($gpuFallback) {
                 $nomeBase = ($gpuFallback -replace '\(TM\)','' -replace '\(R\)','').Trim()
                 $info.GPU = "$nomeBase (Integrada)"
+            } elseif ($info.CPU -match '(?i)\b(AMD|Ryzen)\b') {
+                $info.GPU = 'AMD Radeon Graphics (Integrada)'
             } else {
                 $info.GPU = 'Nao identificada'
             }
@@ -494,7 +839,7 @@ function Get-NotebookInfo {
     & $script:UpdateSplashProgress 54 'Detectando resolucao de tela...'
 
     try {
-        $videoRes = Get-CimInstance Win32_VideoController | Where-Object { $_.CurrentHorizontalResolution -ne $null } | Select-Object -First 1
+        $videoRes = $videoControllers | Where-Object { $_.CurrentHorizontalResolution -ne $null } | Select-Object -First 1
         if ($videoRes) {
             $w = $videoRes.CurrentHorizontalResolution; $h = $videoRes.CurrentVerticalResolution; $hz = $videoRes.CurrentRefreshRate
             $tipoTela = switch ("${w}x${h}") {
@@ -590,7 +935,9 @@ $dataHora = Get-Date -Format 'dd/MM/yyyy HH:mm'
 $script:osArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_os_counter.txt'
 $script:historicoArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_historico_notebooks.json'
 $script:modelosManuaisArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_modelos_manuais.json'
+$script:modeloManualUltimoArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'caij_ultimo_modelo_manual.json'
 $script:modelosManuaisHistorico = @()
+$script:modelosManuaisUltimos = @{}
 $script:registroBaseDir = $null
 $script:registroBaseDirFallback = Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'CAIJ\Registros'
 $script:ultimoStatusServidor = 'nao verificado'
@@ -599,12 +946,22 @@ $script:osNumero  = 235
 $script:osDefinidaPorAltertag = $false
 $script:osDefinidaManual = $false
 $script:altertagOsAtual = $null
+$script:osImpressaoPendente = $null
 $script:altertagOsDetalheConfirmado = $null
 $script:maiorOsVistaAltertag = 0
 $script:ultimoAlertaOsNumero = 0
 $script:ultimoConfirmadoServidor = 0
 $script:osAlertMonitorBusy = $false
 $script:alertaOsAtual = $null
+$script:osGlobalAlertOpen = $false
+$script:osNumeroControls = New-Object System.Collections.ArrayList
+$script:osPreviewRefreshAction = $null
+$script:tecnicoCadastroOsPersistido = ''
+$script:abrirManualNaProximaPrevia = $false
+$script:abrirManualPorOsSelecionada = $false
+$script:ultimaEtiquetaPayload = $null
+$script:ultimaEtiquetaResumo = $null
+$script:celularImeiEtiqueta = ''
 if (Test-Path $script:osArquivo) {
     try { $script:osNumero = [int]((Get-Content $script:osArquivo -Raw -ErrorAction Stop).Trim()) } catch {}
 }
@@ -621,13 +978,26 @@ function Import-ModelosManuaisHistorico {
     try {
         $raw = Get-Content -LiteralPath $script:modelosManuaisArquivo -Raw -ErrorAction Stop
         if (-not [string]::IsNullOrWhiteSpace($raw)) {
-            $script:modelosManuaisHistorico = @(
+            $modelosImportados = @(
                 $raw |
                     ConvertFrom-Json -ErrorAction Stop |
                     ForEach-Object { ([string]$_).Trim() } |
-                    Where-Object { $_ -and $_ -notmatch '^(?i:N/?A)$' } |
+                    Where-Object {
+                        $_ -and
+                        $_ -notmatch '^(?i:N/?A)$' -and
+                        $_.Length -le 80
+                    } |
                     Select-Object -Unique -First 200
             )
+            $script:modelosManuaisHistorico = @($modelosImportados)
+
+            # Remove entradas antigas em que varios modelos foram gravados como uma unica sugestao.
+            $quantidadeOriginal = @($raw | ConvertFrom-Json -ErrorAction Stop).Count
+            if ($script:modelosManuaisHistorico.Count -ne $quantidadeOriginal) {
+                $script:modelosManuaisHistorico |
+                    ConvertTo-Json -Depth 3 |
+                    Set-Content -LiteralPath $script:modelosManuaisArquivo -Encoding UTF8 -ErrorAction Stop
+            }
         }
     } catch {
         $script:modelosManuaisHistorico = @()
@@ -638,7 +1008,11 @@ function Add-ModeloManualHistorico {
     param([string]$Modelo)
 
     $modeloLimpo = if ($Modelo) { $Modelo.Trim() } else { '' }
-    if (-not $modeloLimpo -or $modeloLimpo -match '^(?i:N/?A)$') { return }
+    if (
+        -not $modeloLimpo -or
+        $modeloLimpo -match '^(?i:N/?A)$' -or
+        $modeloLimpo.Length -gt 80
+    ) { return }
 
     $restantes = @(
         $script:modelosManuaisHistorico |
@@ -655,7 +1029,302 @@ function Add-ModeloManualHistorico {
     } catch {}
 }
 
+function Import-ModelosManuaisUltimos {
+    $script:modelosManuaisUltimos = @{}
+    if (-not (Test-Path -LiteralPath $script:modeloManualUltimoArquivo)) { return }
+    try {
+        $salvos = Get-Content -LiteralPath $script:modeloManualUltimoArquivo -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        foreach ($tipo in @('Notebook', 'Desktop', 'Monitor', 'Celular')) {
+            $prop = $salvos.PSObject.Properties[$tipo]
+            $modelo = if ($prop) { ([string]$prop.Value).Trim() } else { '' }
+            if ($modelo -and $modelo.Length -le 80) { $script:modelosManuaisUltimos[$tipo] = $modelo }
+        }
+    } catch {
+        $script:modelosManuaisUltimos = @{}
+    }
+}
+
+function Get-ModeloManualUltimo {
+    param([string]$Tipo)
+    $tipoNormalizado = if ($Tipo -in @('Notebook', 'Desktop', 'Monitor', 'Celular')) { $Tipo } else { 'Notebook' }
+    if ($script:modelosManuaisUltimos.ContainsKey($tipoNormalizado)) {
+        return ([string]$script:modelosManuaisUltimos[$tipoNormalizado]).Trim()
+    }
+    return ''
+}
+
+function Save-ModeloManualUltimo {
+    param([string]$Tipo, [string]$Modelo)
+    $tipoNormalizado = if ($Tipo -in @('Notebook', 'Desktop', 'Monitor', 'Celular')) { $Tipo } else { 'Notebook' }
+    $modeloLimpo = if ($Modelo) { $Modelo.Trim() } else { '' }
+    if (-not $modeloLimpo -or $modeloLimpo.Length -gt 80) { return $false }
+
+    $script:modelosManuaisUltimos[$tipoNormalizado] = $modeloLimpo
+    $dadosPersistidos = [ordered]@{}
+    foreach ($tipoConhecido in @('Notebook', 'Desktop', 'Monitor', 'Celular')) {
+        $dadosPersistidos[$tipoConhecido] = Get-ModeloManualUltimo -Tipo $tipoConhecido
+    }
+    try {
+        [pscustomobject]$dadosPersistidos |
+            ConvertTo-Json -Depth 3 |
+            Set-Content -LiteralPath $script:modeloManualUltimoArquivo -Encoding UTF8 -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Get-IPhoneBatteryUsb {
+    param([string]$Udid = '')
+
+    $diagnosticsExe = Join-Path $PSScriptRoot 'tools\libimobiledevice\idevicediagnostics.exe'
+    if (-not (Test-Path -LiteralPath $diagnosticsExe)) {
+        throw 'Leitor USB de bateria nao encontrado.'
+    }
+
+    $arguments = if ($Udid) {
+        '-u "{0}" ioregentry AppleSmartBattery' -f ($Udid -replace '"', '')
+    } else {
+        'ioregentry AppleSmartBattery'
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $diagnosticsExe
+    $startInfo.Arguments = $arguments
+    $startInfo.WorkingDirectory = Split-Path -Parent $diagnosticsExe
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Nao foi possivel iniciar a leitura USB.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch {}
+            throw 'A leitura da bateria excedeu 10 segundos.'
+        }
+        $stdout = [string]$stdoutTask.Result
+        $stderr = [string]$stderrTask.Result
+        if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
+            $details = if ($stderr.Trim()) { $stderr.Trim() } else { 'iPhone indisponivel para diagnostico.' }
+            throw $details
+        }
+    } finally {
+        $process.Dispose()
+    }
+
+    try { [xml]$batteryXml = $stdout } catch { throw 'O diagnostico USB retornou dados de bateria invalidos.' }
+    function Get-BatteryInteger {
+        param([string]$Key)
+        $keyNode = @($batteryXml.SelectNodes("//key[text()='$Key']")) | Select-Object -First 1
+        if (-not $keyNode) { return 0 }
+        $valueNode = $keyNode.NextSibling
+        while ($valueNode -and $valueNode.NodeType -ne [System.Xml.XmlNodeType]::Element) {
+            $valueNode = $valueNode.NextSibling
+        }
+        $parsed = 0
+        if ($valueNode -and [int]::TryParse($valueNode.InnerText.Trim(), [ref]$parsed)) { return $parsed }
+        return 0
+    }
+
+    $nominal = Get-BatteryInteger -Key 'NominalChargeCapacity'
+    $design = Get-BatteryInteger -Key 'DesignCapacity'
+    $cycles = Get-BatteryInteger -Key 'CycleCount'
+    if ($nominal -lt 1 -or $design -lt 1) { throw 'O iPhone nao informou a capacidade nominal da bateria.' }
+
+    $percent = [int][Math]::Round((100.0 * $nominal / $design), 0, [MidpointRounding]::AwayFromZero)
+    $percent = [Math]::Max(1, [Math]::Min(100, $percent))
+    $quality = if ($percent -ge 90) { 'Excellent' } elseif ($percent -ge 75) { 'Good' } elseif ($percent -ge 50) { 'Fair' } else { 'Poor' }
+    return [pscustomobject]@{
+        Percentual = $percent
+        Qualidade = "$quality ($percent%)"
+        Ciclos = $cycles
+        CapacidadeNominal = $nominal
+        CapacidadeProjeto = $design
+    }
+}
+
+function Get-IPhoneStorageUsb {
+    param([string]$Udid = '')
+
+    $deviceInfoExe = Join-Path $PSScriptRoot 'tools\libimobiledevice\ideviceinfo.exe'
+    if (-not (Test-Path -LiteralPath $deviceInfoExe)) {
+        throw 'Leitor USB de armazenamento nao encontrado.'
+    }
+
+    $arguments = if ($Udid) {
+        '-u "{0}" -q com.apple.disk_usage -k TotalDataCapacity' -f ($Udid -replace '"', '')
+    } else {
+        '-q com.apple.disk_usage -k TotalDataCapacity'
+    }
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $deviceInfoExe
+    $startInfo.Arguments = $arguments
+    $startInfo.WorkingDirectory = Split-Path -Parent $deviceInfoExe
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Nao foi possivel iniciar a leitura do armazenamento.' }
+        $stdoutTask = $process.StandardOutput.ReadToEndAsync()
+        $stderrTask = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit(10000)) {
+            try { $process.Kill() } catch {}
+            throw 'A leitura do armazenamento excedeu 10 segundos.'
+        }
+        $stdout = [string]$stdoutTask.Result
+        $stderr = [string]$stderrTask.Result
+        if ($process.ExitCode -ne 0 -or [string]::IsNullOrWhiteSpace($stdout)) {
+            $details = if ($stderr.Trim()) { $stderr.Trim() } else { 'Armazenamento do iPhone indisponivel.' }
+            throw $details
+        }
+    } finally {
+        $process.Dispose()
+    }
+
+    $capacityBytes = @(
+        [regex]::Matches($stdout, '(?<!\d)\d{8,15}(?!\d)') |
+            ForEach-Object { [double]$_.Value } |
+            Sort-Object -Descending
+    ) | Select-Object -First 1
+    if (-not $capacityBytes -or $capacityBytes -lt 8GB) {
+        throw 'O iPhone nao informou a capacidade total do armazenamento.'
+    }
+
+    $capacityGb = [double]$capacityBytes / 1GB
+    $marketedGb = @(16, 32, 64, 128, 256, 512, 1024, 2048) |
+        Sort-Object { [math]::Abs([double]$_ - $capacityGb) } |
+        Select-Object -First 1
+    return if ([int]$marketedGb -ge 1024) { "$([int]$marketedGb / 1024)TB" } else { "$marketedGb`GB" }
+}
+
+function Get-3uToolsDeviceInfo {
+    $installDirs = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @(
+        'C:\Program Files\3uTools9',
+        'C:\Program Files (x86)\3uTools9',
+        'C:\Program Files\3uTools',
+        'C:\Program Files (x86)\3uTools'
+    )) {
+        if (Test-Path -LiteralPath $candidate) { [void]$installDirs.Add($candidate) }
+    }
+    foreach ($uninstallRoot in @(
+        'HKLM:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKLM:\Software\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*',
+        'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*'
+    )) {
+        foreach ($entry in @(Get-ItemProperty $uninstallRoot -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match '^3uTools' })) {
+            $iconPath = (([string]$entry.DisplayIcon) -replace ',\d+$', '').Trim('"')
+            if ($iconPath) {
+                $dir = Split-Path -Parent $iconPath
+                if ($dir -and (Test-Path -LiteralPath $dir) -and -not $installDirs.Contains($dir)) {
+                    [void]$installDirs.Add($dir)
+                }
+            }
+        }
+    }
+
+    $infoFile = @(
+        foreach ($installDir in $installDirs) {
+            $cacheDir = Join-Path $installDir 'cache'
+            if (Test-Path -LiteralPath $cacheDir) {
+                Get-ChildItem -LiteralPath $cacheDir -Filter '*_info.txt' -File -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Length -gt 0 -and $_.BaseName -ne '_info' }
+            }
+        }
+    ) | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if (-not $infoFile) { throw 'Nenhum iPhone foi localizado no cache do 3uTools.' }
+
+    $values = @{}
+    foreach ($line in @(Get-Content -LiteralPath $infoFile.FullName -ErrorAction Stop)) {
+        if ([string]$line -match '^\s*(\S+)\s{2,}(.+?)\s*$') {
+            $values[$matches[1]] = $matches[2].Trim()
+        }
+    }
+
+    $productType = [string]$values['ProductType']
+    $modelName = ''
+    foreach ($installDir in $installDirs) {
+        $deviceTable = Join-Path $installDir 'cache\devices_table\devices_table.txt'
+        if (-not $productType -or -not (Test-Path -LiteralPath $deviceTable)) { continue }
+        $modelLine = Get-Content -LiteralPath $deviceTable -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '"ProductName"' -and $_ -match ('"ProductType"\s*:\s*"' + [regex]::Escape($productType) + '"') } |
+            Select-Object -First 1
+        if ($modelLine -and $modelLine -match '"ProductName"\s*:\s*"([^"]+)"') {
+            $modelName = $matches[1].Trim()
+            break
+        }
+    }
+    if (-not $modelName) { $modelName = if ($productType) { $productType } else { 'iPhone' } }
+
+    $serial = ([string]$values['SerialNumber']).Trim()
+    $imei = (([string]$values['InternationalMobileEquipmentIdentity']) -replace '[^0-9]', '')
+    if ($serial -and $imei.Length -ne 15) {
+        $udidNormalizado = (([string]$values['UniqueDeviceID']) -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+        foreach ($installDir in $installDirs) {
+            $deviceInfoPath = Join-Path $installDir 'cache\files\deviceinfo.txt'
+            if (-not (Test-Path -LiteralPath $deviceInfoPath)) { continue }
+            $registroDispositivo = @(
+                Get-Content -LiteralPath $deviceInfoPath -ErrorAction SilentlyContinue | Where-Object {
+                    $colunas = @([string]$_ -split "`t")
+                    if ($colunas.Count -lt 4) { return $false }
+                    $serialLinha = ([string]$colunas[2]).Trim()
+                    $udidLinha = (([string]$colunas[1]) -replace '[^A-Za-z0-9]', '').ToUpperInvariant()
+                    return ($serialLinha -eq $serial -or ($udidNormalizado -and $udidLinha -eq $udidNormalizado))
+                }
+            ) | Select-Object -Last 1
+            if ($registroDispositivo) {
+                $imeiAlternativo = @([regex]::Matches([string]$registroDispositivo, '(?<!\d)\d{15}(?!\d)') | ForEach-Object { $_.Value }) | Select-Object -First 1
+                if ($imeiAlternativo) {
+                    $imei = [string]$imeiAlternativo
+                    break
+                }
+            }
+        }
+    }
+    if (-not $serial -or $imei.Length -ne 15) {
+        throw 'O cache do 3uTools nao possui Serial Number e IMEI1 validos. Atualize a tela do aparelho e tente novamente.'
+    }
+
+    $battery = $null
+    $batteryError = ''
+    try {
+        $battery = Get-IPhoneBatteryUsb -Udid ([string]$values['UniqueDeviceID'])
+    } catch {
+        $batteryError = $_.Exception.Message
+    }
+
+    $storage = ''
+    $storageError = ''
+    try {
+        $storage = Get-IPhoneStorageUsb -Udid ([string]$values['UniqueDeviceID'])
+    } catch {
+        $storageError = $_.Exception.Message
+    }
+
+    return [pscustomobject]@{
+        Modelo = $modelName
+        Serial = $serial
+        Imei = $imei
+        Bateria = if ($battery) { [string]$battery.Qualidade } else { '' }
+        Ciclos = if ($battery) { [int]$battery.Ciclos } else { 0 }
+        BateriaErro = $batteryError
+        Armazenamento = [string]$storage
+        ArmazenamentoErro = $storageError
+        Arquivo = $infoFile.FullName
+        AtualizadoEm = $infoFile.LastWriteTime
+    }
+}
+
 Import-ModelosManuaisHistorico
+Import-ModelosManuaisUltimos
 
 function Get-RegistroBaseDir {
     if ($script:registroBaseDir -and $script:registroBaseDir.Trim() -ne '') { return $script:registroBaseDir }
@@ -688,9 +1357,11 @@ function Get-RegistroBaseDir {
 function Set-AppStatus {
     param(
         [string]$Texto,
-        [System.Drawing.Color]$Cor
+        $Cor
     )
-    if (-not $Cor) { $Cor = $cMuted }
+    if ($Cor -isnot [System.Drawing.Color]) {
+        $Cor = if ($cMuted -is [System.Drawing.Color]) { $cMuted } else { [System.Drawing.Color]::FromArgb(145, 137, 163) }
+    }
     try {
         if ($script:botTxt) { $script:botTxt.Text = $Texto; $script:botTxt.ForeColor = $Cor }
         if ($script:botDot) { $script:botDotColor = $Cor; $script:botDot.Invalidate() }
@@ -705,9 +1376,9 @@ function Set-AppStatus {
 function Set-AppStatusTemporario {
     param(
         [string]$Texto,
-        [System.Drawing.Color]$Cor,
+        $Cor,
         [string]$TextoDepois,
-        [System.Drawing.Color]$CorDepois,
+        $CorDepois,
         [int]$IntervaloMs = 3500
     )
     Set-AppStatus -Texto $Texto -Cor $Cor
@@ -749,22 +1420,45 @@ function Add-HistoricoNotebook {
         [string]$Status,
         [string]$Mensagem,
         [string]$Grade,
-        [string]$Obs
+        [string]$Obs,
+        [int]$OsNumero = 0,
+        [string]$Serial = '',
+        [string]$Modelo = '',
+        [string]$Cpu = '',
+        [string]$Ram = '',
+        [string]$Disco = '',
+        [string]$Gpu = '',
+        [string]$Bateria = ''
     )
+    if ($OsNumero -lt 1) { $OsNumero = [int]$script:osNumero }
+    if (-not $PSBoundParameters.ContainsKey('Serial')) {
+        $Serial = if ($script:serialEtiqueta -and $script:serialEtiqueta.Trim()) { $script:serialEtiqueta } else { $info.Serial }
+    }
+    if (-not $PSBoundParameters.ContainsKey('Modelo')) {
+        $Modelo = if ($script:modeloEtiqueta -and $script:modeloEtiqueta.Trim()) { $script:modeloEtiqueta } else { $info.Modelo }
+    }
+    if (-not $PSBoundParameters.ContainsKey('Cpu')) { $Cpu = $info.CPU }
+    if (-not $PSBoundParameters.ContainsKey('Ram')) { $Ram = $info.RAM }
+    if (-not $PSBoundParameters.ContainsKey('Disco')) {
+        $Disco = (($info.Discos -split $NL) | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
+    }
+    if (-not $PSBoundParameters.ContainsKey('Gpu')) { $Gpu = $info.GPU }
+    if (-not $PSBoundParameters.ContainsKey('Bateria') -and $info.MostrarBateria) { $Bateria = $info.BatSaude }
+
     $registro = [ordered]@{
         dataHora = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
         acao = $Acao
         status = $Status
         mensagem = $Mensagem
-        os = (Format-OsCodigo -Numero $script:osNumero)
-        osNumero = $script:osNumero
-        serial = $info.Serial
-        modelo = $info.Modelo
-        cpu = $info.CPU
-        ram = $info.RAM
-        disco = (($info.Discos -split $NL) | Where-Object { $_.Trim() -ne '' } | Select-Object -First 1)
-        gpu = $info.GPU
-        bateria = if ($info.MostrarBateria) { $info.BatSaude } else { $null }
+        os = (Format-OsCodigo -Numero $OsNumero)
+        osNumero = $OsNumero
+        serial = $Serial
+        modelo = $Modelo
+        cpu = $Cpu
+        ram = $Ram
+        disco = $Disco
+        gpu = $Gpu
+        bateria = if ([string]::IsNullOrWhiteSpace($Bateria)) { $null } else { $Bateria }
         grade = $Grade
         obs = $Obs
         servidor = $script:ultimoStatusServidor
@@ -787,13 +1481,13 @@ function Add-HistoricoNotebook {
         $logArquivo = Join-Path $baseLog ("impressao-" + (Get-Date -Format 'yyyy-MM-dd') + ".log")
         $linhaLog = [ordered]@{
             dataHora = (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
-            os = (Format-OsCodigo -Numero $script:osNumero)
-            osNumero = $script:osNumero
+            os = (Format-OsCodigo -Numero $OsNumero)
+            osNumero = $OsNumero
             status = $Status
             acao = $Acao
             mensagem = $Mensagem
-            serial = if ($script:serialEtiqueta -and $script:serialEtiqueta.Trim() -ne '') { $script:serialEtiqueta } else { $info.Serial }
-            modelo = if ($script:modeloEtiqueta -and $script:modeloEtiqueta.Trim() -ne '') { $script:modeloEtiqueta } else { $info.Modelo }
+            serial = $Serial
+            modelo = $Modelo
             grade = $Grade
             observacoes = $Obs
             servidor = $script:ultimoStatusServidor
@@ -804,6 +1498,27 @@ function Add-HistoricoNotebook {
 
         Add-Content -Path $logArquivo -Value $linhaLog -Encoding UTF8
     } catch {}
+}
+
+function Find-SerialManualNoHistorico {
+    param([string]$Serial)
+
+    $serialNormalizado = if ($Serial) { ($Serial -replace '\s+', '').Trim().ToUpperInvariant() } else { '' }
+    if (-not $serialNormalizado -or $serialNormalizado -match '^(N/?A|X+)$') { return $null }
+    if (-not (Test-Path -LiteralPath $script:historicoArquivo)) { return $null }
+    try {
+        $registros = @(Get-Content -LiteralPath $script:historicoArquivo -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop)
+        return @(
+            $registros |
+                Where-Object {
+                    $serialRegistro = (([string]$_.serial) -replace '\s+', '').Trim().ToUpperInvariant()
+                    ([string]$_.status -eq 'ok') -and $serialRegistro -eq $serialNormalizado
+                } |
+                Select-Object -First 1
+        )[0]
+    } catch {
+        return $null
+    }
 }
 
 # Memoria de produto por assinatura (modelo+cpu+ram+disco)
@@ -973,15 +1688,71 @@ function Show-OsAltertagDetalheConfirm {
     }
 }
 
+function Get-OsAltertagResumoPreview {
+    param(
+        [int]$OsNumero,
+        $OrdemFallback = $null,
+        [switch]$ConsultarOnline
+    )
+
+    $ordem = $OrdemFallback
+    $mensagem = ''
+    $online = $false
+    if ($ConsultarOnline -and $OsNumero -gt 0) {
+        try {
+            $resp = Invoke-CaijServer -Path "/os-detalhe?osNumero=$OsNumero&produtos=1" -Method GET -TimeoutSec 3 -Retries 1
+            if ($resp -and [string]$resp.status -eq 'ok' -and $resp.ordem) {
+                $ordem = $resp.ordem
+                $online = $true
+            } else {
+                $mensagem = 'Detalhes nao encontrados no Altertag'
+            }
+        } catch {
+            $mensagem = 'Altertag indisponivel para conferencia'
+        }
+    } elseif ($OsNumero -gt 0 -and -not $ordem) {
+        $mensagem = 'Conferencia sera carregada apos abrir'
+    }
+
+    $produto = ''
+    if ($ordem) {
+        $produto = ([string]$ordem.equipamento).Trim()
+        if (-not $produto -and $ordem.produtos) {
+            $produto = @(
+                $ordem.produtos |
+                    ForEach-Object { ([string]$_.descricao).Trim() } |
+                    Where-Object { $_ }
+            ) -join ' | '
+        }
+    }
+    [pscustomobject]@{
+        osNumero = $OsNumero
+        osCodigo = if ($OsNumero -gt 0) { Format-OsCodigo -Numero $OsNumero } else { '-' }
+        produto = if ($produto) { $produto } else { 'Produto nao informado' }
+        tecnico = if ($ordem -and ([string]$ordem.tecnico).Trim()) { ([string]$ordem.tecnico).Trim() } else { '-' }
+        serial = if ($ordem -and ([string]$ordem.garantia).Trim()) { ([string]$ordem.garantia).Trim() } else { '-' }
+        statusOs = if ($ordem -and ([string]$ordem.statusOs).Trim()) { ([string]$ordem.statusOs).Trim() } else { '' }
+        online = $online
+        mensagem = $mensagem
+        ordem = $ordem
+    }
+}
+
 function Register-OsAltertagStatusImpressao {
     param(
         [string]$Grade = '',
-        [string]$Obs = ''
+        [string]$Obs = '',
+        [int]$OsNumero = 0,
+        $Ordem = $null,
+        [switch]$ForcarAltertag
     )
 
-    if (-not $script:incluirOSAtual -or -not $script:osDefinidaPorAltertag) { return $false }
+    if (-not $script:incluirOSAtual) { return $false }
+    if (-not $ForcarAltertag -and -not $script:osDefinidaPorAltertag) { return $false }
+    if ($OsNumero -lt 1) { $OsNumero = [int]$script:osNumero }
+    if (-not $Ordem) { $Ordem = $script:altertagOsAtual }
     $idOrdem = 0
-    try { if ($script:altertagOsAtual -and $script:altertagOsAtual.idOrdem) { $idOrdem = [int]$script:altertagOsAtual.idOrdem } } catch {}
+    try { if ($Ordem -and $Ordem.idOrdem) { $idOrdem = [int]$Ordem.idOrdem } } catch {}
     $obsPartes = @(
         "Serial: $($info.Serial)",
         "Modelo: $($info.Modelo)",
@@ -990,7 +1761,7 @@ function Register-OsAltertagStatusImpressao {
     if ($Obs -and $Obs.Trim()) { $obsPartes += "Obs: $($Obs.Trim())" }
     $payloadObj = @{
         idOrdem = $idOrdem
-        osNumero = [int]$script:osNumero
+        osNumero = $OsNumero
         tipoStatus = 'Etiqueta CAIJ impressa'
         observacao = ($obsPartes -join ' | ')
     }
@@ -999,7 +1770,7 @@ function Register-OsAltertagStatusImpressao {
         $resp = Invoke-CaijServer -Path '/os-status' -Method POST -Body $payload -TimeoutSec 22 -Retries 1
         return ($resp -and [string]$resp.status -eq 'ok')
     } catch {
-        Set-AppStatusTemporario -Texto 'Impresso | aviso: status nao registrado na OS' -Cor $cYellow -TextoDepois "Impresso | historico salvo | OS $(Format-OsCodigo -Numero $script:osNumero)" -CorDepois $cGreen
+        Set-AppStatusTemporario -Texto 'Impresso | aviso: status nao registrado na OS' -Cor $cYellow -TextoDepois "Impresso | historico salvo | OS $(Format-OsCodigo -Numero $OsNumero)" -CorDepois $cGreen
         return $false
     }
 }
@@ -1061,6 +1832,8 @@ function Select-CodigoProdutoAutomatico {
         if (-not $txt) { continue }
         $u = $txt.ToUpper()
         $score = 0
+        if ($u -match '^\s*T') { $score += 20 }
+        elseif ($u -match '^\s*P') { $score += 10 }
         if ($modeloUp -match '\bE14\b' -and $u -match '\bE14\b') { $score += 4 }
         if ($modeloUp -match '\bT14\b' -and $u -match '\bT14\b') { $score += 4 }
         if ($prefI7 -and $u -match '\bI7\b') { $score += 4 }
@@ -1084,30 +1857,31 @@ function Select-CodigoProdutoAutomatico {
 # Fluxo sequencial global de OS (nao sobrescrever por serial)
 
 # ================================================
-# CORES E FONTES (tema preto + azul refinado)
+# CORES E FONTES (mesma linguagem visual da criacao de OS)
 # ================================================
-$cBg      = [System.Drawing.Color]::FromArgb(6, 10, 18)
-$cSurface = [System.Drawing.Color]::FromArgb(12, 19, 30)
-$cCard    = [System.Drawing.Color]::FromArgb(16, 26, 40)
-$cHeader  = [System.Drawing.Color]::FromArgb(10, 17, 28)
-$cBar     = [System.Drawing.Color]::FromArgb(4, 8, 14)
-$cBorder  = [System.Drawing.Color]::FromArgb(36, 70, 104)
-$cAccent  = [System.Drawing.Color]::FromArgb(24, 185, 255)
-$cGreen   = [System.Drawing.Color]::FromArgb(66, 232, 176)
-$cPurple  = [System.Drawing.Color]::FromArgb(132, 148, 255)
-$cYellow  = [System.Drawing.Color]::FromArgb(255, 208, 96)
-$cOrange  = [System.Drawing.Color]::FromArgb(255, 156, 98)
-$cRed     = [System.Drawing.Color]::FromArgb(241, 95, 122)
-$cMain    = [System.Drawing.Color]::FromArgb(236, 245, 255)
-$cMuted   = [System.Drawing.Color]::FromArgb(162, 192, 219)
-$cDim     = [System.Drawing.Color]::FromArgb(102, 134, 165)
+$cBg      = [System.Drawing.Color]::FromArgb(7, 9, 17)
+$cSurface = [System.Drawing.Color]::FromArgb(15, 18, 29)
+$cCard    = [System.Drawing.Color]::FromArgb(21, 24, 38)
+$cHeader  = [System.Drawing.Color]::FromArgb(15, 18, 29)
+$cBar     = [System.Drawing.Color]::FromArgb(10, 12, 20)
+$cBorder  = [System.Drawing.Color]::FromArgb(42, 46, 63)
+$cAccent  = [System.Drawing.Color]::FromArgb(94, 106, 210)
+$cAccentHover = [System.Drawing.Color]::FromArgb(112, 124, 228)
+$cGreen   = [System.Drawing.Color]::FromArgb(34, 197, 94)
+$cPurple  = [System.Drawing.Color]::FromArgb(208, 214, 234)
+$cYellow  = [System.Drawing.Color]::FromArgb(245, 158, 11)
+$cOrange  = [System.Drawing.Color]::FromArgb(249, 115, 22)
+$cRed     = [System.Drawing.Color]::FromArgb(244, 63, 94)
+$cMain    = [System.Drawing.Color]::FromArgb(240, 242, 248)
+$cMuted   = [System.Drawing.Color]::FromArgb(166, 170, 184)
+$cDim     = [System.Drawing.Color]::FromArgb(112, 117, 133)
 
-$fUI    = New-Object System.Drawing.Font('Segoe UI', 9)
-$fBold  = New-Object System.Drawing.Font('Segoe UI', 9,  [System.Drawing.FontStyle]::Bold)
-$fSm    = New-Object System.Drawing.Font('Segoe UI', 8)
-$fMicro = New-Object System.Drawing.Font('Segoe UI', 7)
-$fTitle = New-Object System.Drawing.Font('Segoe UI Semibold', 16, [System.Drawing.FontStyle]::Bold)
-$fSer   = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontStyle]::Bold)
+$fUI    = New-CaijFont -Kind UI -Size 9
+$fBold  = New-CaijFont -Kind UI -Size 9 -Style ([System.Drawing.FontStyle]::Bold)
+$fSm    = New-CaijFont -Kind UI -Size 8
+$fMicro = New-CaijFont -Kind UI -Size 7
+$fTitle = New-CaijFont -Kind Display -Size 16 -Style ([System.Drawing.FontStyle]::Bold)
+$fSer   = New-CaijFont -Kind UI -Size 15 -Style ([System.Drawing.FontStyle]::Bold)
 
 # ================================================
 # FORM
@@ -1115,12 +1889,14 @@ $fSer   = New-Object System.Drawing.Font('Segoe UI', 15, [System.Drawing.FontSty
 $W = 700
 
 $form = New-Object System.Windows.Forms.Form
-$form.Text            = 'Caij Informatica'
+$form.Name            = 'InfoNotebookMain'
+$form.Text            = 'InfoNotebook'
 $form.BackColor       = $cBg
-$form.FormBorderStyle = 'FixedSingle'
-$form.MaximizeBox     = $false
+$form.FormBorderStyle = 'Sizable'
+$form.MaximizeBox     = $true
 $form.StartPosition   = 'CenterScreen'
 $form.Font            = $fUI
+$form.KeyPreview      = $true
 
 # ================================================
 # BARRA SUPERIOR
@@ -1129,14 +1905,14 @@ $form.Font            = $fUI
 # TOP BAR
 # ================================================
 $topBar = New-Object System.Windows.Forms.Panel
-$topBar.BackColor = [System.Drawing.Color]::FromArgb(5, 10, 18)
+$topBar.BackColor = $cSurface
 $topBar.Location  = New-Object System.Drawing.Point(0, 0)
 $topBar.Size      = New-Object System.Drawing.Size($W, 30)
 $form.Controls.Add($topBar)
 
-# Linha inferior accent (cyan sutil)
+# Linha inferior accent (violeta sutil)
 $topBarLine = New-Object System.Windows.Forms.Panel
-$topBarLine.BackColor = [System.Drawing.Color]::FromArgb(0, 140, 200)
+$topBarLine.BackColor = $cBorder
 $topBarLine.Location  = New-Object System.Drawing.Point(0, 29)
 $topBarLine.Size      = New-Object System.Drawing.Size($W, 1)
 $topBar.Controls.Add($topBarLine)
@@ -1149,9 +1925,9 @@ $tdot.Size      = New-Object System.Drawing.Size(8, 8)
 $topBar.Controls.Add($tdot)
 
 $tlbl = New-Object System.Windows.Forms.Label
-$tlbl.Text      = 'CAU INFORMATICA   |   PAINEL TECNICO'
+$tlbl.Text      = 'CAIJ INFORMATICA   |   GESTAO TECNICA'
 $tlbl.Font      = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Bold)
-$tlbl.ForeColor = [System.Drawing.Color]::FromArgb(110, 155, 192)
+$tlbl.ForeColor = $cMuted
 $tlbl.Location  = New-Object System.Drawing.Point(32, 8)
 $tlbl.Size      = New-Object System.Drawing.Size(310, 14)
 $topBar.Controls.Add($tlbl)
@@ -1159,7 +1935,7 @@ $topBar.Controls.Add($tlbl)
 $ttime = New-Object System.Windows.Forms.Label
 $ttime.Text      = 'Atualizado: ' + $dataHora
 $ttime.Font      = New-Object System.Drawing.Font('Segoe UI', 7.5)
-$ttime.ForeColor = [System.Drawing.Color]::FromArgb(76, 110, 140)
+$ttime.ForeColor = $cDim
 $ttime.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
 $ttime.Location  = New-Object System.Drawing.Point(390, 8)
 $ttime.Size      = New-Object System.Drawing.Size(282, 14)
@@ -1170,7 +1946,7 @@ $topBar.Controls.Add($ttime)
 # ================================================
 $hH = 88
 $hPanel = New-Object System.Windows.Forms.Panel
-$hPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 18, 28)
+$hPanel.BackColor = $cBg
 $hPanel.Location  = New-Object System.Drawing.Point(0, 30)
 $hPanel.Size      = New-Object System.Drawing.Size($W, $hH)
 $form.Controls.Add($hPanel)
@@ -1179,63 +1955,48 @@ $hPanel.Add_Paint({
     param($sender, $e)
     $g = $e.Graphics
     $g.SmoothingMode = 'AntiAlias'
-    # Gradient fundo
-    $r = New-Object System.Drawing.Rectangle(0, 0, $sender.Width, $sender.Height)
-    $b = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $r,
-        [System.Drawing.Color]::FromArgb(14, 26, 42),
-        [System.Drawing.Color]::FromArgb(7, 13, 22),
-        [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
-    )
-    $g.FillRectangle($b, $r)
-    $b.Dispose()
-    # Sublinhado gradiente sob o titulo (cyan -> transparente)
-    $underRect = New-Object System.Drawing.Rectangle(20, 41, 260, 2)
-    $underBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $underRect,
-        [System.Drawing.Color]::FromArgb(210, 0, 168, 232),
-        [System.Drawing.Color]::FromArgb(0, 0, 168, 232),
-        [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal
-    )
-    $g.FillRectangle($underBrush, $underRect)
-    $underBrush.Dispose()
-    # Linhas diagonais decorativas discretas (lado direito, atras da caixa serial)
-    $diagPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(14, 0, 168, 232), 1)
-    for ($xd = ($sender.Width - 260); $xd -lt $sender.Width; $xd += 14) {
-        $g.DrawLine($diagPen, $xd, $sender.Height, ($xd + 30), 0)
-    }
-    $diagPen.Dispose()
-    # Linha separadora inferior sutil
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(22, 50, 78), 1)
+    $g.Clear($cBg)
+    $pen = New-Object System.Drawing.Pen($cBorder, 1)
     $g.DrawLine($pen, 0, ($sender.Height - 1), $sender.Width, ($sender.Height - 1))
     $pen.Dispose()
 })
 
-# Barra accent esquerda (cyan vivo)
+# Barra accent esquerda (violeta vivo)
 $hAccL = New-Object System.Windows.Forms.Panel
 $hAccL.BackColor = $cAccent
 $hAccL.Location  = New-Object System.Drawing.Point(0, 0)
 $hAccL.Size      = New-Object System.Drawing.Size(3, $hH)
+$hAccL.Visible   = $false
 $hPanel.Controls.Add($hAccL)
 
 # Titulo
+$hEyebrow = New-Object System.Windows.Forms.Label
+$hEyebrow.Text      = 'INFONOTEBOOK  /  VISAO GERAL'
+$hEyebrow.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 6.5, [System.Drawing.FontStyle]::Bold)
+$hEyebrow.ForeColor = $cAccentHover
+$hEyebrow.BackColor = [System.Drawing.Color]::Transparent
+$hEyebrow.Location  = New-Object System.Drawing.Point(20, 6)
+$hEyebrow.Size      = New-Object System.Drawing.Size(310, 12)
+$hPanel.Controls.Add($hEyebrow)
+
 $hTitle = New-Object System.Windows.Forms.Label
-$hTitle.Text      = 'Inventario de Hardware'
-$hTitle.Font      = New-Object System.Drawing.Font('Segoe UI', 17, [System.Drawing.FontStyle]::Bold)
-$hTitle.ForeColor = [System.Drawing.Color]::FromArgb(220, 240, 255)
-$hTitle.Location  = New-Object System.Drawing.Point(20, 10)
-$hTitle.Size      = New-Object System.Drawing.Size(480, 30)
+$hTitle.Text      = 'Inventario do equipamento'
+$hTitle.Font      = New-CaijFont -Kind Display -Size 15.5 -Style ([System.Drawing.FontStyle]::Bold)
+$hTitle.ForeColor = $cMain
+$hTitle.BackColor = [System.Drawing.Color]::Transparent
+$hTitle.Location  = New-Object System.Drawing.Point(20, 19)
+$hTitle.Size      = New-Object System.Drawing.Size(460, 29)
 $hPanel.Controls.Add($hTitle)
 
 # Modelo (linha 2) — pill com fundo tintado e cantos arredondados
 $hModel = New-Object System.Windows.Forms.Label
 $hModel.Text      = $info.Modelo.ToUpper()
 $hModel.Font      = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-$hModel.ForeColor = $cAccent
-$hModel.BackColor = [System.Drawing.Color]::FromArgb(11, 34, 52)
+$hModel.ForeColor = [System.Drawing.Color]::FromArgb(208, 214, 234)
+$hModel.BackColor = $cCard
 $hModel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $hModelW = [Math]::Min(400, ([System.Windows.Forms.TextRenderer]::MeasureText($hModel.Text, $hModel.Font)).Width + 20)
-$hModel.Location  = New-Object System.Drawing.Point(20, 48)
+$hModel.Location  = New-Object System.Drawing.Point(20, 58)
 $hModel.Size      = New-Object System.Drawing.Size($hModelW, 18)
 $hPanel.Controls.Add($hModel)
 
@@ -1243,15 +2004,16 @@ $hPanel.Controls.Add($hModel)
 $hDate = New-Object System.Windows.Forms.Label
 $hDate.Text      = $dataHora
 $hDate.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-$hDate.ForeColor = [System.Drawing.Color]::FromArgb(58, 90, 118)
+$hDate.ForeColor = $cDim
+$hDate.BackColor = [System.Drawing.Color]::Transparent
 $hDate.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-$hDate.Location  = New-Object System.Drawing.Point((20 + $hModelW + 12), 48)
+$hDate.Location  = New-Object System.Drawing.Point((20 + $hModelW + 12), 58)
 $hDate.Size      = New-Object System.Drawing.Size(200, 18)
 $hPanel.Controls.Add($hDate)
 
 # ---- Caixa serial (direita) ----
 $sBox = New-Object System.Windows.Forms.Panel
-$sBox.BackColor   = [System.Drawing.Color]::FromArgb(6, 18, 32)
+$sBox.BackColor   = $cSurface
 $sBox.Location    = New-Object System.Drawing.Point(490, 6)
 $sBox.Size        = New-Object System.Drawing.Size(192, 76)
 $sBox.BorderStyle = 'None'
@@ -1261,7 +2023,7 @@ $sBox.Add_Paint({
     param($s, $e)
     $g = $e.Graphics
     $g.SmoothingMode = 'AntiAlias'
-    # Fundo arredondado
+    # Superficie arredondada com borda fina, igual aos cards da criacao de OS.
     $path = New-Object System.Drawing.Drawing2D.GraphicsPath
     $r2 = 10
     $w2 = $s.Width; $h2 = $s.Height
@@ -1270,17 +2032,12 @@ $sBox.Add_Paint({
     $path.AddArc($w2-$r2*2, $h2-$r2*2, $r2*2, $r2*2, 0, 90)
     $path.AddArc(0, $h2-$r2*2, $r2*2, $r2*2, 90, 90)
     $path.CloseFigure()
-    $bg = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(6, 18, 32))
+    $bg = New-Object System.Drawing.SolidBrush($cSurface)
     $g.FillPath($bg, $path)
     $bg.Dispose()
-    # Borda cyan brilhante
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(0, 168, 232), 1.5)
+    $pen = New-Object System.Drawing.Pen($cBorder, 1)
     $g.DrawPath($pen, $path)
     $pen.Dispose()
-    # Barra superior cyan (destaque)
-    $topAccent = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(0, 168, 232))
-    $g.FillRectangle($topAccent, 10, 0, ($w2-20), 2)
-    $topAccent.Dispose()
     $path.Dispose()
 })
 
@@ -1290,6 +2047,9 @@ function Set-RoundedControl {
         [int]$Radius = 10
     )
     try {
+        if (-not $Control.PSObject.Properties['CaijBaseCornerRadius']) {
+            $Control | Add-Member -NotePropertyName CaijBaseCornerRadius -NotePropertyValue $Radius
+        }
         $d = [math]::Max(2, $Radius * 2)
         $rect = New-Object System.Drawing.Rectangle(0, 0, $Control.Width, $Control.Height)
         $path = New-Object System.Drawing.Drawing2D.GraphicsPath
@@ -1306,7 +2066,7 @@ function New-SectionHairline {
     param(
         [Parameter(Mandatory=$true)]$Parent,
         [int]$X, [int]$Y, [int]$W,
-        [System.Drawing.Color]$Cor = ([System.Drawing.Color]::FromArgb(0, 168, 232))
+        [System.Drawing.Color]$Cor = ([System.Drawing.Color]::FromArgb(139, 92, 246))
     )
     $ln = New-Object System.Windows.Forms.Panel
     $ln.BackColor = [System.Drawing.Color]::Transparent
@@ -1337,7 +2097,7 @@ Set-RoundedControl -Control $hModel -Radius 9
 $sLbl = New-Object System.Windows.Forms.Label
 $sLbl.Text      = 'NUMERO DE SERIE'
 $sLbl.Font      = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-$sLbl.ForeColor = [System.Drawing.Color]::FromArgb(0, 168, 232)
+$sLbl.ForeColor = $cMuted
 $sLbl.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $sLbl.Location  = New-Object System.Drawing.Point(0, 10)
 $sLbl.Size      = New-Object System.Drawing.Size(192, 14)
@@ -1347,7 +2107,7 @@ $sBox.Controls.Add($sLbl)
 $sVal = New-Object System.Windows.Forms.Label
 $sVal.Text      = $info.Serial
 $sVal.Font      = New-Object System.Drawing.Font('Segoe UI', 16, [System.Drawing.FontStyle]::Bold)
-$sVal.ForeColor = [System.Drawing.Color]::FromArgb(220, 245, 255)
+$sVal.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
 $sVal.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $sVal.Location  = New-Object System.Drawing.Point(0, 22)
 $sVal.Size      = New-Object System.Drawing.Size(192, 25)
@@ -1355,14 +2115,14 @@ $sBox.Controls.Add($sVal)
 
 # Divisor
 $sDivider = New-Object System.Windows.Forms.Panel
-$sDivider.BackColor = [System.Drawing.Color]::FromArgb(22, 55, 82)
+$sDivider.BackColor = $cBorder
 $sDivider.Location  = New-Object System.Drawing.Point(24, 51)
 $sDivider.Size      = New-Object System.Drawing.Size(144, 1)
 $sBox.Controls.Add($sDivider)
 
 # Numero da OS centralizado no rodape da caixa
 $script:osValLabel = New-Object System.Windows.Forms.Label
-$script:osValLabel.Text      = 'C000' + $script:osNumero.ToString()
+$script:osValLabel.Text      = ('C{0:D6}' -f [int]$script:osNumero)
 $script:osValLabel.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
 $script:osValLabel.ForeColor = $cGreen
 $script:osValLabel.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
@@ -1375,12 +2135,12 @@ $sBox.Controls.Add($script:osValLabel)
 $osSyncBtn = New-Object System.Windows.Forms.Button
 $osSyncBtn.Text = [string][char]0x21BB
 $osSyncBtn.Font = New-Object System.Drawing.Font('Segoe UI Symbol', 9, [System.Drawing.FontStyle]::Bold)
-$osSyncBtn.ForeColor = [System.Drawing.Color]::FromArgb(0, 168, 232)
-$osSyncBtn.BackColor = [System.Drawing.Color]::FromArgb(6, 18, 32)
+$osSyncBtn.ForeColor = $cAccentHover
+$osSyncBtn.BackColor = $cSurface
 $osSyncBtn.FlatStyle = 'Flat'
 $osSyncBtn.FlatAppearance.BorderSize = 0
-$osSyncBtn.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(14, 40, 62)
-$osSyncBtn.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(20, 55, 82)
+$osSyncBtn.FlatAppearance.MouseOverBackColor = $cCard
+$osSyncBtn.FlatAppearance.MouseDownBackColor = $cBorder
 $osSyncBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
 $osSyncBtn.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $osSyncBtn.Location = New-Object System.Drawing.Point(166, 5)
@@ -1394,7 +2154,37 @@ $syncTip.SetToolTip($osSyncBtn, 'Sincronizar numero da OS')
 function Format-OsCodigo {
     param([int]$Numero)
     if ($Numero -lt 1) { return '' }
-    return ('C000{0}' -f $Numero)
+    return ('C{0:D6}' -f $Numero)
+}
+
+function Register-OsNumeroControl {
+    param([System.Windows.Forms.Control]$Control)
+    if (-not $Control -or $Control.IsDisposed) { return }
+    if (-not $script:osNumeroControls) {
+        $script:osNumeroControls = New-Object System.Collections.ArrayList
+    }
+    if (-not $script:osNumeroControls.Contains($Control)) {
+        [void]$script:osNumeroControls.Add($Control)
+    }
+    $Control.Text = (Format-OsCodigo -Numero $script:osNumero)
+}
+
+function Update-OsNumeroInterface {
+    $ativos = New-Object System.Collections.ArrayList
+    foreach ($control in @($script:osNumeroControls)) {
+        try {
+            if ($control -and -not $control.IsDisposed) {
+                $control.Text = (Format-OsCodigo -Numero $script:osNumero)
+                [void]$ativos.Add($control)
+            }
+        } catch {}
+    }
+    $script:osNumeroControls = $ativos
+    try {
+        if ($script:osPreviewRefreshAction) {
+            & $script:osPreviewRefreshAction
+        }
+    } catch {}
 }
 
 function Set-OsNumeroAtual {
@@ -1414,9 +2204,11 @@ function Set-OsNumeroAtual {
         $script:osDefinidaPorAltertag = $false
         $script:osDefinidaManual = $false
     }
-    if ($script:osValLabel) { $script:osValLabel.Text = (Format-OsCodigo -Numero $script:osNumero) }
+    Update-OsNumeroInterface
     Save-OsNumero -Numero $script:osNumero
 }
+
+Register-OsNumeroControl -Control $script:osValLabel
 
 function Try-ReadOsFromClipboard {
     try {
@@ -1430,22 +2222,383 @@ function Try-ReadOsFromClipboard {
 }
 
 function Prompt-OsManual {
+    param([System.Windows.Forms.Form]$Owner)
+
     $osSugerida = Try-ReadOsFromClipboard
+    $sugeridaClipboard = [bool]$osSugerida
     if (-not $osSugerida) { $osSugerida = $script:osNumero }
-    $entrada = [Microsoft.VisualBasic.Interaction]::InputBox(
-        "Informe o numero da OS gerado no Alterdata (se voce copiar o numero antes, ele ja vem sugerido):",
-        "Definir Ordem de Servico",
-        $osSugerida.ToString()
-    )
-    if (-not $entrada -or $entrada.Trim() -eq '') { return }
-    if ($entrada.Trim() -notmatch '^\d{2,8}$') {
-        [System.Windows.Forms.MessageBox]::Show('Numero de OS invalido. Digite somente numeros.', 'OS invalida', 'OK', 'Warning') | Out-Null
-        return
+
+    $osDialog = New-Object System.Windows.Forms.Form
+    $osDialog.Text = 'Alterar ordem de servico'
+    $osDialog.ClientSize = New-Object System.Drawing.Size(520, 318)
+    $osDialog.StartPosition = 'CenterParent'
+    $osDialog.BackColor = [System.Drawing.Color]::FromArgb(7, 9, 17)
+    $osDialog.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $osDialog.FormBorderStyle = 'None'
+    $osDialog.ShowInTaskbar = $false
+    $osDialog.MaximizeBox = $false
+    $osDialog.MinimizeBox = $false
+    $osDialog.KeyPreview = $true
+    Set-DoubleBuffered $osDialog
+    Set-RoundedControl -Control $osDialog -Radius 12
+    $osDialog.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+    $osDialog.Add_Paint({
+        param($s, $e)
+        $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+        $border.Dispose()
+    })
+
+    $osHeader = New-Object System.Windows.Forms.Panel
+    $osHeader.Location = New-Object System.Drawing.Point(0, 0)
+    $osHeader.Size = New-Object System.Drawing.Size(520, 78)
+    $osHeader.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    [void]$osDialog.Controls.Add($osHeader)
+    $osHeader.Add_Paint({
+        param($s, $e)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $e.Graphics.DrawLine($line, 0, ($s.Height - 1), $s.Width, ($s.Height - 1))
+        $line.Dispose()
+    })
+
+    $osHeaderRail = New-Object System.Windows.Forms.Panel
+    $osHeaderRail.Location = New-Object System.Drawing.Point(0, 0)
+    $osHeaderRail.Size = New-Object System.Drawing.Size(0, 78)
+    $osHeaderRail.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    [void]$osHeader.Controls.Add($osHeaderRail)
+
+    $osEyebrow = New-Object System.Windows.Forms.Label
+    $osEyebrow.Text = 'ETIQUETA / ORDEM DE SERVICO'
+    $osEyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+    $osEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $osEyebrow.Location = New-Object System.Drawing.Point(22, 11)
+    $osEyebrow.Size = New-Object System.Drawing.Size(300, 14)
+    [void]$osHeader.Controls.Add($osEyebrow)
+
+    $osTitle = New-Object System.Windows.Forms.Label
+    $osTitle.Text = 'Alterar OS da etiqueta'
+    $osTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
+    $osTitle.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $osTitle.Location = New-Object System.Drawing.Point(20, 29)
+    $osTitle.Size = New-Object System.Drawing.Size(350, 30)
+    [void]$osHeader.Controls.Add($osTitle)
+
+    $osSubtitle = New-Object System.Windows.Forms.Label
+    $osSubtitle.Text = 'Use o numero gerado no Alterdata'
+    $osSubtitle.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $osSubtitle.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $osSubtitle.Location = New-Object System.Drawing.Point(23, 57)
+    $osSubtitle.Size = New-Object System.Drawing.Size(300, 14)
+    [void]$osHeader.Controls.Add($osSubtitle)
+
+    $osClose = New-Object System.Windows.Forms.Button
+    $osClose.Text = 'X'
+    $osClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $osClose.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $osClose.BackColor = $osHeader.BackColor
+    $osClose.FlatStyle = 'Flat'
+    $osClose.FlatAppearance.BorderSize = 0
+    $osClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $osClose.Location = New-Object System.Drawing.Point(486, 7)
+    $osClose.Size = New-Object System.Drawing.Size(26, 26)
+    $osClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $osClose.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    [void]$osHeader.Controls.Add($osClose)
+
+    $osHint = New-Object System.Windows.Forms.Label
+    $osHint.Text = if ($sugeridaClipboard) {
+        'Numero identificado na area de transferencia. Confira antes de aplicar.'
+    } else {
+        'Digite somente os numeros da ordem de servico.'
     }
-    Set-OsNumeroAtual -Numero ([int]$entrada.Trim()) -Fonte 'manual'
+    $osHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+    $osHint.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $osHint.Location = New-Object System.Drawing.Point(24, 94)
+    $osHint.Size = New-Object System.Drawing.Size(470, 34)
+    [void]$osDialog.Controls.Add($osHint)
+
+    $osField = New-Object System.Windows.Forms.Panel
+    $osField.Location = New-Object System.Drawing.Point(24, 134)
+    $osField.Size = New-Object System.Drawing.Size(472, 72)
+    $osField.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    [void]$osDialog.Controls.Add($osField)
+    Set-RoundedControl -Control $osField -Radius 8
+
+    $osFieldRail = New-Object System.Windows.Forms.Panel
+    $osFieldRail.Location = New-Object System.Drawing.Point(0, 0)
+    $osFieldRail.Size = New-Object System.Drawing.Size(4, 72)
+    $osFieldRail.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    [void]$osField.Controls.Add($osFieldRail)
+
+    $osFieldLabel = New-Object System.Windows.Forms.Label
+    $osFieldLabel.Text = 'NUMERO DA OS'
+    $osFieldLabel.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+    $osFieldLabel.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $osFieldLabel.Location = New-Object System.Drawing.Point(16, 9)
+    $osFieldLabel.Size = New-Object System.Drawing.Size(150, 14)
+    [void]$osField.Controls.Add($osFieldLabel)
+
+    $osPrefix = New-Object System.Windows.Forms.Label
+    $osPrefix.Text = 'C'
+    $osPrefix.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
+    $osPrefix.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $osPrefix.Location = New-Object System.Drawing.Point(16, 33)
+    $osPrefix.Size = New-Object System.Drawing.Size(22, 26)
+    [void]$osField.Controls.Add($osPrefix)
+
+    $osInput = New-Object System.Windows.Forms.TextBox
+    $osInput.Text = $osSugerida.ToString('D6')
+    $osInput.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
+    $osInput.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    $osInput.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $osInput.BorderStyle = 'FixedSingle'
+    $osInput.Location = New-Object System.Drawing.Point(42, 31)
+    $osInput.Size = New-Object System.Drawing.Size(408, 30)
+    $osInput.MaxLength = 8
+    [void]$osField.Controls.Add($osInput)
+
+    $osValidation = New-Object System.Windows.Forms.Label
+    $osValidation.Text = ''
+    $osValidation.Font = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Bold)
+    $osValidation.ForeColor = [System.Drawing.Color]::FromArgb(236, 112, 124)
+    $osValidation.Location = New-Object System.Drawing.Point(26, 211)
+    $osValidation.Size = New-Object System.Drawing.Size(460, 18)
+    [void]$osDialog.Controls.Add($osValidation)
+
+    $osCancel = New-Object System.Windows.Forms.Button
+    $osCancel.Text = 'Cancelar'
+    $osCancel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+    $osCancel.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $osCancel.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $osCancel.FlatStyle = 'Flat'
+    $osCancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
+    $osCancel.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 51)
+    $osCancel.Location = New-Object System.Drawing.Point(270, 252)
+    $osCancel.Size = New-Object System.Drawing.Size(100, 40)
+    $osCancel.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $osCancel.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    [void]$osDialog.Controls.Add($osCancel)
+    Set-RoundedControl -Control $osCancel -Radius 7
+
+    $osApply = New-Object System.Windows.Forms.Button
+    $osApply.Text = 'Aplicar OS'
+    $osApply.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+    $osApply.ForeColor = [System.Drawing.Color]::White
+    $osApply.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $osApply.FlatStyle = 'Flat'
+    $osApply.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $osApply.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $osApply.Location = New-Object System.Drawing.Point(380, 252)
+    $osApply.Size = New-Object System.Drawing.Size(116, 40)
+    $osApply.Cursor = [System.Windows.Forms.Cursors]::Hand
+    [void]$osDialog.Controls.Add($osApply)
+    Set-RoundedControl -Control $osApply -Radius 7
+
+    $osInput.Add_KeyPress({
+        if (-not [char]::IsControl($_.KeyChar) -and -not [char]::IsDigit($_.KeyChar)) {
+            $_.Handled = $true
+        }
+    })
+    $osInput.Add_TextChanged({
+        $osValidation.Text = ''
+        $osFieldRail.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    })
+    $osApply.Add_Click({
+        $valorOs = $osInput.Text.Trim()
+        if ($valorOs -notmatch '^\d{2,8}$') {
+            $osValidation.Text = 'Digite de 2 a 8 numeros para continuar.'
+            $osFieldRail.BackColor = [System.Drawing.Color]::FromArgb(236, 112, 124)
+            $osInput.Focus() | Out-Null
+            $osInput.SelectAll()
+            return
+        }
+        $osDialog.Tag = [int]$valorOs
+        $osDialog.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $osDialog.Close()
+    })
+
+    $osDialog.AcceptButton = $osApply
+    $osDialog.CancelButton = $osCancel
+    $osDialog.Add_Shown({
+        $osInput.Focus() | Out-Null
+        $osInput.SelectAll()
+    })
+
+    $osDrag = @{ Active = $false; Mouse = [System.Drawing.Point]::Empty; Form = [System.Drawing.Point]::Empty }
+    $osHeader.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            $osDrag.Active = $true
+            $osDrag.Mouse = [System.Windows.Forms.Cursor]::Position
+            $osDrag.Form = $osDialog.Location
+        }
+    })
+    $osHeader.Add_MouseMove({
+        if ($osDrag.Active) {
+            $agora = [System.Windows.Forms.Cursor]::Position
+            $osDialog.Location = New-Object System.Drawing.Point(
+                ($osDrag.Form.X + $agora.X - $osDrag.Mouse.X),
+                ($osDrag.Form.Y + $agora.Y - $osDrag.Mouse.Y)
+            )
+        }
+    })
+    $osHeader.Add_MouseUp({ $osDrag.Active = $false })
+
+    Set-CaijWindowsTypography -Root $osDialog
+    $resultadoOs = if ($Owner) { $osDialog.ShowDialog($Owner) } else { $osDialog.ShowDialog() }
+    $novoNumeroOs = $osDialog.Tag
+    $osDialog.Dispose()
+    if ($resultadoOs -eq [System.Windows.Forms.DialogResult]::OK -and $novoNumeroOs) {
+        Set-OsNumeroAtual -Numero ([int]$novoNumeroOs) -Fonte 'manual'
+        return $true
+    }
+    return $false
 }
 
-$script:osValLabel.Add_Click({ Prompt-OsManual })
+function Get-MonitorTamanhoNumero {
+    param([string]$Valor)
+
+    $texto = if ($Valor) { $Valor.Trim() } else { '' }
+    if ($texto -match '(?i)(\d{1,3}(?:[.,]\d)?)\s*(?:"|Â?°|polegadas?)?') {
+        return ($matches[1] -replace '\.', ',')
+    }
+    return ''
+}
+
+function Format-MonitorTamanhoEtiqueta {
+    param([string]$Valor)
+
+    $numero = Get-MonitorTamanhoNumero -Valor $Valor
+    if (-not $numero) { return '' }
+    return "$numero polegadas"
+}
+
+function Test-DesktopProduto {
+    param([string]$Descricao)
+
+    $texto = (([string]$Descricao) -replace '\s+', ' ').Trim()
+    return ($texto -match '(?i)\b(?:CPU|DESKTOP|MINI\s+DESKTOP|COMPUTADOR\s+DESKTOP)\b')
+}
+
+function Test-CelularProduto {
+    param([string]$Descricao)
+
+    $texto = (([string]$Descricao) -replace '\s+', ' ').Trim()
+    return ($texto -match '(?i)\b(?:SMARTPHONE|CELULAR|TELEFONE|IPHONE|IPAD|TABLET|SAMSUNG|GALAXY|MOTOROLA|XIAOMI)\b')
+}
+
+function Get-ModeloEtiquetaProduto {
+    param(
+        [string]$Descricao,
+        [string]$CodigoProduto = ''
+    )
+
+    $modelo = (([string]$Descricao) -replace '\s+', ' ').Trim()
+    if ($CodigoProduto) {
+        $codigoEscapado = [regex]::Escape($CodigoProduto.Trim())
+        $modelo = ($modelo -replace ("(?i)^\s*{0}\s*(?:[-:|]\s*)?" -f $codigoEscapado), '').Trim()
+    }
+    # O Altertag pode antepor a categoria comercial ao nome do aparelho.
+    # Ela serve para classificar o produto, mas nao faz parte do modelo impresso.
+    $modelo = ($modelo -replace '(?i)^\s*(?:SMARTPHONE|CELULAR|TELEFONE|TABLET)\s*(?:[-:|]\s*)?', '').Trim()
+    # Protege cadastros antigos em que o codigo Txxx foi salvo junto do nome.
+    $modelo = ($modelo -replace '(?i)^\s*T\d{3}(?:-+)?\s*(?:[-:|]\s*)?(?=(?:CPU|DESKTOP|MINI\s+DESKTOP|COMPUTADOR\s+DESKTOP)\b)', '').Trim()
+    return $modelo
+}
+
+function Apply-OsAltertagNaEtiqueta {
+    param($Ordem)
+
+    if (-not $Ordem) { return }
+    $equipamentoOs = Get-ModeloEtiquetaProduto -Descricao (([string]$Ordem.equipamento) -replace 'Â°|°', '')
+    $serialOs = ([string]$Ordem.garantia).Trim()
+    $referenciaOs = ([string]$Ordem.referencia).Trim().ToUpperInvariant()
+    if ($equipamentoOs) { $script:modeloEtiqueta = $equipamentoOs }
+    if ($serialOs) { $script:serialEtiqueta = $serialOs }
+
+    foreach ($gradeOpcaoOs in @(@(Get-CaijGradeOptions) + @(Get-CaijGradeOptions -EquipmentType 'Celular') | Select-Object -Unique)) {
+        if ((Format-CaijGradeReference $gradeOpcaoOs).ToUpperInvariant() -eq $referenciaOs) {
+            $script:gradeAtual = $gradeOpcaoOs
+            break
+        }
+    }
+
+    if (Test-CelularProduto -Descricao $equipamentoOs) {
+        $script:tipoEtiqueta = 'Celular'
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
+        $script:cpuEtiqueta = ''
+        $script:memEtiqueta = ''
+        $script:ramEtiqueta = ''
+        $script:gpuEtiqueta = ''
+        $script:bateriaEtiqueta = $null
+        $script:modoManualEtiqueta = $true
+    } elseif ($equipamentoOs -match '(?i)\bmonitor\b') {
+        $script:tipoEtiqueta = 'Monitor'
+        $script:monitorTamanhoEtiqueta = Format-MonitorTamanhoEtiqueta -Valor $equipamentoOs
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
+        $script:cpuEtiqueta = ''
+        $script:memEtiqueta = ''
+        $script:ramEtiqueta = ''
+        $script:gpuEtiqueta = ''
+        $script:bateriaEtiqueta = $null
+        $script:modoManualEtiqueta = $true
+        $script:abrirManualPorOsSelecionada = $true
+    } elseif (Test-DesktopProduto -Descricao $equipamentoOs) {
+        $script:tipoEtiqueta = 'Desktop'
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
+        $script:cpuEtiqueta = ''
+        $script:memEtiqueta = ''
+        $script:ramEtiqueta = ''
+        $script:gpuEtiqueta = ''
+        $script:bateriaEtiqueta = $null
+        $script:modoManualEtiqueta = $true
+    }
+}
+
+function Apply-CadastroOsEtiquetaNaImpressao {
+    param($Etiqueta)
+
+    if (-not $Etiqueta) { return }
+
+    $tipoCadastro = [string]$Etiqueta.tipoEquipamento
+    if ($tipoCadastro -eq 'Desktop') {
+        $script:tipoEtiqueta = 'Desktop'
+        $script:modeloEtiqueta = Get-ModeloEtiquetaProduto -Descricao ([string]$Etiqueta.modelo) -CodigoProduto ([string]$Etiqueta.produtoCodigo)
+        $script:serialEtiqueta = [string]$Etiqueta.serial
+        $script:celularImeiEtiqueta = ''
+        $script:bateriaEtiqueta = $null
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:cpuEtiqueta = [string]$Etiqueta.cpu
+        $script:memEtiqueta = [string]$Etiqueta.armazenamento
+        $script:ramEtiqueta = [string]$Etiqueta.ram
+        $script:gpuEtiqueta = [string]$Etiqueta.gpu
+        $script:modoManualEtiqueta = $true
+        return
+    }
+
+    if ($tipoCadastro -ne 'Celular') { return }
+
+    $script:tipoEtiqueta = 'Celular'
+    $script:modeloEtiqueta = Get-ModeloEtiquetaProduto -Descricao ([string]$Etiqueta.modelo) -CodigoProduto ([string]$Etiqueta.produtoCodigo)
+    $script:serialEtiqueta = [string]$Etiqueta.serial
+    $script:celularImeiEtiqueta = [string]$Etiqueta.imei
+    $script:bateriaEtiqueta = [string]$Etiqueta.bateria
+    $script:monitorTamanhoEtiqueta = ''
+    $script:monitorEntradasEtiqueta = ''
+    $script:cpuEtiqueta = ''
+    $script:memEtiqueta = [string]$Etiqueta.armazenamento
+    $script:ramEtiqueta = ''
+    $script:gpuEtiqueta = ''
+    $script:modoManualEtiqueta = $true
+}
+
+$script:osValLabel.Add_Click({ Prompt-OsManual -Owner $form | Out-Null })
 
 function Select-OsFromAltertagRecentes {
     param([object[]]$Ordens)
@@ -1626,7 +2779,7 @@ function Select-OsFromAltertagRecentes {
 
     $manual = New-DlgBtn 'Digitar manual' 16 $btnY 148 36 `
         ([System.Drawing.Color]::FromArgb(16, 30, 46)) `
-        ([System.Drawing.Color]::FromArgb(130, 175, 210)) `
+        ([System.Drawing.Color]::FromArgb(174, 165, 194)) `
         ([System.Drawing.Color]::FromArgb(28, 50, 72)) `
         ([System.Drawing.Color]::FromArgb(40, 80, 116))
     [void]$dlg.Controls.Add($manual)
@@ -1666,7 +2819,7 @@ function Select-OsFromAltertagRecentes {
         $ed.Text = 'Editar OS ' + (Format-OsCodigo -Numero ([int]$osObj.numero))
         $ed.Size = New-Object System.Drawing.Size(480, 340)
         $ed.StartPosition = 'CenterParent'
-        $ed.BackColor = [System.Drawing.Color]::FromArgb(8, 16, 26)
+        $ed.BackColor = [System.Drawing.Color]::FromArgb(8, 12, 27)
         $ed.FormBorderStyle = 'FixedDialog'
         $ed.MaximizeBox = $false; $ed.MinimizeBox = $false
 
@@ -1691,7 +2844,7 @@ function Select-OsFromAltertagRecentes {
         $edSub = New-Object System.Windows.Forms.Label
         $edSub.Text = [string]$osObj.equipamento
         $edSub.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
-        $edSub.ForeColor = [System.Drawing.Color]::FromArgb(100, 148, 178)
+        $edSub.ForeColor = [System.Drawing.Color]::FromArgb(145, 137, 163)
         $edSub.Location = New-Object System.Drawing.Point(14, 32)
         $edSub.Size = New-Object System.Drawing.Size(420, 14)
         [void]$edHead.Controls.Add($edSub)
@@ -1701,15 +2854,15 @@ function Select-OsFromAltertagRecentes {
             $lbF = New-Object System.Windows.Forms.Label
             $lbF.Text = $lbl
             $lbF.Font = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Bold)
-            $lbF.ForeColor = [System.Drawing.Color]::FromArgb(100, 148, 178)
+            $lbF.ForeColor = [System.Drawing.Color]::FromArgb(145, 137, 163)
             $lbF.Location = New-Object System.Drawing.Point(20, $y)
             $lbF.Size = New-Object System.Drawing.Size(420, 14)
             [void]$ed.Controls.Add($lbF)
             $tb = New-Object System.Windows.Forms.TextBox
             $tb.Text = $val
             $tb.Font = New-Object System.Drawing.Font('Segoe UI', 9.5)
-            $tb.ForeColor = [System.Drawing.Color]::FromArgb(220, 240, 255)
-            $tb.BackColor = [System.Drawing.Color]::FromArgb(14, 28, 44)
+            $tb.ForeColor = [System.Drawing.Color]::FromArgb(239, 233, 255)
+            $tb.BackColor = [System.Drawing.Color]::FromArgb(19, 17, 40)
             $tb.BorderStyle = 'FixedSingle'
             $tb.Location = New-Object System.Drawing.Point(20, ($y+16))
             $tb.Size = New-Object System.Drawing.Size(430, 26)
@@ -1771,6 +2924,7 @@ function Select-OsFromAltertagRecentes {
             $ed.Close()
         }.GetNewClosure())
 
+        Set-CaijWindowsTypography -Root $ed
         $ed.ShowDialog() | Out-Null
     }.GetNewClosure())
 
@@ -1792,16 +2946,17 @@ function Select-OsFromAltertagRecentes {
         $dlg.DialogResult = [System.Windows.Forms.DialogResult]::Retry
         $dlg.Close()
     })
+    Set-CaijWindowsTypography -Root $dlg
     $res = $dlg.ShowDialog()
     if ($res -eq [System.Windows.Forms.DialogResult]::Retry) {
-        Prompt-OsManual
-        return $true
+        return [bool](Prompt-OsManual -Owner $form)
     }
     if ($res -ne [System.Windows.Forms.DialogResult]::OK -or -not $script:selectedAltertagOs) { return $false }
 
     $sel = $script:selectedAltertagOs
     Set-OsNumeroAtual -Numero ([int]$sel.numero) -Fonte 'altertag'
     $script:altertagOsAtual = $sel
+    Apply-OsAltertagNaEtiqueta -Ordem $sel
     $script:ultimaSincronizacaoOs = Get-Date -Format 'dd/MM HH:mm'
     Set-AppStatus -Texto "OS Altertag selecionada: $(Format-OsCodigo -Numero ([int]$sel.numero)) | $([string]$sel.statusOs)" -Cor $cGreen
     return $true
@@ -1915,14 +3070,14 @@ function Show-DialogConfigurarServidor {
     $f.Text = 'Configurar Servidor CAIJ'
     $f.Size = New-Object System.Drawing.Size(460, 220)
     $f.StartPosition = 'CenterScreen'
-    $f.BackColor = [System.Drawing.Color]::FromArgb(8, 16, 26)
+    $f.BackColor = [System.Drawing.Color]::FromArgb(8, 12, 27)
     $f.FormBorderStyle = 'FixedDialog'
     $f.MaximizeBox = $false; $f.MinimizeBox = $false
 
     $lHead = New-Object System.Windows.Forms.Label
     $lHead.Text = 'Endereco do servidor CAIJ'
     $lHead.Font = New-Object System.Drawing.Font('Segoe UI', 11, [System.Drawing.FontStyle]::Bold)
-    $lHead.ForeColor = [System.Drawing.Color]::FromArgb(0, 180, 240)
+    $lHead.ForeColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
     $lHead.Location = New-Object System.Drawing.Point(16, 14)
     $lHead.Size = New-Object System.Drawing.Size(410, 22)
     [void]$f.Controls.Add($lHead)
@@ -1930,7 +3085,7 @@ function Show-DialogConfigurarServidor {
     $lHint = New-Object System.Windows.Forms.Label
     $lHint.Text = 'Digite o IP ou URL completa do servidor (ex: http://192.168.15.127:9100)'
     $lHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
-    $lHint.ForeColor = [System.Drawing.Color]::FromArgb(90, 140, 175)
+    $lHint.ForeColor = [System.Drawing.Color]::FromArgb(139, 130, 158)
     $lHint.Location = New-Object System.Drawing.Point(16, 40)
     $lHint.Size = New-Object System.Drawing.Size(420, 16)
     [void]$f.Controls.Add($lHint)
@@ -1938,7 +3093,7 @@ function Show-DialogConfigurarServidor {
     $tb = New-Object System.Windows.Forms.TextBox
     $tb.Text = $urlAtual
     $tb.Font = New-Object System.Drawing.Font('Segoe UI', 10)
-    $tb.ForeColor = [System.Drawing.Color]::FromArgb(220, 240, 255)
+    $tb.ForeColor = [System.Drawing.Color]::FromArgb(239, 233, 255)
     $tb.BackColor = [System.Drawing.Color]::FromArgb(12, 26, 42)
     $tb.BorderStyle = 'FixedSingle'
     $tb.Location = New-Object System.Drawing.Point(16, 62)
@@ -2006,6 +3161,7 @@ function Show-DialogConfigurarServidor {
         }
     }.GetNewClosure())
 
+    Set-CaijWindowsTypography -Root $f
     $f.ShowDialog() | Out-Null
 }
 
@@ -2026,35 +3182,59 @@ $scrollY = $hLineY + 2
 $scroll = New-Object System.Windows.Forms.Panel
 $scroll.AutoScroll = $false
 $scroll.Location   = New-Object System.Drawing.Point(0, $scrollY)
-$scroll.BackColor  = [System.Drawing.Color]::FromArgb(7, 12, 20)
+$scroll.BackColor  = $cBg
 $form.Controls.Add($scroll)
 
 $script:py = 10
+$script:sectionNumber = 0
 $CW = 660  # content width
 
 # ---- secao ----
 function Add-Sec {
     param([string]$label, [System.Drawing.Color]$cor)
-    $script:py += 5
+    $script:py += 4
+    $script:sectionRowIndex = 0
+    $script:sectionNumber++
     $sp = New-Object System.Windows.Forms.Panel
-    $sp.BackColor   = [System.Drawing.Color]::FromArgb(7, 13, 22)
+    $sp.BackColor   = $cSurface
     $sp.Location    = New-Object System.Drawing.Point(16, $script:py)
-    $sp.Size        = New-Object System.Drawing.Size($CW, 18)
+    $sp.Size        = New-Object System.Drawing.Size($CW, 22)
     $sp.BorderStyle = 'None'
     [void]$scroll.Controls.Add($sp)
+    Set-RoundedControl -Control $sp -Radius 4
+
     $abar = New-Object System.Windows.Forms.Panel
     $abar.BackColor = $cor
-    $abar.Location  = New-Object System.Drawing.Point(0, 0)
-    $abar.Size      = New-Object System.Drawing.Size(3, 18)
+    $abar.Location  = New-Object System.Drawing.Point(0, 3)
+    $abar.Size      = New-Object System.Drawing.Size(4, 16)
+    $abar.Visible   = $false
     [void]$sp.Controls.Add($abar)
+
+    $indexBadge = New-Object System.Windows.Forms.Label
+    $indexBadge.Text = ('{0:D2}' -f $script:sectionNumber)
+    $indexBadge.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7, [System.Drawing.FontStyle]::Bold)
+    $indexBadge.ForeColor = $cAccentHover
+    $indexBadge.BackColor = $cCard
+    $indexBadge.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $indexBadge.Location = New-Object System.Drawing.Point(10, 3)
+    $indexBadge.Size = New-Object System.Drawing.Size(28, 16)
+    [void]$sp.Controls.Add($indexBadge)
+    Set-RoundedControl -Control $indexBadge -Radius 3
+
     $lbl = New-Object System.Windows.Forms.Label
     $lbl.Text      = $label.ToUpper()
-    $lbl.Font      = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-    $lbl.ForeColor = $cor
-    $lbl.Location  = New-Object System.Drawing.Point(10, 2)
-    $lbl.Size      = New-Object System.Drawing.Size(500, 14)
+    $lbl.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 7.2, [System.Drawing.FontStyle]::Bold)
+    $lbl.ForeColor = $cMuted
+    $lbl.Location  = New-Object System.Drawing.Point(46, 4)
+    $lbl.Size      = New-Object System.Drawing.Size(204, 15)
     [void]$sp.Controls.Add($lbl)
-    $script:py += 20
+
+    $hairline = New-Object System.Windows.Forms.Panel
+    $hairline.BackColor = $cBorder
+    $hairline.Location = New-Object System.Drawing.Point(250, 10)
+    $hairline.Size = New-Object System.Drawing.Size(($CW - 264), 1)
+    [void]$sp.Controls.Add($hairline)
+    $script:py += 24
 }
 
 # ---- linha simples: label esquerda | valor direita, altura compacta ----
@@ -2064,42 +3244,51 @@ function Add-Row {
     if (-not $ac) { $ac = $cBorder }
 
     $p = New-Object System.Windows.Forms.Panel
-    $p.BackColor   = [System.Drawing.Color]::FromArgb(11, 20, 31)
+    $rowBack = $cCard
+    $p.BackColor   = $rowBack
     $p.Location    = New-Object System.Drawing.Point(16, $script:py)
-    $p.Size        = New-Object System.Drawing.Size($CW, 24)
+    $p.Size        = New-Object System.Drawing.Size($CW, 26)
     $p.BorderStyle = 'None'
     [void]$scroll.Controls.Add($p)
+    Set-RoundedControl -Control $p -Radius 6
+    $p.Add_Paint({
+        $rowPen = New-Object System.Drawing.Pen($cBorder, 1)
+        $_.Graphics.DrawRectangle($rowPen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $rowPen.Dispose()
+    })
 
     $abar = New-Object System.Windows.Forms.Panel
     $abar.BackColor = $ac
-    $abar.Location  = New-Object System.Drawing.Point(0, 3)
-    $abar.Size      = New-Object System.Drawing.Size(3, 18)
+    $abar.Location  = New-Object System.Drawing.Point(0, 5)
+    $abar.Size      = New-Object System.Drawing.Size(3, 16)
+    $abar.Visible   = $false
     [void]$p.Controls.Add($abar)
 
     $lk = New-Object System.Windows.Forms.Label
-    $lk.Text      = $k
-    $lk.Font      = New-Object System.Drawing.Font('Segoe UI', 8)
-    $lk.ForeColor = [System.Drawing.Color]::FromArgb(96, 138, 172)
-    $lk.Location  = New-Object System.Drawing.Point(10, 4)
-    $lk.Size      = New-Object System.Drawing.Size(138, 16)
+    $lk.Text      = $k.ToUpperInvariant()
+    $lk.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 7.4)
+    $lk.ForeColor = $cMuted
+    $lk.Location  = New-Object System.Drawing.Point(12, 5)
+    $lk.Size      = New-Object System.Drawing.Size(132, 16)
     [void]$p.Controls.Add($lk)
+
+    $keyDivider = New-Object System.Windows.Forms.Panel
+    $keyDivider.BackColor = $cBorder
+    $keyDivider.Location = New-Object System.Drawing.Point(144, 5)
+    $keyDivider.Size = New-Object System.Drawing.Size(1, 16)
+    [void]$p.Controls.Add($keyDivider)
 
     $lv = New-Object System.Windows.Forms.Label
     $lv.Text         = $v
-    $lv.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+    $lv.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 8.8, [System.Drawing.FontStyle]::Bold)
     $lv.ForeColor    = $vc
-    $lv.Location     = New-Object System.Drawing.Point(150, 4)
-    $lv.Size         = New-Object System.Drawing.Size(490, 16)
+    $lv.Location     = New-Object System.Drawing.Point(150, 5)
+    $lv.Size         = New-Object System.Drawing.Size(494, 17)
     $lv.AutoEllipsis = $true
     [void]$p.Controls.Add($lv)
 
-    $div = New-Object System.Windows.Forms.Panel
-    $div.BackColor = [System.Drawing.Color]::FromArgb(14, 26, 40)
-    $div.Location  = New-Object System.Drawing.Point(3, 23)
-    $div.Size      = New-Object System.Drawing.Size(($CW - 3), 1)
-    [void]$p.Controls.Add($div)
-
-    $script:py += 25
+    $script:sectionRowIndex++
+    $script:py += 27
 }
 
 # ---- duas colunas compactas ----
@@ -2117,68 +3306,80 @@ function Add-Row2 {
         @{ k=$k2; v=$v2; c=$c2; X=(16 + $half + 4) }
     )) {
         $p = New-Object System.Windows.Forms.Panel
-        $p.BackColor   = [System.Drawing.Color]::FromArgb(11, 20, 31)
+        $p.BackColor   = $cCard
         $p.Location    = New-Object System.Drawing.Point([int]$side.X, $script:py)
-        $p.Size        = New-Object System.Drawing.Size($half, 24)
+        $p.Size        = New-Object System.Drawing.Size($half, 26)
         $p.BorderStyle = 'None'
         [void]$scroll.Controls.Add($p)
+        Set-RoundedControl -Control $p -Radius 6
+        $p.Add_Paint({
+            $rowPen = New-Object System.Drawing.Pen($cBorder, 1)
+            $_.Graphics.DrawRectangle($rowPen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+            $rowPen.Dispose()
+        })
 
         $abar = New-Object System.Windows.Forms.Panel
         $abar.BackColor = $ac
-        $abar.Location  = New-Object System.Drawing.Point(0, 3)
-        $abar.Size      = New-Object System.Drawing.Size(3, 18)
+        $abar.Location  = New-Object System.Drawing.Point(0, 5)
+        $abar.Size      = New-Object System.Drawing.Size(3, 16)
+        $abar.Visible   = $false
         [void]$p.Controls.Add($abar)
 
         $lk = New-Object System.Windows.Forms.Label
-        $lk.Text      = [string]$side.k
-        $lk.Font      = New-Object System.Drawing.Font('Segoe UI', 8)
-        $lk.ForeColor = [System.Drawing.Color]::FromArgb(96, 138, 172)
-        $lk.Location  = New-Object System.Drawing.Point(10, 4)
-        $lk.Size      = New-Object System.Drawing.Size(96, 16)
+        $lk.Text      = ([string]$side.k).ToUpperInvariant()
+        $lk.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 7.4)
+        $lk.ForeColor = $cMuted
+        $lk.Location  = New-Object System.Drawing.Point(12, 5)
+        $lk.Size      = New-Object System.Drawing.Size(86, 16)
         [void]$p.Controls.Add($lk)
+
+        $keyDivider = New-Object System.Windows.Forms.Panel
+        $keyDivider.BackColor = $cBorder
+        $keyDivider.Location = New-Object System.Drawing.Point(94, 5)
+        $keyDivider.Size = New-Object System.Drawing.Size(1, 16)
+        [void]$p.Controls.Add($keyDivider)
 
         $lv = New-Object System.Windows.Forms.Label
         $lv.Text         = [string]$side.v
-        $lv.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $lv.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 8.8, [System.Drawing.FontStyle]::Bold)
         $lv.ForeColor    = [System.Drawing.Color]$side.c
-        $lv.Location     = New-Object System.Drawing.Point(108, 4)
-        $lv.Size         = New-Object System.Drawing.Size(($half - 112), 16)
+        $lv.Location     = New-Object System.Drawing.Point(100, 5)
+        $lv.Size         = New-Object System.Drawing.Size(($half - 108), 17)
         $lv.AutoEllipsis = $true
         [void]$p.Controls.Add($lv)
-
-        $div = New-Object System.Windows.Forms.Panel
-        $div.BackColor = [System.Drawing.Color]::FromArgb(14, 26, 40)
-        $div.Location  = New-Object System.Drawing.Point(3, 23)
-        $div.Size      = New-Object System.Drawing.Size(($half - 3), 1)
-        [void]$p.Controls.Add($div)
     }
 
-    $script:py += 25
+    $script:sectionRowIndex++
+    $script:py += 27
 }
 
-function Gap { $script:py += 4 }
+function Gap { $script:py += 6 }
+
+# Valores tecnicos usam uma unica voz visual; cor permanece apenas para status semantico.
+$cCpuValue = $cMain
+$cRamValue = $cMain
+$cStorageValue = $cMain
+$cGpuValue = $cMain
 
 # ---- SECAO 1 ----
-Add-Sec 'Processador & Memoria' $cAccent
-Add-Row 'Processador' $info.CPU $cMain $cAccent
-Add-Row2 'Nucleos' $info.Nucleos $cAccent 'Clock Max' $info.ClockMax $cAccent $cAccent
-Add-Row 'RAM Total' $info.RAM $cYellow $cYellow
-Add-Row 'Modulos' $info.RAMMods $cMuted $cYellow
+Add-Sec 'Processamento e memoria' $cAccent
+Add-Row 'Processador' $info.CPU $cCpuValue $cAccent
+Add-Row2 'Nucleos' $info.Nucleos $cMain 'Clock max.' $info.ClockMax $cMain $cAccent
+Add-Row2 'Memoria' $info.RAM $cRamValue 'Modulos' $info.RAMMods $cMuted $cAccent
 Gap
 
 # ---- SECAO 2 ----
-Add-Sec 'Armazenamento & Video' $cGreen
+Add-Sec 'Armazenamento e video' $cAccent
 foreach ($linha in ($info.Discos -split $NL)) {
-    if ($linha.Trim() -ne '') { Add-Row 'Armazenamento' $linha $cGreen $cGreen }
+    if ($linha.Trim() -ne '') { Add-Row 'Armazenamento' $linha $cStorageValue $cAccent }
 }
-$corGPU = if ($info.GPU -match 'Dedicada') { [System.Drawing.Color]::FromArgb(100, 220, 80) } else { $cMain }
-Add-Row 'Placa de Video' $info.GPU $corGPU $cGreen
-Add-Row 'Resolucao' $info.Tela $cMain $cGreen
+Add-Row 'Placa de Video' $info.GPU $cGpuValue $cAccent
+Add-Row 'Resolucao' $info.Tela $cMain $cAccent
 Gap
 
 # ---- SECAO 3 ----
-Add-Sec $(if ($info.MostrarBateria) { 'Sistema & Bateria' } else { 'Sistema' }) $cPurple
-Add-Row 'Windows' $info.Windows $cMain $cPurple
+Add-Sec $(if ($info.MostrarBateria) { 'Sistema e bateria' } else { 'Sistema operacional' }) $cAccent
+Add-Row 'Windows' $info.Windows $cMain $cAccent
 # Hostname removido para manter layout mais limpo
 if ($info.MostrarBateria) {
     $corBat = $cMain
@@ -2186,24 +3387,25 @@ if ($info.MostrarBateria) {
     elseif ($info.BatSaude -match 'Boa|Good')            { $corBat = $cYellow }
     elseif ($info.BatSaude -match 'Regular|Fair')        { $corBat = $cOrange }
     elseif ($info.BatSaude -match 'Ruim|Poor')           { $corBat = $cRed }
-    Add-Row 'Bateria' $info.BatSaude $corBat $cPurple
+    Add-Row 'Bateria' $info.BatSaude $corBat $cAccent
 
     if ($info.BatSaude -match '\((\d+)%\)') {
         $pct  = [int]$Matches[1]
         $barW = [math]::Max(1, [int](($CW * $pct) / 100))
+        $barTrack = New-Object System.Windows.Forms.Panel
+        $barTrack.BackColor = $cCard
+        $barTrack.Location = New-Object System.Drawing.Point(16, $script:py)
+        $barTrack.Size = New-Object System.Drawing.Size($CW, 6)
+        $scroll.Controls.Add($barTrack)
+        Set-RoundedControl -Control $barTrack -Radius 3
+
         $bfg  = New-Object System.Windows.Forms.Panel
         $bfg.BackColor = $corBat
-        $bfg.Location  = New-Object System.Drawing.Point(16, $script:py)
-        $bfg.Size      = New-Object System.Drawing.Size($barW, 4)
-        $scroll.Controls.Add($bfg)
-        if ($barW -lt $CW) {
-            $bbg = New-Object System.Windows.Forms.Panel
-            $bbg.BackColor = [System.Drawing.Color]::FromArgb(18, 28, 40)
-            $bbg.Location  = New-Object System.Drawing.Point((16 + $barW), $script:py)
-            $bbg.Size      = New-Object System.Drawing.Size(($CW - $barW), 4)
-            $scroll.Controls.Add($bbg)
-        }
-        $script:py += 6
+        $bfg.Location  = New-Object System.Drawing.Point(0, 0)
+        $bfg.Size      = New-Object System.Drawing.Size($barW, 6)
+        $barTrack.Controls.Add($bfg)
+        Set-RoundedControl -Control $bfg -Radius 3
+        $script:py += 8
     }
 }
 Gap
@@ -2217,24 +3419,15 @@ $scroll.Size = New-Object System.Drawing.Size($W, $contentH)
 $actY = $scrollY + $contentH
 
 $actBar = New-Object System.Windows.Forms.Panel
-$actBar.BackColor = [System.Drawing.Color]::FromArgb(8, 16, 26)
+$actBar.BackColor = $cSurface
 $actBar.Location  = New-Object System.Drawing.Point(0, $actY)
-$actBar.Size      = New-Object System.Drawing.Size($W, 82)
+$actBarH = 50
+$actBar.Size      = New-Object System.Drawing.Size($W, $actBarH)
 $form.Controls.Add($actBar)
 
 $actBar.Add_Paint({
     param($s, $e)
-    $r = New-Object System.Drawing.Rectangle(0, 0, $s.Width, $s.Height)
-    $b = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $r,
-        [System.Drawing.Color]::FromArgb(12, 24, 38),
-        [System.Drawing.Color]::FromArgb(6, 12, 20),
-        [System.Drawing.Drawing2D.LinearGradientMode]::Vertical
-    )
-    $e.Graphics.FillRectangle($b, $r)
-    $b.Dispose()
-    # linha topo cyan
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(0, 140, 200), 1)
+    $pen = New-Object System.Drawing.Pen($cBorder, 1)
     $e.Graphics.DrawLine($pen, 0, 0, $s.Width, 0)
     $pen.Dispose()
 })
@@ -2257,7 +3450,7 @@ function New-Btn {
     $b.BackColor = $bg
     $b.FlatStyle = 'Flat'
     $b.FlatAppearance.BorderSize  = 1
-    $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb([int][math]::Min($bg.R + 40, 255), [int][math]::Min($bg.G + 40, 255), [int][math]::Min($bg.B + 55, 255))
+    $b.FlatAppearance.BorderColor = $cBorder
     $b.FlatAppearance.MouseOverBackColor = $bgH
     $b.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb([int][math]::Max($bg.R - 8, 0), [int][math]::Max($bg.G - 8, 0), [int][math]::Max($bg.B - 8, 0))
     $b.Location  = New-Object System.Drawing.Point($x, $y)
@@ -2268,33 +3461,26 @@ function New-Btn {
     $fgN = $fg
     $bgHov = $bgH
     $borderN = $b.FlatAppearance.BorderColor
-    $borderH = [System.Drawing.Color]::FromArgb(
-        [int][math]::Min($borderN.R + 35, 255),
-        [int][math]::Min($borderN.G + 35, 255),
-        [int][math]::Min($borderN.B + 35, 255)
-    )
-    $origY = $y
+    $borderH = $cAccent
     $b.Add_MouseEnter({
         $this.BackColor = $bgHov
         $this.ForeColor = [System.Drawing.Color]::White
         $this.FlatAppearance.BorderColor = $borderH
-        $this.Location = New-Object System.Drawing.Point($this.Location.X, [math]::Max(0, $origY - 2))
     }.GetNewClosure())
     $b.Add_MouseLeave({
         $this.BackColor = $bgN
         $this.ForeColor = $fgN
         $this.FlatAppearance.BorderColor = $borderN
-        $this.Location = New-Object System.Drawing.Point($this.Location.X, $origY)
     }.GetNewClosure())
-    Set-RoundedControl -Control $b -Radius 12
-    $b.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+    Set-RoundedControl -Control $b -Radius 8
+    $b.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 8 })
     $actBar.Controls.Add($b)
     return $b
 }
 
 $bY1 = 8
-$bH  = 30
-$g   = 7
+$bH  = 34
+$g   = 6
 
 $tooltip = New-Object System.Windows.Forms.ToolTip
 $tooltip.BackColor = [System.Drawing.Color]::FromArgb(20, 30, 44)
@@ -2305,42 +3491,33 @@ $tooltip.ReshowDelay  = 200
 $fBtn  = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
 $fBtnL = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5, [System.Drawing.FontStyle]::Bold)
 
-# Linha 1 — Central de Testes (destaque primario, borda cyan)
-$btnTestes = New-Btn ([string][char]0x26A1 + '  Central de Testes') 12 $bY1 676 $bH `
-    ([System.Drawing.Color]::FromArgb(0, 32, 58)) `
-    ([System.Drawing.Color]::FromArgb(0, 188, 255)) `
-    ([System.Drawing.Color]::FromArgb(0, 58, 100)) `
+# Uma unica linha — diagnostico, cadastro e impressao
+$b2W1 = 180
+$b2W2 = 236
+$b2W3 = [int](676 - $b2W1 - $b2W2 - (2 * $g))
+$b2X2 = 12 + $b2W1 + $g
+$b2X3 = $b2X2 + $b2W2 + $g
+
+$btnTestes = New-Btn ([string][char]0x26A1 + '  Testes') 12 $bY1 $b2W1 $bH `
+    ([System.Drawing.Color]::FromArgb(21, 24, 38)) `
+    ([System.Drawing.Color]::FromArgb(240, 242, 248)) `
+    ([System.Drawing.Color]::FromArgb(31, 35, 52)) `
     $fBtnL
 $tooltip.SetToolTip($btnTestes, 'Abre a central completa de testes')
 
-# Linha 2 — 3 botoes uniformes
-$row2Y = ($bY1 + $bH + $g)
-$b2H   = 30
-$b2W1  = 168   # OS Altertag
-$b2W2  = 168   # Cadastrar OS
-$b2W3  = [int](676 - $b2W1 - $b2W2 - 8)  # Imprimir (resto)
-$b2X2  = 12 + $b2W1 + 4
-$b2X3  = $b2X2 + $b2W2 + 4
-
-$btnOsAltertag = New-Btn ([string][char]0x2261 + '  OS Altertag') 12 $row2Y $b2W1 $b2H `
-    ([System.Drawing.Color]::FromArgb(4, 44, 32)) `
-    ([System.Drawing.Color]::FromArgb(80, 220, 160)) `
-    ([System.Drawing.Color]::FromArgb(0, 88, 60)) `
-    $fBtn
-$tooltip.SetToolTip($btnOsAltertag, 'Abre a lista de OS recentes do Altertag para escolher a OS real')
-
-$btnCadastrarOs = New-Btn ('+  Cadastrar OS') $b2X2 $row2Y $b2W2 $b2H `
-    ([System.Drawing.Color]::FromArgb(46, 28, 4)) `
-    ([System.Drawing.Color]::FromArgb(255, 200, 80)) `
-    ([System.Drawing.Color]::FromArgb(100, 60, 0)) `
-    $fBtn
+$btnCadastrarOs = New-Btn ('+  Criar OS') $b2X2 $bY1 $b2W2 $bH `
+    ([System.Drawing.Color]::FromArgb(21, 24, 38)) `
+    ([System.Drawing.Color]::FromArgb(240, 242, 248)) `
+    ([System.Drawing.Color]::FromArgb(31, 35, 52)) `
+    $fBtnL
 $tooltip.SetToolTip($btnCadastrarOs, 'Abre a preparacao do cadastro da OS pelo Altertag')
 
-$btnImprimir = New-Btn ([string][char]0x2399 + '  Imprimir Etiqueta via Rede') $b2X3 $row2Y $b2W3 $b2H `
-    ([System.Drawing.Color]::FromArgb(0, 28, 58)) `
-    ([System.Drawing.Color]::FromArgb(140, 210, 255)) `
-    ([System.Drawing.Color]::FromArgb(0, 60, 110)) `
+$btnImprimir = New-Btn ([string][char]0x2399 + '  Imprimir etiqueta') $b2X3 $bY1 $b2W3 $bH `
+    ([System.Drawing.Color]::FromArgb(94, 106, 210)) `
+    ([System.Drawing.Color]::White) `
+    ([System.Drawing.Color]::FromArgb(112, 124, 228)) `
     $fBtnL
+$tooltip.SetToolTip($btnImprimir, 'Abre a previa e envia a etiqueta para a impressora')
 
 # ================================================
 # ACOES DOS BOTOES
@@ -2376,15 +3553,16 @@ function Show-CadastroOsConfirm {
         [string]$Serial,
         [string]$Referencia,
         [string]$Servicos,
-        [string]$Localizacao
+        [string]$Localizacao,
+        [string]$Observacao
     )
 
     $formConfirm = New-Object System.Windows.Forms.Form
     $formConfirm.Text = 'Confirmar cadastro'
-    $formConfirm.ClientSize = New-Object System.Drawing.Size(600, 470)
+    $formConfirm.ClientSize = New-Object System.Drawing.Size(600, 548)
     $formConfirm.StartPosition = 'CenterParent'
-    $formConfirm.BackColor = [System.Drawing.Color]::FromArgb(6, 13, 22)
-    $formConfirm.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $formConfirm.BackColor = [System.Drawing.Color]::FromArgb(5, 8, 20)
+    $formConfirm.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
     $formConfirm.FormBorderStyle = 'None'
     $formConfirm.ShowInTaskbar = $false
     $formConfirm.MaximizeBox = $false
@@ -2396,7 +3574,7 @@ function Show-CadastroOsConfirm {
     $formConfirm.Add_Paint({
         param($s, $e)
         $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
-        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(40, 116, 158), 1)
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(69, 57, 99), 1)
         $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
         $border.Dispose()
     })
@@ -2404,11 +3582,11 @@ function Show-CadastroOsConfirm {
     $headerConfirm = New-Object System.Windows.Forms.Panel
     $headerConfirm.Location = New-Object System.Drawing.Point(0, 0)
     $headerConfirm.Size = New-Object System.Drawing.Size(600, 78)
-    $headerConfirm.BackColor = [System.Drawing.Color]::FromArgb(9, 21, 34)
+    $headerConfirm.BackColor = [System.Drawing.Color]::FromArgb(12, 16, 34)
     [void]$formConfirm.Controls.Add($headerConfirm)
     $headerConfirm.Add_Paint({
         param($s, $e)
-        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(24, 185, 255), 2)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(139, 92, 246), 2)
         $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
         $line.Dispose()
         $dimLine = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(22, 55, 78), 1)
@@ -2420,13 +3598,13 @@ function Show-CadastroOsConfirm {
     $headerRail = New-Object System.Windows.Forms.Panel
     $headerRail.Location = New-Object System.Drawing.Point(0, 0)
     $headerRail.Size = New-Object System.Drawing.Size(4, 78)
-    $headerRail.BackColor = [System.Drawing.Color]::FromArgb(24, 185, 255)
+    $headerRail.BackColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
     [void]$headerConfirm.Controls.Add($headerRail)
 
     $eyebrow = New-Object System.Windows.Forms.Label
     $eyebrow.Text = 'ALTERTAG / NOVA OS'
     $eyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
-    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(80, 184, 230)
+    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(167, 139, 250)
     $eyebrow.Location = New-Object System.Drawing.Point(22, 11)
     $eyebrow.Size = New-Object System.Drawing.Size(260, 14)
     [void]$headerConfirm.Controls.Add($eyebrow)
@@ -2434,7 +3612,7 @@ function Show-CadastroOsConfirm {
     $titleConfirm = New-Object System.Windows.Forms.Label
     $titleConfirm.Text = 'Confirmar cadastro'
     $titleConfirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
-    $titleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $titleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
     $titleConfirm.Location = New-Object System.Drawing.Point(20, 29)
     $titleConfirm.Size = New-Object System.Drawing.Size(360, 30)
     [void]$headerConfirm.Controls.Add($titleConfirm)
@@ -2442,7 +3620,7 @@ function Show-CadastroOsConfirm {
     $subtitleConfirm = New-Object System.Windows.Forms.Label
     $subtitleConfirm.Text = 'Revise os dados antes de enviar'
     $subtitleConfirm.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
-    $subtitleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(105, 145, 178)
+    $subtitleConfirm.ForeColor = [System.Drawing.Color]::FromArgb(145, 137, 163)
     $subtitleConfirm.Location = New-Object System.Drawing.Point(23, 57)
     $subtitleConfirm.Size = New-Object System.Drawing.Size(320, 14)
     [void]$headerConfirm.Controls.Add($subtitleConfirm)
@@ -2457,7 +3635,7 @@ function Show-CadastroOsConfirm {
     $osChipCaption = New-Object System.Windows.Forms.Label
     $osChipCaption.Text = 'OS'
     $osChipCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $osChipCaption.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $osChipCaption.ForeColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     $osChipCaption.Location = New-Object System.Drawing.Point(10, 4)
     $osChipCaption.Size = New-Object System.Drawing.Size(32, 12)
     [void]$osChip.Controls.Add($osChipCaption)
@@ -2470,12 +3648,13 @@ function Show-CadastroOsConfirm {
     $osChipValue.Location = New-Object System.Drawing.Point(38, 7)
     $osChipValue.Size = New-Object System.Drawing.Size(84, 22)
     [void]$osChip.Controls.Add($osChipValue)
+    Register-OsNumeroControl -Control $osChipValue
 
     $closeConfirm = New-Object System.Windows.Forms.Button
     $closeConfirm.Text = 'X'
     $closeConfirm.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-    $closeConfirm.ForeColor = [System.Drawing.Color]::FromArgb(112, 150, 180)
-    $closeConfirm.BackColor = [System.Drawing.Color]::FromArgb(9, 21, 34)
+    $closeConfirm.ForeColor = [System.Drawing.Color]::FromArgb(139, 130, 158)
+    $closeConfirm.BackColor = [System.Drawing.Color]::FromArgb(12, 16, 34)
     $closeConfirm.FlatStyle = 'Flat'
     $closeConfirm.FlatAppearance.BorderSize = 0
     $closeConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(68, 24, 34)
@@ -2500,7 +3679,7 @@ function Show-CadastroOsConfirm {
         $field = New-Object System.Windows.Forms.Panel
         $field.Location = New-Object System.Drawing.Point($X, $Y)
         $field.Size = New-Object System.Drawing.Size($Width, $Height)
-        $field.BackColor = [System.Drawing.Color]::FromArgb(11, 23, 37)
+        $field.BackColor = [System.Drawing.Color]::FromArgb(13, 18, 37)
         [void]$formConfirm.Controls.Add($field)
         Set-RoundedControl -Control $field -Radius 6
 
@@ -2528,15 +3707,15 @@ function Show-CadastroOsConfirm {
         [void]$field.Controls.Add($valueLabel)
     }
 
-    Add-ConfirmField 'PRODUTO' $Produto 20 92 560 70 ([System.Drawing.Color]::FromArgb(24, 185, 255)) 9.2
-    Add-ConfirmField 'SERIAL' $Serial 20 174 270 62 ([System.Drawing.Color]::FromArgb(132, 148, 255)) 10
-    Add-ConfirmField 'REFERENCIA' $Referencia 302 174 278 62 ([System.Drawing.Color]::FromArgb(255, 208, 96)) 9
-    Add-ConfirmField 'QUANTIDADE' $Quantidade 20 248 170 58 ([System.Drawing.Color]::FromArgb(24, 185, 255)) 9
-    Add-ConfirmField 'LOCALIZACAO' $Localizacao 202 248 378 58 ([System.Drawing.Color]::FromArgb(66, 232, 176)) 9
-    Add-ConfirmField 'SERVICOS' $Servicos 20 318 560 62 ([System.Drawing.Color]::FromArgb(255, 156, 98)) 8.5
+    Add-ConfirmField 'PRODUTO' $Produto 20 92 560 70 ([System.Drawing.Color]::FromArgb(139, 92, 246)) 9.2
+    Add-ConfirmField 'SERIAL' $Serial 20 174 270 62 ([System.Drawing.Color]::FromArgb(196, 181, 253)) 10
+    Add-ConfirmField 'REFERENCIA' $Referencia 302 174 278 62 ([System.Drawing.Color]::FromArgb(245, 158, 11)) 9
+    Add-ConfirmField 'QUANTIDADE' $Quantidade 20 248 170 58 ([System.Drawing.Color]::FromArgb(139, 92, 246)) 9
+    Add-ConfirmField 'LOCALIZACAO' $Localizacao 202 248 378 58 ([System.Drawing.Color]::FromArgb(34, 197, 94)) 9
+    Add-ConfirmField 'OBSERVACAO' $Observacao 20 318 560 136 ([System.Drawing.Color]::FromArgb(34, 211, 238)) 8.5
 
     $footerConfirm = New-Object System.Windows.Forms.Panel
-    $footerConfirm.Location = New-Object System.Drawing.Point(0, 396)
+    $footerConfirm.Location = New-Object System.Drawing.Point(0, 474)
     $footerConfirm.Size = New-Object System.Drawing.Size(600, 74)
     $footerConfirm.BackColor = [System.Drawing.Color]::FromArgb(8, 17, 28)
     [void]$formConfirm.Controls.Add($footerConfirm)
@@ -2550,7 +3729,7 @@ function Show-CadastroOsConfirm {
     $footerStatus = New-Object System.Windows.Forms.Label
     $footerStatus.Text = 'PRONTO PARA CADASTRAR'
     $footerStatus.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $footerStatus.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $footerStatus.ForeColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     $footerStatus.Location = New-Object System.Drawing.Point(22, 27)
     $footerStatus.Size = New-Object System.Drawing.Size(190, 15)
     [void]$footerConfirm.Controls.Add($footerStatus)
@@ -2559,10 +3738,10 @@ function Show-CadastroOsConfirm {
     $btnBackConfirm.Text = 'Voltar'
     $btnBackConfirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
     $btnBackConfirm.ForeColor = [System.Drawing.Color]::FromArgb(155, 187, 212)
-    $btnBackConfirm.BackColor = [System.Drawing.Color]::FromArgb(14, 28, 43)
+    $btnBackConfirm.BackColor = [System.Drawing.Color]::FromArgb(18, 16, 38)
     $btnBackConfirm.FlatStyle = 'Flat'
     $btnBackConfirm.FlatAppearance.BorderSize = 1
-    $btnBackConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(36, 70, 104)
+    $btnBackConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(53, 45, 79)
     $btnBackConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(22, 43, 62)
     $btnBackConfirm.Location = New-Object System.Drawing.Point(352, 18)
     $btnBackConfirm.Size = New-Object System.Drawing.Size(96, 38)
@@ -2578,7 +3757,7 @@ function Show-CadastroOsConfirm {
     $btnCreateConfirm.BackColor = [System.Drawing.Color]::FromArgb(0, 110, 78)
     $btnCreateConfirm.FlatStyle = 'Flat'
     $btnCreateConfirm.FlatAppearance.BorderSize = 1
-    $btnCreateConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $btnCreateConfirm.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     $btnCreateConfirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 145, 96)
     $btnCreateConfirm.Location = New-Object System.Drawing.Point(458, 18)
     $btnCreateConfirm.Size = New-Object System.Drawing.Size(120, 38)
@@ -2589,6 +3768,7 @@ function Show-CadastroOsConfirm {
 
     $formConfirm.AcceptButton = $btnCreateConfirm
     $formConfirm.CancelButton = $btnBackConfirm
+    Set-CaijWindowsTypography -Root $formConfirm
     $resultConfirm = if ($Owner) { $formConfirm.ShowDialog($Owner) } else { $formConfirm.ShowDialog() }
     $formConfirm.Dispose()
     return ($resultConfirm -eq [System.Windows.Forms.DialogResult]::OK)
@@ -2616,8 +3796,8 @@ function Show-CadastroOsResult {
     $formResult.Text = 'OS cadastrada'
     $formResult.ClientSize = New-Object System.Drawing.Size(520, $altura)
     $formResult.StartPosition = 'CenterParent'
-    $formResult.BackColor = [System.Drawing.Color]::FromArgb(6, 13, 22)
-    $formResult.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $formResult.BackColor = [System.Drawing.Color]::FromArgb(5, 8, 20)
+    $formResult.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
     $formResult.FormBorderStyle = 'None'
     $formResult.ShowInTaskbar = $false
     $formResult.KeyPreview = $true
@@ -2639,7 +3819,7 @@ function Show-CadastroOsResult {
     [void]$formResult.Controls.Add($header)
     $header.Add_Paint({
         param($s, $e)
-        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(66, 232, 176), 2)
+        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(34, 197, 94), 2)
         $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
         $line.Dispose()
     })
@@ -2647,13 +3827,13 @@ function Show-CadastroOsResult {
     $rail = New-Object System.Windows.Forms.Panel
     $rail.Location = New-Object System.Drawing.Point(0, 0)
     $rail.Size = New-Object System.Drawing.Size(4, 82)
-    $rail.BackColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $rail.BackColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     [void]$header.Controls.Add($rail)
 
     $eyebrow = New-Object System.Windows.Forms.Label
     $eyebrow.Text = 'ALTERTAG / CADASTRO'
     $eyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     $eyebrow.Location = New-Object System.Drawing.Point(24, 13)
     $eyebrow.Size = New-Object System.Drawing.Size(250, 15)
     [void]$header.Controls.Add($eyebrow)
@@ -2661,7 +3841,7 @@ function Show-CadastroOsResult {
     $title = New-Object System.Windows.Forms.Label
     $title.Text = 'OS cadastrada'
     $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16, [System.Drawing.FontStyle]::Bold)
-    $title.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $title.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
     $title.Location = New-Object System.Drawing.Point(21, 34)
     $title.Size = New-Object System.Drawing.Size(330, 31)
     [void]$header.Controls.Add($title)
@@ -2669,7 +3849,7 @@ function Show-CadastroOsResult {
     $close = New-Object System.Windows.Forms.Button
     $close.Text = 'X'
     $close.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-    $close.ForeColor = [System.Drawing.Color]::FromArgb(112, 150, 180)
+    $close.ForeColor = [System.Drawing.Color]::FromArgb(139, 130, 158)
     $close.BackColor = [System.Drawing.Color]::FromArgb(8, 22, 32)
     $close.FlatStyle = 'Flat'
     $close.FlatAppearance.BorderSize = 0
@@ -2690,7 +3870,7 @@ function Show-CadastroOsResult {
     $statusCaption = New-Object System.Windows.Forms.Label
     $statusCaption.Text = 'CADASTRO CONCLUIDO'
     $statusCaption.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-    $statusCaption.ForeColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
+    $statusCaption.ForeColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
     $statusCaption.Location = New-Object System.Drawing.Point(18, 13)
     $statusCaption.Size = New-Object System.Drawing.Size(220, 16)
     [void]$statusPanel.Controls.Add($statusCaption)
@@ -2707,7 +3887,7 @@ function Show-CadastroOsResult {
     $statusText.Text = if ($temAviso) { 'Criada com pendencias' } else { 'Criada com sucesso' }
     $statusText.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
     $statusText.ForeColor = if ($temAviso) {
-        [System.Drawing.Color]::FromArgb(255, 208, 96)
+        [System.Drawing.Color]::FromArgb(245, 158, 11)
     } else {
         [System.Drawing.Color]::FromArgb(144, 218, 190)
     }
@@ -2742,61 +3922,378 @@ function Show-CadastroOsResult {
     [void]$formResult.Controls.Add($footer)
 
     $btnDone = New-Object System.Windows.Forms.Button
-    $btnDone.Text = 'Concluir'
+    $btnDone.Text = 'Continuar'
     $btnDone.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
-    $btnDone.ForeColor = [System.Drawing.Color]::White
-    $btnDone.BackColor = [System.Drawing.Color]::FromArgb(0, 120, 82)
+    $btnDone.ForeColor = [System.Drawing.Color]::FromArgb(205, 198, 222)
+    $btnDone.BackColor = [System.Drawing.Color]::FromArgb(20, 17, 42)
     $btnDone.FlatStyle = 'Flat'
     $btnDone.FlatAppearance.BorderSize = 1
-    $btnDone.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(66, 232, 176)
-    $btnDone.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 150, 100)
-    $btnDone.Location = New-Object System.Drawing.Point(364, 18)
+    $btnDone.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(69, 57, 99)
+    $btnDone.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(38, 28, 68)
+    $btnDone.Location = New-Object System.Drawing.Point(20, 18)
     $btnDone.Size = New-Object System.Drawing.Size(136, 40)
     $btnDone.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnDone.DialogResult = [System.Windows.Forms.DialogResult]::OK
+    $btnDone.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
     [void]$footer.Controls.Add($btnDone)
     Set-RoundedControl -Control $btnDone -Radius 7
 
-    $formResult.AcceptButton = $btnDone
+    $btnPrint = New-Object System.Windows.Forms.Button
+    $btnPrint.Text = 'Imprimir etiqueta'
+    $btnPrint.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+    $btnPrint.ForeColor = [System.Drawing.Color]::White
+    $btnPrint.BackColor = [System.Drawing.Color]::FromArgb(124, 58, 237)
+    $btnPrint.FlatStyle = 'Flat'
+    $btnPrint.FlatAppearance.BorderSize = 1
+    $btnPrint.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(167, 139, 250)
+    $btnPrint.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
+    $btnPrint.Location = New-Object System.Drawing.Point(304, 18)
+    $btnPrint.Size = New-Object System.Drawing.Size(196, 40)
+    $btnPrint.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnPrint.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+    [void]$footer.Controls.Add($btnPrint)
+    Set-RoundedControl -Control $btnPrint -Radius 7
+
+    $formResult.AcceptButton = $btnPrint
     $formResult.CancelButton = $close
-    if ($Owner) { [void]$formResult.ShowDialog($Owner) } else { [void]$formResult.ShowDialog() }
+    Set-CaijWindowsTypography -Root $formResult
+    $result = if ($Owner) { $formResult.ShowDialog($Owner) } else { $formResult.ShowDialog() }
     $formResult.Dispose()
+    return $(if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { 'imprimir' } else { 'continuar' })
 }
 
 
+function Show-TecnicoCadastroOs {
+    param([System.Windows.Forms.IWin32Window]$Owner)
+
+    $techCanvas = [System.Drawing.Color]::FromArgb(7, 9, 17)
+    $techSurface = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    $techRaised = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $techBorder = [System.Drawing.Color]::FromArgb(42, 46, 63)
+    $techBorderStrong = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $techPrimary = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $techPrimaryHover = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $techText = [System.Drawing.Color]::FromArgb(247, 248, 248)
+    $techMuted = [System.Drawing.Color]::FromArgb(150, 155, 168)
+
+    $seletor = New-Object System.Windows.Forms.Form
+    $seletor.Text = 'Identificar tecnico'
+    $seletor.ClientSize = New-Object System.Drawing.Size(640, 440)
+    $seletor.StartPosition = 'CenterParent'
+    $seletor.BackColor = $techCanvas
+    $seletor.FormBorderStyle = 'None'
+    $seletor.MaximizeBox = $false
+    $seletor.MinimizeBox = $false
+    $seletor.KeyPreview = $true
+    Set-RoundedControl -Control $seletor -Radius 14
+    $seletor.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 14 })
+    $seletor.Add_Paint({
+        param($s, $e)
+        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(54, 59, 79), 1)
+        $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+        $border.Dispose()
+    })
+
+    $estadoTecnico = [pscustomobject]@{
+        Nome = ''
+        OutroAtivo = $false
+        Botoes = @{}
+    }
+
+    $headerTecnico = New-Object System.Windows.Forms.Panel
+    $headerTecnico.BackColor = $techSurface
+    $headerTecnico.Location = New-Object System.Drawing.Point(0, 0)
+    $headerTecnico.Size = New-Object System.Drawing.Size(640, 98)
+    [void]$seletor.Controls.Add($headerTecnico)
+
+    $eyebrowTecnico = New-Object System.Windows.Forms.Label
+    $eyebrowTecnico.Text = 'NOVA ORDEM DE SERVICO'
+    $eyebrowTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7, [System.Drawing.FontStyle]::Bold)
+    $eyebrowTecnico.ForeColor = [System.Drawing.Color]::FromArgb(139, 148, 238)
+    $eyebrowTecnico.Location = New-Object System.Drawing.Point(32, 16)
+    $eyebrowTecnico.Size = New-Object System.Drawing.Size(230, 14)
+    [void]$headerTecnico.Controls.Add($eyebrowTecnico)
+
+    $tituloTecnico = New-Object System.Windows.Forms.Label
+    $tituloTecnico.Text = 'Identifique o tecnico'
+    $tituloTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 17, [System.Drawing.FontStyle]::Bold)
+    $tituloTecnico.ForeColor = $techText
+    $tituloTecnico.Location = New-Object System.Drawing.Point(30, 34)
+    $tituloTecnico.Size = New-Object System.Drawing.Size(480, 30)
+    [void]$headerTecnico.Controls.Add($tituloTecnico)
+
+    $subtituloTecnico = New-Object System.Windows.Forms.Label
+    $subtituloTecnico.Text = 'Escolha o responsavel pelo cadastro antes de continuar.'
+    $subtituloTecnico.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $subtituloTecnico.ForeColor = $techMuted
+    $subtituloTecnico.Location = New-Object System.Drawing.Point(32, 68)
+    $subtituloTecnico.Size = New-Object System.Drawing.Size(500, 18)
+    [void]$headerTecnico.Controls.Add($subtituloTecnico)
+
+    $btnFecharTecnico = New-Object System.Windows.Forms.Button
+    $btnFecharTecnico.Text = [string][char]0x00D7
+    $btnFecharTecnico.Font = New-Object System.Drawing.Font('Segoe UI', 13)
+    $btnFecharTecnico.ForeColor = $techMuted
+    $btnFecharTecnico.BackColor = $techSurface
+    $btnFecharTecnico.FlatStyle = 'Flat'
+    $btnFecharTecnico.FlatAppearance.BorderSize = 0
+    $btnFecharTecnico.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(37, 30, 45)
+    $btnFecharTecnico.Location = New-Object System.Drawing.Point(594, 12)
+    $btnFecharTecnico.Size = New-Object System.Drawing.Size(32, 32)
+    $btnFecharTecnico.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnFecharTecnico.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    [void]$headerTecnico.Controls.Add($btnFecharTecnico)
+
+    $dragTecnico = [pscustomobject]@{ Ativo=$false; Origem=[System.Drawing.Point]::Empty }
+    $headerTecnico.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $dragTecnico.Ativo=$true; $dragTecnico.Origem=$_.Location }
+    })
+    $headerTecnico.Add_MouseMove({
+        if ($dragTecnico.Ativo) { $seletor.Location = New-Object System.Drawing.Point(($seletor.Left + $_.X - $dragTecnico.Origem.X), ($seletor.Top + $_.Y - $dragTecnico.Origem.Y)) }
+    })
+    $headerTecnico.Add_MouseUp({ $dragTecnico.Ativo=$false })
+
+    $txtOutroTecnico = New-Object System.Windows.Forms.TextBox
+    $txtOutroTecnico.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+    $txtOutroTecnico.BackColor = $techRaised
+    $txtOutroTecnico.ForeColor = $techText
+    $txtOutroTecnico.BorderStyle = 'FixedSingle'
+    $txtOutroTecnico.Location = New-Object System.Drawing.Point(32, 308)
+    $txtOutroTecnico.Size = New-Object System.Drawing.Size(576, 30)
+    $txtOutroTecnico.Visible = $false
+    [void]$seletor.Controls.Add($txtOutroTecnico)
+
+    $lblSelecaoTecnico = New-Object System.Windows.Forms.Label
+    $lblSelecaoTecnico.Text = 'Selecione uma opcao para habilitar a continuacao.'
+    $lblSelecaoTecnico.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+    $lblSelecaoTecnico.ForeColor = $techMuted
+    $lblSelecaoTecnico.Location = New-Object System.Drawing.Point(32, 344)
+    $lblSelecaoTecnico.Size = New-Object System.Drawing.Size(576, 18)
+    [void]$seletor.Controls.Add($lblSelecaoTecnico)
+
+    $btnConfirmarTecnico = New-Object System.Windows.Forms.Button
+    $btnConfirmarTecnico.Text = 'Continuar  >'
+    $btnConfirmarTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5, [System.Drawing.FontStyle]::Bold)
+    $btnConfirmarTecnico.ForeColor = [System.Drawing.Color]::FromArgb(112, 116, 132)
+    $btnConfirmarTecnico.BackColor = [System.Drawing.Color]::FromArgb(29, 32, 47)
+    $btnConfirmarTecnico.FlatStyle = 'Flat'
+    $btnConfirmarTecnico.FlatAppearance.BorderSize = 1
+    $btnConfirmarTecnico.FlatAppearance.BorderColor = $techBorder
+    $btnConfirmarTecnico.FlatAppearance.MouseOverBackColor = $techPrimaryHover
+    $btnConfirmarTecnico.Location = New-Object System.Drawing.Point(428, 378)
+    $btnConfirmarTecnico.Size = New-Object System.Drawing.Size(180, 42)
+    $btnConfirmarTecnico.Enabled = $false
+    $btnConfirmarTecnico.Cursor = [System.Windows.Forms.Cursors]::Hand
+    [void]$seletor.Controls.Add($btnConfirmarTecnico)
+    Set-RoundedControl -Control $btnConfirmarTecnico -Radius 6
+
+    $tecnicosFixos = @('Vitor', 'Lucas', 'Hyrides', 'Erick', 'Outro')
+    for ($i = 0; $i -lt $tecnicosFixos.Count; $i++) {
+        $nomeTecnico = [string]$tecnicosFixos[$i]
+        $btnTecnico = New-Object System.Windows.Forms.Button
+        $btnTecnico.Text = $nomeTecnico
+        $btnTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5)
+        $btnTecnico.ForeColor = [System.Drawing.Color]::FromArgb(211, 214, 224)
+        $btnTecnico.BackColor = $techRaised
+        $btnTecnico.FlatStyle = 'Flat'
+        $btnTecnico.FlatAppearance.BorderColor = $techBorder
+        $btnTecnico.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(29, 33, 51)
+        if ($i -lt 4) {
+            $btnTecnico.Location = New-Object System.Drawing.Point((32 + (($i % 2) * 294)), (120 + ([Math]::Floor($i / 2) * 62)))
+            $btnTecnico.Size = New-Object System.Drawing.Size(282, 50)
+        } else {
+            $btnTecnico.Location = New-Object System.Drawing.Point(32, 244)
+            $btnTecnico.Size = New-Object System.Drawing.Size(576, 50)
+        }
+        $btnTecnico.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $estadoTecnico.Botoes[$nomeTecnico] = $btnTecnico
+        $btnTecnico.Tag = [pscustomobject]@{
+            Estado = $estadoTecnico
+            Nome = $nomeTecnico
+            CampoOutro = $txtOutroTecnico
+            Confirmar = $btnConfirmarTecnico
+        }
+        [void]$seletor.Controls.Add($btnTecnico)
+        Set-RoundedControl -Control $btnTecnico -Radius 8
+        $btnTecnico.Add_Click({
+            $ctx = $this.Tag
+            $ctx.Estado.OutroAtivo = ([string]$ctx.Nome -eq 'Outro')
+            $ctx.Estado.Nome = if ($ctx.Estado.OutroAtivo) { $ctx.CampoOutro.Text.Trim() } else { [string]$ctx.Nome }
+            foreach ($nome in @($ctx.Estado.Botoes.Keys)) {
+                $botao = $ctx.Estado.Botoes[$nome]
+                $ativo = ($nome -eq [string]$ctx.Nome)
+                $botao.BackColor = if ($ativo) { $techPrimary } else { $techRaised }
+                $botao.ForeColor = if ($ativo) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(211, 214, 224) }
+                $botao.FlatAppearance.BorderColor = if ($ativo) { $techBorderStrong } else { $techBorder }
+                $botao.Text = if ($ativo) { ([string][char]0x2713 + '  ' + $nome) } else { $nome }
+            }
+            $ctx.CampoOutro.Visible = $ctx.Estado.OutroAtivo
+            $lblSelecaoTecnico.Text = if ($ctx.Estado.OutroAtivo) { 'Digite o nome do tecnico para continuar.' } else { "Responsavel selecionado: $($ctx.Estado.Nome)" }
+            $ctx.Confirmar.Enabled = (-not [string]::IsNullOrWhiteSpace([string]$ctx.Estado.Nome))
+            if ($ctx.Confirmar.Enabled) {
+                $ctx.Confirmar.BackColor = $techPrimary
+                $ctx.Confirmar.ForeColor = [System.Drawing.Color]::White
+                $ctx.Confirmar.FlatAppearance.BorderColor = $techBorderStrong
+            }
+            if ($ctx.Estado.OutroAtivo) { $ctx.CampoOutro.Focus() }
+        })
+    }
+
+    $txtOutroTecnico.Add_TextChanged({
+        if ($estadoTecnico.OutroAtivo) {
+            $estadoTecnico.Nome = $txtOutroTecnico.Text.Trim()
+            $btnConfirmarTecnico.Enabled = (-not [string]::IsNullOrWhiteSpace($estadoTecnico.Nome))
+            $lblSelecaoTecnico.Text = if ($btnConfirmarTecnico.Enabled) { "Responsavel selecionado: $($estadoTecnico.Nome)" } else { 'Digite o nome do tecnico para continuar.' }
+            $btnConfirmarTecnico.BackColor = if ($btnConfirmarTecnico.Enabled) { $techPrimary } else { [System.Drawing.Color]::FromArgb(29, 32, 47) }
+            $btnConfirmarTecnico.ForeColor = if ($btnConfirmarTecnico.Enabled) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(112, 116, 132) }
+        }
+    })
+
+    $btnCancelarTecnico = New-Object System.Windows.Forms.Button
+    $btnCancelarTecnico.Text = 'Cancelar'
+    $btnCancelarTecnico.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+    $btnCancelarTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5)
+    $btnCancelarTecnico.ForeColor = [System.Drawing.Color]::FromArgb(205, 208, 218)
+    $btnCancelarTecnico.BackColor = $techSurface
+    $btnCancelarTecnico.FlatStyle = 'Flat'
+    $btnCancelarTecnico.FlatAppearance.BorderColor = $techBorder
+    $btnCancelarTecnico.FlatAppearance.MouseOverBackColor = $techRaised
+    $btnCancelarTecnico.Location = New-Object System.Drawing.Point(32, 378)
+    $btnCancelarTecnico.Size = New-Object System.Drawing.Size(130, 42)
+    [void]$seletor.Controls.Add($btnCancelarTecnico)
+    Set-RoundedControl -Control $btnCancelarTecnico -Radius 6
+
+    $btnConfirmarTecnico.Add_Click({
+        if (-not [string]::IsNullOrWhiteSpace($estadoTecnico.Nome)) {
+            $seletor.Tag = $estadoTecnico.Nome.Trim()
+            $seletor.DialogResult = [System.Windows.Forms.DialogResult]::OK
+            $seletor.Close()
+        }
+    })
+    $seletor.AcceptButton = $btnConfirmarTecnico
+    $seletor.CancelButton = $btnCancelarTecnico
+    Set-CaijWindowsTypography -Root $seletor
+    $resultadoTecnico = if ($Owner) { $seletor.ShowDialog($Owner) } else { $seletor.ShowDialog() }
+    $tecnicoEscolhido = if ($resultadoTecnico -eq [System.Windows.Forms.DialogResult]::OK) { [string]$seletor.Tag } else { '' }
+    $seletor.Dispose()
+    return $tecnicoEscolhido
+}
+
 function Show-CadastroOsAltertagDraft {
+    param([Parameter(Mandatory=$true)][string]$TecnicoInicial)
+    if ([string]::IsNullOrWhiteSpace($TecnicoInicial)) { return }
+    $osUiBg = [System.Drawing.Color]::FromArgb(7, 9, 17)
+    $osUiSurface = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    $osUiSurfaceRaised = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $osUiBorder = [System.Drawing.Color]::FromArgb(42, 46, 63)
+    $osUiBorderStrong = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $osUiPrimary = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $osUiPrimaryHover = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $osUiText = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $osUiMuted = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $osUiDim = [System.Drawing.Color]::FromArgb(112, 117, 133)
+
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.Text = 'Cadastrar OS Altertag'
-    $dlg.Size = New-Object System.Drawing.Size(860, 665)
+    $dlg.ClientSize = New-Object System.Drawing.Size(920, 700)
     $dlg.StartPosition = 'CenterParent'
-    $dlg.BackColor = [System.Drawing.Color]::FromArgb(7, 13, 22)
+    $dlg.BackColor = $osUiBg
     $dlg.ForeColor = $cMain
-    $dlg.FormBorderStyle = 'FixedDialog'
+    $dlg.FormBorderStyle = 'None'
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
+    $dlg.KeyPreview = $true
+    Set-RoundedControl -Control $dlg -Radius 14
+    $dlg.Add_Paint({
+        $penCadastro = New-Object System.Drawing.Pen($osUiBorder, 1)
+        $_.Graphics.DrawRectangle($penCadastro, 0, 0, ($this.ClientSize.Width - 1), ($this.ClientSize.Height - 1))
+        $penCadastro.Dispose()
+    })
+
+    $cadastroHeader = New-Object System.Windows.Forms.Panel
+    $cadastroHeader.BackColor = $osUiSurface
+    $cadastroHeader.Location = New-Object System.Drawing.Point(0, 0)
+    $cadastroHeader.Size = New-Object System.Drawing.Size(920, 88)
+    [void]$dlg.Controls.Add($cadastroHeader)
+
+    $cadastroHeaderRail = New-Object System.Windows.Forms.Panel
+    $cadastroHeaderRail.BackColor = $cGreen
+    $cadastroHeaderRail.Location = New-Object System.Drawing.Point(0, 0)
+    $cadastroHeaderRail.Size = New-Object System.Drawing.Size(5, 88)
+    $cadastroHeaderRail.Visible = $false
+    [void]$cadastroHeader.Controls.Add($cadastroHeaderRail)
+
+    $cadastroHeaderLine = New-Object System.Windows.Forms.Panel
+    $cadastroHeaderLine.BackColor = $osUiBorder
+    $cadastroHeaderLine.Location = New-Object System.Drawing.Point(0, 87)
+    $cadastroHeaderLine.Size = New-Object System.Drawing.Size(920, 1)
+    [void]$cadastroHeader.Controls.Add($cadastroHeaderLine)
+
+    $cadastroEyebrow = New-Object System.Windows.Forms.Label
+    $cadastroEyebrow.Text = 'ALTERTAG  /  NOVA OS'
+    $cadastroEyebrow.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7, [System.Drawing.FontStyle]::Bold)
+    $cadastroEyebrow.ForeColor = $osUiPrimaryHover
+    $cadastroEyebrow.Location = New-Object System.Drawing.Point(28, 12)
+    $cadastroEyebrow.Size = New-Object System.Drawing.Size(260, 14)
+    [void]$cadastroHeader.Controls.Add($cadastroEyebrow)
 
     $title = New-Object System.Windows.Forms.Label
-    $title.Text = 'Preparar cadastro da OS'
-    $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
-    $title.ForeColor = $cGreen
-    $title.Location = New-Object System.Drawing.Point(18, 14)
-    $title.Size = New-Object System.Drawing.Size(420, 26)
-    $dlg.Controls.Add($title)
+    $title.Text = 'Criar ordem de servico'
+    $title.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 17, [System.Drawing.FontStyle]::Bold)
+    $title.ForeColor = $osUiText
+    $title.Location = New-Object System.Drawing.Point(27, 28)
+    $title.Size = New-Object System.Drawing.Size(500, 30)
+    [void]$cadastroHeader.Controls.Add($title)
 
     $hint = New-Object System.Windows.Forms.Label
-    $hint.Text = 'Busca o produto no Altertag. O cadastro real sera ativado depois de validarmos o envio final da OS.'
-    $hint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
-    $hint.ForeColor = $cMuted
-    $hint.Location = New-Object System.Drawing.Point(20, 42)
-    $hint.Size = New-Object System.Drawing.Size(800, 18)
-    $dlg.Controls.Add($hint)
+    $hint.Text = 'Localize o produto, confira os dados e revise tudo antes de enviar.'
+    $hint.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+    $hint.ForeColor = $osUiMuted
+    $hint.Location = New-Object System.Drawing.Point(28, 61)
+    $hint.Size = New-Object System.Drawing.Size(760, 18)
+    [void]$cadastroHeader.Controls.Add($hint)
+
+    $btnFecharCadastroTopo = New-Object System.Windows.Forms.Button
+    $btnFecharCadastroTopo.Text = [char]0x00D7
+    $btnFecharCadastroTopo.Font = New-Object System.Drawing.Font('Segoe UI', 16)
+    $btnFecharCadastroTopo.ForeColor = $osUiMuted
+    $btnFecharCadastroTopo.BackColor = $osUiSurface
+    $btnFecharCadastroTopo.FlatStyle = 'Flat'
+    $btnFecharCadastroTopo.FlatAppearance.BorderSize = 0
+    $btnFecharCadastroTopo.FlatAppearance.MouseOverBackColor = $osUiSurfaceRaised
+    $btnFecharCadastroTopo.Location = New-Object System.Drawing.Point(872, 12)
+    $btnFecharCadastroTopo.Size = New-Object System.Drawing.Size(36, 36)
+    $btnFecharCadastroTopo.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnFecharCadastroTopo.Add_Click({ $dlg.Close() })
+    [void]$cadastroHeader.Controls.Add($btnFecharCadastroTopo)
+
+    $script:cadastroDragAtivo = $false
+    $script:cadastroDragOrigem = [System.Drawing.Point]::Empty
+    $cadastroHeader.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            $script:cadastroDragAtivo = $true
+            $script:cadastroDragOrigem = $_.Location
+        }
+    })
+    $cadastroHeader.Add_MouseMove({
+        if ($script:cadastroDragAtivo) {
+            $p = [System.Windows.Forms.Cursor]::Position
+            $dlg.Location = New-Object System.Drawing.Point(($p.X - $script:cadastroDragOrigem.X), ($p.Y - $script:cadastroDragOrigem.Y))
+        }
+    })
+    $cadastroHeader.Add_MouseUp({ $script:cadastroDragAtivo = $false })
 
     $infoOsPanel = New-Object System.Windows.Forms.Panel
-    $infoOsPanel.BackColor = [System.Drawing.Color]::FromArgb(9, 18, 29)
-    $infoOsPanel.BorderStyle = 'FixedSingle'
+    $infoOsPanel.BackColor = $osUiSurface
+    $infoOsPanel.BorderStyle = 'None'
     $infoOsPanel.Location = New-Object System.Drawing.Point(620, 78)
-    $infoOsPanel.Size = New-Object System.Drawing.Size(200, 228)
+    $infoOsPanel.Size = New-Object System.Drawing.Size(200, 254)
     $dlg.Controls.Add($infoOsPanel)
+    Set-RoundedControl -Control $infoOsPanel -Radius 7
+    $infoOsPanel.Add_Paint({
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(62, 52, 88), 1)
+        $_.Graphics.DrawRectangle($pen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $pen.Dispose()
+    })
 
     # Accent top bar
     $infoOsAccent = New-Object System.Windows.Forms.Panel
@@ -2807,77 +4304,67 @@ function Show-CadastroOsAltertagDraft {
 
     # --- Card Tecnico (botoes toggle) ---
     $cardTec = New-Object System.Windows.Forms.Panel
-    $cardTec.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
+    $cardTec.BackColor = $osUiSurfaceRaised
     $cardTec.Location = New-Object System.Drawing.Point(10, 8)
-    $cardTec.Size = New-Object System.Drawing.Size(178, 62)
+    $cardTec.Size = New-Object System.Drawing.Size(178, 88)
     [void]$infoOsPanel.Controls.Add($cardTec)
+    Set-RoundedControl -Control $cardTec -Radius 5
     $cardTecBar = New-Object System.Windows.Forms.Panel
     $cardTecBar.BackColor = $cAccent
     $cardTecBar.Location = New-Object System.Drawing.Point(0, 0)
-    $cardTecBar.Size = New-Object System.Drawing.Size(3, 62)
+    $cardTecBar.Size = New-Object System.Drawing.Size(3, 88)
     [void]$cardTec.Controls.Add($cardTecBar)
     $lblTecCaption = New-Object System.Windows.Forms.Label
     $lblTecCaption.Text = 'TECNICO'
     $lblTecCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $lblTecCaption.ForeColor = [System.Drawing.Color]::FromArgb(80, 160, 210)
+    $lblTecCaption.ForeColor = [System.Drawing.Color]::FromArgb(112, 199, 236)
     $lblTecCaption.Location = New-Object System.Drawing.Point(8, 6)
     $lblTecCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardTec.Controls.Add($lblTecCaption)
 
-    # Wrapper compativel com .SelectedItem usado no resto do codigo
-    $cmbTec = [PSCustomObject]@{ SelectedItem = 'Lucas' }
-    $script:tecnicoSelecionado = 'Lucas'
-    $script:tecBtns = @{}
-    $tecNomes = @('Lucas', 'Hyrides', 'Vitor', 'Erick')
-    $tecX = 6
-    foreach ($tec in $tecNomes) {
-        $btn = New-Object System.Windows.Forms.Button
-        $btn.Text      = $tec
-        $btn.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 6.5)
-        $btn.FlatStyle = 'Flat'
-        $btn.FlatAppearance.BorderSize = 1
-        $btn.Location  = New-Object System.Drawing.Point($tecX, 20)
-        $btn.Size      = New-Object System.Drawing.Size(40, 34)
-        $btn.Cursor    = [System.Windows.Forms.Cursors]::Hand
-        $script:tecBtns[$tec] = $btn
-        [void]$cardTec.Controls.Add($btn)
-        $tecX += 42
+    # Wrapper compativel com .SelectedItem usado no restante do cadastro
+    $cmbTec = [PSCustomObject]@{ SelectedItem = $TecnicoInicial.Trim() }
+    $script:tecnicoSelecionado = [string]$cmbTec.SelectedItem
 
-        $btn.Add_Click({
-            $nomeTec = $this.Text
-            $script:tecnicoSelecionado = $nomeTec
-            $cmbTec.SelectedItem = $nomeTec
-            foreach ($t in $tecNomes) {
-                $b = $script:tecBtns[$t]
-                if ($t -eq $nomeTec) {
-                    $b.BackColor = [System.Drawing.Color]::FromArgb(0, 88, 148)
-                    $b.ForeColor = [System.Drawing.Color]::White
-                    $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-                } else {
-                    $b.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 33)
-                    $b.ForeColor = [System.Drawing.Color]::FromArgb(100, 148, 185)
-                    $b.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(22, 44, 66)
-                }
-            }
+    $lblTecnicoEscolhido = New-Object System.Windows.Forms.Label
+    $lblTecnicoEscolhido.Text = [string]$cmbTec.SelectedItem
+    $lblTecnicoEscolhido.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 10, [System.Drawing.FontStyle]::Bold)
+    $lblTecnicoEscolhido.ForeColor = [System.Drawing.Color]::White
+    $lblTecnicoEscolhido.Location = New-Object System.Drawing.Point(10, 28)
+    $lblTecnicoEscolhido.Size = New-Object System.Drawing.Size(100, 28)
+    $lblTecnicoEscolhido.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $lblTecnicoEscolhido.AutoEllipsis = $true
+    [void]$cardTec.Controls.Add($lblTecnicoEscolhido)
+
+    $btnTrocarTecnico = New-Object System.Windows.Forms.Button
+    $btnTrocarTecnico.Text = 'Trocar'
+    $btnTrocarTecnico.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
+    $btnTrocarTecnico.ForeColor = [System.Drawing.Color]::FromArgb(216, 205, 244)
+    $btnTrocarTecnico.BackColor = [System.Drawing.Color]::FromArgb(38, 30, 65)
+    $btnTrocarTecnico.FlatStyle = 'Flat'
+    $btnTrocarTecnico.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(107, 82, 160)
+    $btnTrocarTecnico.Location = New-Object System.Drawing.Point(112, 28)
+    $btnTrocarTecnico.Size = New-Object System.Drawing.Size(58, 28)
+    $btnTrocarTecnico.Cursor = [System.Windows.Forms.Cursors]::Hand
+    [void]$cardTec.Controls.Add($btnTrocarTecnico)
+    Set-RoundedControl -Control $btnTrocarTecnico -Radius 4
+    $btnTrocarTecnico.Add_Click({
+        $novoTecnico = Show-TecnicoCadastroOs -Owner $dlg
+        if (-not [string]::IsNullOrWhiteSpace($novoTecnico)) {
+            $cmbTec.SelectedItem = $novoTecnico
+            $script:tecnicoSelecionado = $novoTecnico
+            $lblTecnicoEscolhido.Text = $novoTecnico
             Update-ResumoOs -Produto $listProd.SelectedItem
-        })
-    }
-    # Estado inicial
-    $script:tecBtns['Lucas'].BackColor = [System.Drawing.Color]::FromArgb(0, 88, 148)
-    $script:tecBtns['Lucas'].ForeColor = [System.Drawing.Color]::White
-    $script:tecBtns['Lucas'].FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 166, 255)
-    foreach ($t in @('Hyrides', 'Vitor', 'Erick')) {
-        $script:tecBtns[$t].BackColor = [System.Drawing.Color]::FromArgb(10, 20, 33)
-        $script:tecBtns[$t].ForeColor = [System.Drawing.Color]::FromArgb(100, 148, 185)
-        $script:tecBtns[$t].FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(22, 44, 66)
-    }
+        }
+    })
 
     # --- Card Serial ---
     $cardSerial = New-Object System.Windows.Forms.Panel
-    $cardSerial.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
-    $cardSerial.Location = New-Object System.Drawing.Point(10, 76)
+    $cardSerial.BackColor = $osUiSurfaceRaised
+    $cardSerial.Location = New-Object System.Drawing.Point(10, 102)
     $cardSerial.Size = New-Object System.Drawing.Size(178, 42)
     [void]$infoOsPanel.Controls.Add($cardSerial)
+    Set-RoundedControl -Control $cardSerial -Radius 5
     $cardSerialBar = New-Object System.Windows.Forms.Panel
     $cardSerialBar.BackColor = $cPurple
     $cardSerialBar.Location = New-Object System.Drawing.Point(0, 0)
@@ -2886,13 +4373,13 @@ function Show-CadastroOsAltertagDraft {
     $lblSerialCaption = New-Object System.Windows.Forms.Label
     $lblSerialCaption.Text = 'SERIAL'
     $lblSerialCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $lblSerialCaption.ForeColor = [System.Drawing.Color]::FromArgb(120, 120, 210)
+    $lblSerialCaption.ForeColor = [System.Drawing.Color]::FromArgb(166, 176, 255)
     $lblSerialCaption.Location = New-Object System.Drawing.Point(8, 5)
     $lblSerialCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardSerial.Controls.Add($lblSerialCaption)
     $txtSerialOs = New-Object System.Windows.Forms.TextBox
     $txtSerialOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
-    $txtSerialOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
+    $txtSerialOs.BackColor = $osUiSurfaceRaised
     $txtSerialOs.ForeColor = [System.Drawing.Color]::White
     $txtSerialOs.BorderStyle = 'None'
     $txtSerialOs.Location = New-Object System.Drawing.Point(8, 22)
@@ -2902,10 +4389,11 @@ function Show-CadastroOsAltertagDraft {
 
     # --- Card Referencia ---
     $cardGrade = New-Object System.Windows.Forms.Panel
-    $cardGrade.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
-    $cardGrade.Location = New-Object System.Drawing.Point(10, 124)
+    $cardGrade.BackColor = $osUiSurfaceRaised
+    $cardGrade.Location = New-Object System.Drawing.Point(10, 150)
     $cardGrade.Size = New-Object System.Drawing.Size(178, 42)
     [void]$infoOsPanel.Controls.Add($cardGrade)
+    Set-RoundedControl -Control $cardGrade -Radius 5
     $cardGradeBar = New-Object System.Windows.Forms.Panel
     $cardGradeBar.BackColor = $cYellow
     $cardGradeBar.Location = New-Object System.Drawing.Point(0, 0)
@@ -2914,14 +4402,14 @@ function Show-CadastroOsAltertagDraft {
     $lblGradeCaption = New-Object System.Windows.Forms.Label
     $lblGradeCaption.Text = 'REFERENCIA'
     $lblGradeCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $lblGradeCaption.ForeColor = [System.Drawing.Color]::FromArgb(180, 148, 60)
+    $lblGradeCaption.ForeColor = [System.Drawing.Color]::FromArgb(255, 211, 103)
     $lblGradeCaption.Location = New-Object System.Drawing.Point(8, 5)
     $lblGradeCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardGrade.Controls.Add($lblGradeCaption)
     $script:gradeCadastroOs = if ($script:rnaAtivo) { 'RMA' } elseif ($script:gradeAtual) { [string]$script:gradeAtual } else { 'A' }
     $btnGradeOs = New-Object System.Windows.Forms.Button
     $btnGradeOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
-    $btnGradeOs.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 35)
+    $btnGradeOs.BackColor = $osUiSurfaceRaised
     $btnGradeOs.ForeColor = [System.Drawing.Color]::White
     $btnGradeOs.FlatStyle = 'Flat'
     $btnGradeOs.FlatAppearance.BorderSize = 0
@@ -2934,8 +4422,8 @@ function Show-CadastroOsAltertagDraft {
 
     $gradeMenuOs = New-Object System.Windows.Forms.ContextMenuStrip
     $gradeMenuOs.AutoSize = $true
-    $gradeMenuOs.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 33)
-    $gradeMenuOs.ForeColor = [System.Drawing.Color]::FromArgb(236, 245, 255)
+    $gradeMenuOs.BackColor = [System.Drawing.Color]::FromArgb(9, 14, 29)
+    $gradeMenuOs.ForeColor = [System.Drawing.Color]::FromArgb(244, 241, 255)
     $gradeMenuOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5)
     $gradeMenuOs.ShowImageMargin = $false
     $gradeMenuOs.ShowCheckMargin = $false
@@ -2943,7 +4431,7 @@ function Show-CadastroOsAltertagDraft {
     $gradeMenuOs.Padding = New-Object System.Windows.Forms.Padding(1, 4, 1, 4)
     $gradeMenuOs.MinimumSize = New-Object System.Drawing.Size(178, 0)
     $gradeMenuOs.Renderer = New-Object CaijGradeMenuRenderer
-    foreach ($gradeOpcao in @(Get-CaijGradeOptions)) {
+    foreach ($gradeOpcao in @(@(Get-CaijGradeOptions) + @(Get-CaijGradeOptions -EquipmentType 'Celular') | Select-Object -Unique)) {
         $gradeItem = New-Object System.Windows.Forms.ToolStripMenuItem
         $gradeItem.Text = (Format-CaijGradeReference $gradeOpcao)
         $gradeItem.Tag = $gradeOpcao
@@ -2971,10 +4459,11 @@ function Show-CadastroOsAltertagDraft {
 
     # --- Card OS atual ---
     $cardOs = New-Object System.Windows.Forms.Panel
-    $cardOs.BackColor = [System.Drawing.Color]::FromArgb(8, 28, 20)
-    $cardOs.Location = New-Object System.Drawing.Point(10, 172)
+    $cardOs.BackColor = [System.Drawing.Color]::FromArgb(8, 42, 33)
+    $cardOs.Location = New-Object System.Drawing.Point(10, 198)
     $cardOs.Size = New-Object System.Drawing.Size(178, 48)
     [void]$infoOsPanel.Controls.Add($cardOs)
+    Set-RoundedControl -Control $cardOs -Radius 5
     $cardOsBar = New-Object System.Windows.Forms.Panel
     $cardOsBar.BackColor = $cGreen
     $cardOsBar.Location = New-Object System.Drawing.Point(0, 0)
@@ -2983,7 +4472,7 @@ function Show-CadastroOsAltertagDraft {
     $lblOsCaption = New-Object System.Windows.Forms.Label
     $lblOsCaption.Text = 'OS ATUAL'
     $lblOsCaption.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $lblOsCaption.ForeColor = [System.Drawing.Color]::FromArgb(60, 160, 110)
+    $lblOsCaption.ForeColor = [System.Drawing.Color]::FromArgb(99, 225, 169)
     $lblOsCaption.Location = New-Object System.Drawing.Point(8, 5)
     $lblOsCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardOs.Controls.Add($lblOsCaption)
@@ -2996,10 +4485,11 @@ function Show-CadastroOsAltertagDraft {
     $lblOsTopoValor.Location = New-Object System.Drawing.Point(8, 20)
     $lblOsTopoValor.Size = New-Object System.Drawing.Size(162, 22)
     [void]$cardOs.Controls.Add($lblOsTopoValor)
+    Register-OsNumeroControl -Control $lblOsTopoValor
 
     # --- Header da secao de busca ---
     $buscaHeader = New-Object System.Windows.Forms.Panel
-    $buscaHeader.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
+    $buscaHeader.BackColor = $osUiSurface
     $buscaHeader.Location  = New-Object System.Drawing.Point(20, 72)
     $buscaHeader.Size      = New-Object System.Drawing.Size(580, 32)
     [void]$dlg.Controls.Add($buscaHeader)
@@ -3021,15 +4511,15 @@ function Show-CadastroOsAltertagDraft {
     $lblBuscaHint = New-Object System.Windows.Forms.Label
     $lblBuscaHint.Text      = 'Pesquise por modelo, processador ou codigo'
     $lblBuscaHint.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-    $lblBuscaHint.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 155)
+    $lblBuscaHint.ForeColor = $osUiMuted
     $lblBuscaHint.Location  = New-Object System.Drawing.Point(92, 10)
     $lblBuscaHint.Size      = New-Object System.Drawing.Size(480, 14)
     [void]$buscaHeader.Controls.Add($lblBuscaHint)
 
     # --- Painel de busca (campo + botao) ---
     $buscaPanel = New-Object System.Windows.Forms.Panel
-    $buscaPanel.BackColor   = [System.Drawing.Color]::FromArgb(10, 20, 33)
-    $buscaPanel.BorderStyle = 'FixedSingle'
+    $buscaPanel.BackColor   = $osUiSurfaceRaised
+    $buscaPanel.BorderStyle = 'None'
     $buscaPanel.Location    = New-Object System.Drawing.Point(20, 104)
     $buscaPanel.Size        = New-Object System.Drawing.Size(580, 46)
     [void]$dlg.Controls.Add($buscaPanel)
@@ -3038,15 +4528,15 @@ function Show-CadastroOsAltertagDraft {
     $lblLupa = New-Object System.Windows.Forms.Label
     $lblLupa.Text      = [char]::ConvertFromUtf32(0x1F50D)
     $lblLupa.Font      = New-Object System.Drawing.Font('Segoe UI Symbol', 11)
-    $lblLupa.ForeColor = [System.Drawing.Color]::FromArgb(60, 130, 180)
+    $lblLupa.ForeColor = [System.Drawing.Color]::FromArgb(167, 139, 250)
     $lblLupa.Location  = New-Object System.Drawing.Point(10, 10)
     $lblLupa.Size      = New-Object System.Drawing.Size(28, 26)
     [void]$buscaPanel.Controls.Add($lblLupa)
 
     $txtBuscaProd = New-Object System.Windows.Forms.TextBox
     $txtBuscaProd.Font        = New-Object System.Drawing.Font('Segoe UI', 10)
-    $txtBuscaProd.BackColor   = [System.Drawing.Color]::FromArgb(10, 20, 33)
-    $txtBuscaProd.ForeColor   = [System.Drawing.Color]::FromArgb(220, 238, 255)
+    $txtBuscaProd.BackColor   = $osUiSurfaceRaised
+    $txtBuscaProd.ForeColor   = [System.Drawing.Color]::FromArgb(238, 234, 250)
     $txtBuscaProd.BorderStyle = 'None'
     $txtBuscaProd.Location    = New-Object System.Drawing.Point(42, 13)
     $txtBuscaProd.Size        = New-Object System.Drawing.Size(390, 22)
@@ -3062,7 +4552,7 @@ function Show-CadastroOsAltertagDraft {
 
     # Divisor vertical antes do botao
     $buscaDivider = New-Object System.Windows.Forms.Panel
-    $buscaDivider.BackColor = [System.Drawing.Color]::FromArgb(28, 52, 78)
+    $buscaDivider.BackColor = $osUiBorder
     $buscaDivider.Location  = New-Object System.Drawing.Point(442, 8)
     $buscaDivider.Size      = New-Object System.Drawing.Size(1, 30)
     [void]$buscaPanel.Controls.Add($buscaDivider)
@@ -3070,27 +4560,29 @@ function Show-CadastroOsAltertagDraft {
     $btnBuscaProd = New-Object System.Windows.Forms.Button
     $btnBuscaProd.Text      = 'Buscar'
     $btnBuscaProd.Font      = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
-    $btnBuscaProd.ForeColor = [System.Drawing.Color]::FromArgb(220, 244, 255)
-    $btnBuscaProd.BackColor = [System.Drawing.Color]::FromArgb(0, 100, 148)
+    $btnBuscaProd.ForeColor = [System.Drawing.Color]::FromArgb(239, 233, 255)
+    $btnBuscaProd.BackColor = [System.Drawing.Color]::FromArgb(109, 40, 217)
     $btnBuscaProd.FlatStyle = 'Flat'
     $btnBuscaProd.FlatAppearance.BorderSize            = 0
-    $btnBuscaProd.FlatAppearance.MouseOverBackColor    = [System.Drawing.Color]::FromArgb(0, 130, 185)
-    $btnBuscaProd.FlatAppearance.MouseDownBackColor    = [System.Drawing.Color]::FromArgb(0, 80, 120)
+    $btnBuscaProd.FlatAppearance.MouseOverBackColor    = [System.Drawing.Color]::FromArgb(139, 92, 246)
+    $btnBuscaProd.FlatAppearance.MouseDownBackColor    = [System.Drawing.Color]::FromArgb(82, 33, 150)
     $btnBuscaProd.Location  = New-Object System.Drawing.Point(443, 1)
     $btnBuscaProd.Size      = New-Object System.Drawing.Size(134, 42)
     [void]$buscaPanel.Controls.Add($btnBuscaProd)
+    Set-RoundedControl -Control $buscaPanel -Radius 6
+    Set-RoundedControl -Control $btnBuscaProd -Radius 5
 
     # --- Painel de resultados ---
     $prodPanel = New-Object System.Windows.Forms.Panel
-    $prodPanel.BackColor   = [System.Drawing.Color]::FromArgb(7, 14, 24)
-    $prodPanel.BorderStyle = 'FixedSingle'
+    $prodPanel.BackColor   = $osUiSurface
+    $prodPanel.BorderStyle = 'None'
     $prodPanel.Location    = New-Object System.Drawing.Point(20, 152)
     $prodPanel.Size        = New-Object System.Drawing.Size(580, 136)
     [void]$dlg.Controls.Add($prodPanel)
 
     # Header da lista com gradiente simulado
     $prodHead = New-Object System.Windows.Forms.Panel
-    $prodHead.BackColor = [System.Drawing.Color]::FromArgb(9, 26, 44)
+    $prodHead.BackColor = [System.Drawing.Color]::FromArgb(25, 20, 48)
     $prodHead.Location  = New-Object System.Drawing.Point(0, 0)
     $prodHead.Size      = New-Object System.Drawing.Size(578, 26)
     [void]$prodPanel.Controls.Add($prodHead)
@@ -3109,7 +4601,7 @@ function Show-CadastroOsAltertagDraft {
         $h = New-Object System.Windows.Forms.Label
         $h.Text      = [string]$col.Texto
         $h.Font      = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-        $h.ForeColor = [System.Drawing.Color]::FromArgb(80, 150, 200)
+        $h.ForeColor = [System.Drawing.Color]::FromArgb(178, 171, 197)
         $h.Location  = New-Object System.Drawing.Point([int]$col.X, 7)
         $h.Size      = New-Object System.Drawing.Size([int]$col.W, 13)
         [void]$prodHead.Controls.Add($h)
@@ -3118,7 +4610,7 @@ function Show-CadastroOsAltertagDraft {
     # Divisores verticais no header
     foreach ($xDiv in @(100, 460)) {
         $dv = New-Object System.Windows.Forms.Panel
-        $dv.BackColor = [System.Drawing.Color]::FromArgb(22, 48, 70)
+        $dv.BackColor = $osUiBorder
         $dv.Location  = New-Object System.Drawing.Point($xDiv, 5)
         $dv.Size      = New-Object System.Drawing.Size(1, 16)
         [void]$prodHead.Controls.Add($dv)
@@ -3129,7 +4621,7 @@ function Show-CadastroOsAltertagDraft {
     $listProd.DrawMode      = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
     $listProd.ItemHeight    = 28
     $listProd.Font          = New-Object System.Drawing.Font('Segoe UI', 8.5)
-    $listProd.BackColor     = [System.Drawing.Color]::FromArgb(7, 14, 24)
+    $listProd.BackColor     = $osUiSurface
     $listProd.ForeColor     = [System.Drawing.Color]::White
     $listProd.BorderStyle   = 'None'
     $listProd.Location      = New-Object System.Drawing.Point(1, 27)
@@ -3139,7 +4631,7 @@ function Show-CadastroOsAltertagDraft {
 
     # --- Scrollbar customizado (trilho fino + polegar arredondado) ---
     $scrollProd = New-Object System.Windows.Forms.Panel
-    $scrollProd.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
+    $scrollProd.BackColor = $osUiSurface
     $scrollProd.Location  = New-Object System.Drawing.Point(568, 29)
     $scrollProd.Size      = New-Object System.Drawing.Size(8, 103)
     [void]$prodPanel.Controls.Add($scrollProd)
@@ -3163,7 +4655,7 @@ function Show-CadastroOsAltertagDraft {
         $m = Get-ScrollProdMetrics
         $e.Graphics.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
         # Trilho
-        $trackBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(14, 28, 44))
+        $trackBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(19, 17, 40))
         $trackPath = New-Object System.Drawing.Drawing2D.GraphicsPath
         $trackPath.AddArc(2, 0, 4, 4, 180, 180)
         $trackPath.AddArc(2, ($s.Height - 5), 4, 4, 0, 180)
@@ -3174,7 +4666,7 @@ function Show-CadastroOsAltertagDraft {
         # Polegar
         $topIdx = [Math]::Min($listProd.TopIndex, $m.MaxTop)
         $y = [int](($m.TrackH - $m.ThumbH) * ($topIdx / $m.MaxTop))
-        $thumbColor = if ($script:scrollProdDrag) { [System.Drawing.Color]::FromArgb(0, 150, 210) } else { [System.Drawing.Color]::FromArgb(45, 95, 140) }
+        $thumbColor = if ($script:scrollProdDrag) { [System.Drawing.Color]::FromArgb(139, 92, 246) } else { [System.Drawing.Color]::FromArgb(78, 62, 110) }
         $thumbBrush = New-Object System.Drawing.SolidBrush($thumbColor)
         $thumbPath = New-Object System.Drawing.Drawing2D.GraphicsPath
         $thumbPath.AddArc(0, $y, 8, 8, 180, 180)
@@ -3228,279 +4720,407 @@ function Show-CadastroOsAltertagDraft {
     $lblListaVazia = New-Object System.Windows.Forms.Label
     $lblListaVazia.Text      = 'Digite um termo e clique Buscar'
     $lblListaVazia.Font      = New-Object System.Drawing.Font('Segoe UI', 9)
-    $lblListaVazia.ForeColor = [System.Drawing.Color]::FromArgb(60, 100, 135)
-    $lblListaVazia.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
+    $lblListaVazia.ForeColor = $osUiDim
+    $lblListaVazia.BackColor = $osUiSurface
     $lblListaVazia.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $lblListaVazia.Location  = New-Object System.Drawing.Point(1, 27)
     $lblListaVazia.Size      = New-Object System.Drawing.Size(576, 107)
     [void]$prodPanel.Controls.Add($lblListaVazia)
     $lblListaVazia.BringToFront()
 
-    # --- Header da secao de servicos (mesmo estilo do header PRODUTO) ---
+    $buscaStatus = New-Object System.Windows.Forms.Panel
+    $buscaStatus.BackColor = [System.Drawing.Color]::FromArgb(13, 18, 37)
+    $buscaStatus.Location = New-Object System.Drawing.Point(20, 296)
+    $buscaStatus.Size = New-Object System.Drawing.Size(580, 30)
+    [void]$dlg.Controls.Add($buscaStatus)
+    Set-RoundedControl -Control $buscaStatus -Radius 5
+
+    $buscaStatusDot = New-Object System.Windows.Forms.Panel
+    $buscaStatusDot.BackColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
+    $buscaStatusDot.Location = New-Object System.Drawing.Point(12, 11)
+    $buscaStatusDot.Size = New-Object System.Drawing.Size(7, 7)
+    [void]$buscaStatus.Controls.Add($buscaStatusDot)
+    Set-RoundedControl -Control $buscaStatusDot -Radius 4
+
+    $txtResumo = New-Object System.Windows.Forms.Label
+    $txtResumo.Text = 'Digite um modelo, processador ou codigo para iniciar a busca.'
+    $txtResumo.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $txtResumo.ForeColor = $osUiMuted
+    $txtResumo.Location = New-Object System.Drawing.Point(28, 7)
+    $txtResumo.Size = New-Object System.Drawing.Size(538, 17)
+    $txtResumo.AutoEllipsis = $true
+    [void]$buscaStatus.Controls.Add($txtResumo)
+
+    # --- Leitura auxiliar e observacao ---
     $servHeader = New-Object System.Windows.Forms.Panel
-    $servHeader.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
-    $servHeader.Location  = New-Object System.Drawing.Point(20, 290)
-    $servHeader.Size      = New-Object System.Drawing.Size(800, 22)
+    $servHeader.BackColor = $osUiSurface
+    $servHeader.Location  = New-Object System.Drawing.Point(20, 344)
+    $servHeader.Size      = New-Object System.Drawing.Size(800, 26)
     [void]$dlg.Controls.Add($servHeader)
 
     $servHeaderAccent = New-Object System.Windows.Forms.Panel
     $servHeaderAccent.BackColor = $cAccent
     $servHeaderAccent.Location  = New-Object System.Drawing.Point(0, 0)
-    $servHeaderAccent.Size      = New-Object System.Drawing.Size(3, 22)
+    $servHeaderAccent.Size      = New-Object System.Drawing.Size(3, 26)
     [void]$servHeader.Controls.Add($servHeaderAccent)
 
     $lblServ = New-Object System.Windows.Forms.Label
-    $lblServ.Text = 'SERVICOS REALIZADOS'
+    $lblServ.Text = 'OBSERVACAO DA OS'
     $lblServ.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
     $lblServ.ForeColor = $cAccent
-    $lblServ.Location = New-Object System.Drawing.Point(12, 5)
+    $lblServ.Location = New-Object System.Drawing.Point(12, 6)
     $lblServ.Size = New-Object System.Drawing.Size(160, 14)
     [void]$servHeader.Controls.Add($lblServ)
 
     $lblServHint = New-Object System.Windows.Forms.Label
-    $lblServHint.Text      = 'Marque os servicos executados neste equipamento'
+    $lblServHint.Text      = 'O Altertag recebera data, horario, tecnico e o texto abaixo automaticamente'
     $lblServHint.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-    $lblServHint.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 155)
-    $lblServHint.Location  = New-Object System.Drawing.Point(172, 5)
-    $lblServHint.Size      = New-Object System.Drawing.Size(400, 14)
+    $lblServHint.ForeColor = $osUiMuted
+    $lblServHint.Location  = New-Object System.Drawing.Point(172, 6)
+    $lblServHint.Size      = New-Object System.Drawing.Size(455, 14)
     [void]$servHeader.Controls.Add($lblServHint)
 
-    $servChecks = @()
+    $btnLer3uCadastro = New-Object System.Windows.Forms.Button
+    $btnLer3uCadastro.Text = 'Ler informacoes 3uTools'
+    $btnLer3uCadastro.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7, [System.Drawing.FontStyle]::Bold)
+    $btnLer3uCadastro.ForeColor = [System.Drawing.Color]::White
+    $btnLer3uCadastro.BackColor = [System.Drawing.Color]::FromArgb(91, 33, 182)
+    $btnLer3uCadastro.FlatStyle = 'Flat'
+    $btnLer3uCadastro.FlatAppearance.BorderSize = 0
+    $btnLer3uCadastro.Location = New-Object System.Drawing.Point(616, 2)
+    $btnLer3uCadastro.Size = New-Object System.Drawing.Size(176, 22)
+    $btnLer3uCadastro.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnLer3uCadastro.Visible = $true
+    [void]$servHeader.Controls.Add($btnLer3uCadastro)
+    Set-RoundedControl -Control $btnLer3uCadastro -Radius 5
+
+    $tipoPanel = New-Object System.Windows.Forms.Panel
+    $tipoPanel.BackColor = $osUiBg
+    $tipoPanel.Location = New-Object System.Drawing.Point(20, 372)
+    $tipoPanel.Size = New-Object System.Drawing.Size(800, 34)
+    $tipoPanel.Visible = $false
+    [void]$dlg.Controls.Add($tipoPanel)
+
+    $tipoButtons = @{}
+    foreach ($tipoDef in @(
+        @{ Nome='Notebook'; X=0 },
+        @{ Nome='Monitor'; X=270 },
+        @{ Nome='Celular'; X=540 }
+    )) {
+        $tipoBtn = New-Object System.Windows.Forms.Button
+        $tipoBtn.Text = [string]$tipoDef.Nome
+        $tipoBtn.Tag = [string]$tipoDef.Nome
+        $tipoBtn.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $tipoBtn.ForeColor = $osUiMuted
+        $tipoBtn.BackColor = $osUiSurface
+        $tipoBtn.FlatStyle = 'Flat'
+        $tipoBtn.FlatAppearance.BorderSize = 1
+        $tipoBtn.FlatAppearance.BorderColor = $osUiBorder
+        $tipoBtn.Location = New-Object System.Drawing.Point([int]$tipoDef.X, 1)
+        $tipoBtn.Size = New-Object System.Drawing.Size(260, 30)
+        $tipoBtn.Cursor = [System.Windows.Forms.Cursors]::Hand
+        [void]$tipoPanel.Controls.Add($tipoBtn)
+        Set-RoundedControl -Control $tipoBtn -Radius 6
+        $tipoButtons[[string]$tipoDef.Nome] = $tipoBtn
+    }
+
+    $servicosCadastroEstado = [pscustomobject]@{
+        Selecoes = @{ Notebook=@(); Monitor=@(); Celular=@() }
+        DadosCelular = $null
+        TipoAtual = switch ([string]$script:tipoEtiqueta) {
+            'Monitor' { 'Monitor' }
+            'Celular' { 'Celular' }
+            default { 'Notebook' }
+        }
+    }
     $servPanel = New-Object System.Windows.Forms.Panel
-    $servPanel.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
+    $servPanel.BackColor = $osUiSurfaceRaised
     $servPanel.BorderStyle = 'None'
-    $servPanel.Location = New-Object System.Drawing.Point(20, 314)
-    $servPanel.Size = New-Object System.Drawing.Size(800, 126)
+    $servPanel.Location = New-Object System.Drawing.Point(20, 410)
+    $servPanel.Size = New-Object System.Drawing.Size(800, 52)
+    $servPanel.Visible = $false
     [void]$dlg.Controls.Add($servPanel)
+    Set-RoundedControl -Control $servPanel -Radius 6
 
-    # Grupos de servicos: cada grupo tem cor propria, coluna de checkboxes e header
-    $servGrupos = @(
-        @{
-            Titulo = 'Pecas e manutencao'
-            Cor    = [System.Drawing.Color]::FromArgb(0, 166, 255)
-            X      = 6; W = 192
-            Itens  = @('Troca de bateria','Troca SSD','Troca de tela','Troca de memoria RAM')
+    $servicosPorTipo = @{
+        Notebook = @(
+            @{ Titulo='Pecas e manutencao'; Cor=[System.Drawing.Color]::FromArgb(139,92,246); Itens=@('Troca de bateria','Troca SSD','Troca de tela','Troca de memoria RAM') },
+            @{ Titulo='Estrutura'; Cor=[System.Drawing.Color]::FromArgb(196,181,253); Itens=@('Troca de moldura','Troca de teclado','Troca de touchpad','Troca de dobradica') },
+            @{ Titulo='Estrutura II'; Cor=[System.Drawing.Color]::FromArgb(0,206,190); Itens=@('Troca de carcaca','Troca de tampa','Troca de base','Troca de cooler') },
+            @{ Titulo='Acabamento'; Cor=[System.Drawing.Color]::FromArgb(249,115,22); Itens=@('Pintura 1','Pintura 2','Pintura 3','Pintura geral') }
+        )
+        Monitor = @(
+            @{ Titulo='Imagem'; Cor=[System.Drawing.Color]::FromArgb(139,92,246); Itens=@('Troca de tela/painel','Reparo de imagem','Troca de backlight','Teste de imagem') },
+            @{ Titulo='Energia'; Cor=[System.Drawing.Color]::FromArgb(196,181,253); Itens=@('Troca de fonte','Reparo de placa','Troca de cabo','Teste de energia') },
+            @{ Titulo='Conectividade'; Cor=[System.Drawing.Color]::FromArgb(0,206,190); Itens=@('Reparo HDMI','Reparo DisplayPort','Reparo VGA','Teste de entradas') },
+            @{ Titulo='Estrutura'; Cor=[System.Drawing.Color]::FromArgb(249,115,22); Itens=@('Troca de botoes','Troca de base','Limpeza interna','Pintura') }
+        )
+        Celular = @()
+    }
+
+    $showServicosCadastro = {
+        param($Contexto)
+        $Tipo = [string]$Contexto.Tipo
+        $grupos = @($Contexto.Grupos)
+        if ($grupos.Count -eq 0) { return }
+
+        $picker = New-Object System.Windows.Forms.Form
+        $picker.Text = "Selecao desativada - $Tipo"
+        $picker.Size = New-Object System.Drawing.Size(820, 330)
+        $picker.StartPosition = 'CenterParent'
+        $picker.BackColor = $osUiBg
+        $picker.ForeColor = $osUiText
+        $picker.FormBorderStyle = 'FixedDialog'
+        $picker.MaximizeBox = $false
+        $picker.MinimizeBox = $false
+
+        $pickerHeader = New-Object System.Windows.Forms.Panel
+        $pickerHeader.BackColor = $osUiSurface
+        $pickerHeader.Location = New-Object System.Drawing.Point(0, 0)
+        $pickerHeader.Size = New-Object System.Drawing.Size(804, 52)
+        [void]$picker.Controls.Add($pickerHeader)
+
+        $pickerTitle = New-Object System.Windows.Forms.Label
+        $pickerTitle.Text = 'Selecao desativada'
+        $pickerTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12, [System.Drawing.FontStyle]::Bold)
+        $pickerTitle.ForeColor = $osUiText
+        $pickerTitle.Location = New-Object System.Drawing.Point(20, 8)
+        $pickerTitle.Size = New-Object System.Drawing.Size(420, 24)
+        [void]$pickerHeader.Controls.Add($pickerTitle)
+
+        $pickerHint = New-Object System.Windows.Forms.Label
+        $pickerHint.Text = $Tipo
+        $pickerHint.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+        $pickerHint.ForeColor = $osUiMuted
+        $pickerHint.Location = New-Object System.Drawing.Point(21, 31)
+        $pickerHint.Size = New-Object System.Drawing.Size(300, 15)
+        [void]$pickerHeader.Controls.Add($pickerHint)
+
+        $pickerChecks = @()
+        for ($grupoIndex = 0; $grupoIndex -lt $grupos.Count; $grupoIndex++) {
+            $grupo = $grupos[$grupoIndex]
+            $cardX = 20 + ($grupoIndex * 194)
+            $gCard = New-Object System.Windows.Forms.Panel
+            $gCard.BackColor = $osUiSurfaceRaised
+            $gCard.Location = New-Object System.Drawing.Point($cardX, 66)
+            $gCard.Size = New-Object System.Drawing.Size(182, 142)
+            [void]$picker.Controls.Add($gCard)
+            Set-RoundedControl -Control $gCard -Radius 6
+
+            $gBar = New-Object System.Windows.Forms.Panel
+            $gBar.BackColor = $cAccent
+            $gBar.Location = New-Object System.Drawing.Point(0, 0)
+            $gBar.Size = New-Object System.Drawing.Size(182, 3)
+            [void]$gCard.Controls.Add($gBar)
+
+            $gTit = New-Object System.Windows.Forms.Label
+            $gTit.Text = [string]$grupo.Titulo
+            $gTit.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
+            $gTit.ForeColor = [System.Drawing.Color]::FromArgb(196,181,253)
+            $gTit.Location = New-Object System.Drawing.Point(10, 9)
+            $gTit.Size = New-Object System.Drawing.Size(162, 16)
+            [void]$gCard.Controls.Add($gTit)
+
+            $yChk = 32
+            foreach ($itemTxt in @($grupo.Itens)) {
+                $chk = New-Object System.Windows.Forms.CheckBox
+                $chk.Text = [string]$itemTxt
+                $chk.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+                $chk.ForeColor = $osUiText
+                $chk.BackColor = $osUiSurfaceRaised
+                $chk.Location = New-Object System.Drawing.Point(10, $yChk)
+                $chk.Size = New-Object System.Drawing.Size(166, 22)
+                $chk.FlatStyle = 'Flat'
+                $chk.Checked = @($Contexto.Selecionados) -contains [string]$itemTxt
+                [void]$gCard.Controls.Add($chk)
+                $pickerChecks += $chk
+                $yChk += 24
+            }
         }
-        @{
-            Titulo = 'Estrutura'
-            Cor    = [System.Drawing.Color]::FromArgb(132, 148, 255)
-            X      = 206; W = 192
-            Itens  = @('Troca de moldura','Troca de teclado','Troca de touchpad','Troca de dobradica')
+
+        $btnPickerCancelar = New-Object System.Windows.Forms.Button
+        $btnPickerCancelar.Text = 'Cancelar'
+        $btnPickerCancelar.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $btnPickerCancelar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5)
+        $btnPickerCancelar.ForeColor = $osUiMuted
+        $btnPickerCancelar.BackColor = $osUiSurface
+        $btnPickerCancelar.FlatStyle = 'Flat'
+        $btnPickerCancelar.FlatAppearance.BorderColor = $osUiBorder
+        $btnPickerCancelar.Location = New-Object System.Drawing.Point(20, 230)
+        $btnPickerCancelar.Size = New-Object System.Drawing.Size(150, 38)
+        [void]$picker.Controls.Add($btnPickerCancelar)
+        Set-RoundedControl -Control $btnPickerCancelar -Radius 6
+
+        $btnPickerSalvar = New-Object System.Windows.Forms.Button
+        $btnPickerSalvar.Text = 'Aplicar selecao'
+        $btnPickerSalvar.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $btnPickerSalvar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnPickerSalvar.ForeColor = [System.Drawing.Color]::White
+        $btnPickerSalvar.BackColor = [System.Drawing.Color]::FromArgb(91,33,182)
+        $btnPickerSalvar.FlatStyle = 'Flat'
+        $btnPickerSalvar.FlatAppearance.BorderSize = 0
+        $btnPickerSalvar.Location = New-Object System.Drawing.Point(624, 230)
+        $btnPickerSalvar.Size = New-Object System.Drawing.Size(160, 38)
+        [void]$picker.Controls.Add($btnPickerSalvar)
+        Set-RoundedControl -Control $btnPickerSalvar -Radius 6
+
+        $picker.AcceptButton = $btnPickerSalvar
+        $picker.CancelButton = $btnPickerCancelar
+        Set-CaijWindowsTypography -Root $picker
+        if ($picker.ShowDialog($dlg) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $Contexto.Selecionados = @(
+                $pickerChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text }
+            )
+            $Contexto.Aplicado = $true
         }
-        @{
-            Titulo = 'Estrutura II'
-            Cor    = [System.Drawing.Color]::FromArgb(0, 206, 190)
-            X      = 406; W = 192
-            Itens  = @('Troca de carcaca','Troca de tampa','Troca de base','Troca de cooler')
+        $picker.Dispose()
+    }.GetNewClosure()
+
+    $renderServicosCadastro = {
+        param([string]$Tipo)
+        $servicosCadastroEstado.TipoAtual = $Tipo
+        $tipoGradeCelular = ($Tipo -eq 'Celular')
+        foreach ($item in @($gradeMenuOs.Items)) {
+            $tagGradeItem = [string]$item.Tag
+            $item.Visible = if ($tipoGradeCelular) {
+                $tagGradeItem -notmatch '^C\s*-\s*PINTURA'
+            } else {
+                $tagGradeItem -ne 'C'
+            }
         }
-        @{
-            Titulo = 'Pintura'
-            Cor    = [System.Drawing.Color]::FromArgb(255, 156, 98)
-            X      = 606; W = 186
-            Itens  = @('Pintura 1','Pintura 2','Pintura 3','Pintura geral')
+        if ($tipoGradeCelular -and ([string]$script:gradeCadastroOs) -match '^C\s*-\s*PINTURA') {
+            $script:gradeCadastroOs = 'C'
+            $script:gradeAtual = 'C'
+            $btnGradeOs.Text = (Format-CaijGradeReference 'C')
+        } elseif (-not $tipoGradeCelular -and ([string]$script:gradeCadastroOs) -eq 'C') {
+            $script:gradeCadastroOs = 'A'
+            $script:gradeAtual = 'A'
+            $btnGradeOs.Text = (Format-CaijGradeReference 'A')
         }
-    )
+        $servPanel.Controls.Clear()
+        foreach ($tipoNome in @('Notebook','Monitor','Celular')) {
+            $ativo = ($tipoNome -eq $Tipo)
+            $tipoButtons[$tipoNome].BackColor = if ($ativo) { [System.Drawing.Color]::FromArgb(91,33,182) } else { $osUiSurface }
+            $tipoButtons[$tipoNome].ForeColor = if ($ativo) { [System.Drawing.Color]::White } else { $osUiMuted }
+            $tipoButtons[$tipoNome].FlatAppearance.BorderColor = if ($ativo) { [System.Drawing.Color]::FromArgb(167,139,250) } else { $osUiBorder }
+        }
+        $btnLer3uCadastro.Visible = $true
+        $gruposAtivos = @($servicosPorTipo[$Tipo])
+        $compactRail = New-Object System.Windows.Forms.Panel
+        $compactRail.BackColor = $cAccent
+        $compactRail.Location = New-Object System.Drawing.Point(0, 0)
+        $compactRail.Size = New-Object System.Drawing.Size(3, 52)
+        [void]$servPanel.Controls.Add($compactRail)
 
-    foreach ($grupo in $servGrupos) {
-        # Card do grupo
-        $gCard = New-Object System.Windows.Forms.Panel
-        $gCard.BackColor = [System.Drawing.Color]::FromArgb(11, 20, 32)
-        $gCard.Location  = New-Object System.Drawing.Point([int]$grupo.X, 4)
-        $gCard.Size      = New-Object System.Drawing.Size([int]$grupo.W, 116)
-        [void]$servPanel.Controls.Add($gCard)
+        $compactTitle = New-Object System.Windows.Forms.Label
+        $compactTitle.Text = if ($gruposAtivos.Count -eq 0) { 'SEM DETALHES PREDEFINIDOS' } else { 'DETALHES DA OBSERVACAO' }
+        $compactTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
+        $compactTitle.ForeColor = [System.Drawing.Color]::FromArgb(196,181,253)
+        $compactTitle.Location = New-Object System.Drawing.Point(16, 7)
+        $compactTitle.Size = New-Object System.Drawing.Size(260, 15)
+        [void]$servPanel.Controls.Add($compactTitle)
 
-        # Accent bar topo
-        $gBar = New-Object System.Windows.Forms.Panel
-        $gBar.BackColor = [System.Drawing.Color]$grupo.Cor
-        $gBar.Location  = New-Object System.Drawing.Point(0, 0)
-        $gBar.Size      = New-Object System.Drawing.Size([int]$grupo.W, 3)
-        [void]$gCard.Controls.Add($gBar)
+        $selecionados = @($servicosCadastroEstado.Selecoes[$Tipo])
+        $compactResumo = New-Object System.Windows.Forms.Label
+        $compactResumo.Text = if ($gruposAtivos.Count -eq 0) {
+            'Use o campo Observacao para registrar os detalhes.'
+        } elseif ($selecionados.Count -eq 0) {
+            'Nenhum detalhe selecionado'
+        } else {
+            "$($selecionados.Count) selecionado(s)  |  $($selecionados -join ', ')"
+        }
+        $compactResumo.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+        $compactResumo.ForeColor = $osUiMuted
+        $compactResumo.Location = New-Object System.Drawing.Point(16, 26)
+        $compactResumo.Size = New-Object System.Drawing.Size(580, 18)
+        $compactResumo.AutoEllipsis = $true
+        [void]$servPanel.Controls.Add($compactResumo)
 
-        # Titulo do grupo
-        $gTit = New-Object System.Windows.Forms.Label
-        $gTit.Text      = [string]$grupo.Titulo
-        $gTit.Font      = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-        $gTit.ForeColor = [System.Drawing.Color]$grupo.Cor
-        $gTit.Location  = New-Object System.Drawing.Point(10, 7)
-        $gTit.Size      = New-Object System.Drawing.Size(([int]$grupo.W - 12), 14)
-        [void]$gCard.Controls.Add($gTit)
+        if ($gruposAtivos.Count -eq 0) {
+            return
+        }
 
-        # Linha separadora abaixo do titulo
-        $gLine = New-Object System.Windows.Forms.Panel
-        $gLine.BackColor = [System.Drawing.Color]::FromArgb(22, 40, 60)
-        $gLine.Location  = New-Object System.Drawing.Point(10, 23)
-        $gLine.Size      = New-Object System.Drawing.Size(([int]$grupo.W - 20), 1)
-        [void]$gCard.Controls.Add($gLine)
-
-        # Checkboxes do grupo
-        $yChk = 28
-        foreach ($itemTxt in @($grupo.Itens)) {
-            $chk = New-Object System.Windows.Forms.CheckBox
-            $chk.Text      = [string]$itemTxt
-            $chk.Font      = New-Object System.Drawing.Font('Segoe UI', 8)
-            $chk.ForeColor = [System.Drawing.Color]::FromArgb(200, 226, 244)
-            $chk.BackColor = [System.Drawing.Color]::FromArgb(11, 20, 32)
-            $chk.Location  = New-Object System.Drawing.Point(10, $yChk)
-            $chk.Size      = New-Object System.Drawing.Size(([int]$grupo.W - 16), 20)
-            $chk.FlatStyle = 'Flat'
-            # Feedback visual: texto acende na cor do grupo quando marcado
-            $corGrupo = [System.Drawing.Color]$grupo.Cor
-            $chk.Add_CheckedChanged({
-                param($s, $ev)
-                if ($s.Checked) {
-                    $s.ForeColor = $corGrupo
-                    $s.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
-                } else {
-                    $s.ForeColor = [System.Drawing.Color]::FromArgb(200, 226, 244)
-                    $s.Font = New-Object System.Drawing.Font('Segoe UI', 8)
+        $btnSelecionarServicos = New-Object System.Windows.Forms.Button
+        $btnSelecionarServicos.Text = 'Selecao desativada'
+        $btnSelecionarServicos.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
+        $btnSelecionarServicos.ForeColor = [System.Drawing.Color]::FromArgb(225,216,255)
+        $btnSelecionarServicos.BackColor = [System.Drawing.Color]::FromArgb(38,30,65)
+        $btnSelecionarServicos.FlatStyle = 'Flat'
+        $btnSelecionarServicos.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(107,82,160)
+        $btnSelecionarServicos.Location = New-Object System.Drawing.Point(620, 9)
+        $btnSelecionarServicos.Size = New-Object System.Drawing.Size(164, 34)
+        $btnSelecionarServicos.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnSelecionarServicos.Tag = [pscustomobject]@{
+            Tipo = $Tipo
+            AbrirSeletor = $showServicosCadastro
+            Resumo = $compactResumo
+            Grupos = @($gruposAtivos)
+            Estado = $servicosCadastroEstado
+        }
+        [void]$servPanel.Controls.Add($btnSelecionarServicos)
+        Set-RoundedControl -Control $btnSelecionarServicos -Radius 6
+        $btnSelecionarServicos.Add_Click({
+            try {
+                $contexto = $this.Tag
+                $tipoSelecionado = [string]$contexto.Tipo
+                $contextoSeletor = [pscustomobject]@{
+                    Tipo = $tipoSelecionado
+                    Grupos = @($contexto.Grupos)
+                    Selecionados = @($contexto.Estado.Selecoes[$tipoSelecionado])
+                    Aplicado = $false
                 }
-            }.GetNewClosure())
-            [void]$gCard.Controls.Add($chk)
-            $servChecks += $chk
-            $yChk += 21
-        }
+                & $contexto.AbrirSeletor $contextoSeletor
+                if ($contextoSeletor.Aplicado) {
+                    $contexto.Estado.Selecoes[$tipoSelecionado] = @($contextoSeletor.Selecionados)
+                }
+                $selecionadosAtualizados = @($contexto.Estado.Selecoes[$tipoSelecionado])
+                $contexto.Resumo.Text = if ($selecionadosAtualizados.Count -eq 0) {
+                    'Nenhum detalhe selecionado'
+                } else {
+                    "$($selecionadosAtualizados.Count) selecionado(s)  |  $($selecionadosAtualizados -join ', ')"
+                }
+            } catch {
+                [System.Windows.Forms.MessageBox]::Show(
+                    "Nao foi possivel abrir a selecao de detalhes.`r`n`r`n$($_.Exception.Message)",
+                    'Selecao desativada', 'OK', 'Error'
+                ) | Out-Null
+            }
+        })
+    }.GetNewClosure()
+
+    foreach ($tipoNome in @('Notebook','Monitor','Celular')) {
+        $tipoButtons[$tipoNome].Add_Click({ & $renderServicosCadastro ([string]$this.Tag) }.GetNewClosure())
     }
+    & $renderServicosCadastro $servicosCadastroEstado.TipoAtual
 
-    # --- Header da secao de resumo (mesmo estilo do header PRODUTO) ---
-    $resumoHeader = New-Object System.Windows.Forms.Panel
-    $resumoHeader.BackColor = [System.Drawing.Color]::FromArgb(7, 14, 24)
-    $resumoHeader.Location  = New-Object System.Drawing.Point(20, 446)
-    $resumoHeader.Size      = New-Object System.Drawing.Size(800, 22)
-    [void]$dlg.Controls.Add($resumoHeader)
-
-    $resumoHeaderAccent = New-Object System.Windows.Forms.Panel
-    $resumoHeaderAccent.BackColor = $cGreen
-    $resumoHeaderAccent.Location  = New-Object System.Drawing.Point(0, 0)
-    $resumoHeaderAccent.Size      = New-Object System.Drawing.Size(3, 22)
-    [void]$resumoHeader.Controls.Add($resumoHeaderAccent)
-
-    $lblLoc = New-Object System.Windows.Forms.Label
-    $lblLoc.Text      = 'RESUMO DO CADASTRO'
-    $lblLoc.Font      = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
-    $lblLoc.ForeColor = $cGreen
-    $lblLoc.Location  = New-Object System.Drawing.Point(12, 5)
-    $lblLoc.Size      = New-Object System.Drawing.Size(160, 14)
-    [void]$resumoHeader.Controls.Add($lblLoc)
-
-    $lblLocHint = New-Object System.Windows.Forms.Label
-    $lblLocHint.Text      = 'Confira os dados antes de criar a OS'
-    $lblLocHint.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-    $lblLocHint.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 155)
-    $lblLocHint.Location  = New-Object System.Drawing.Point(172, 5)
-    $lblLocHint.Size      = New-Object System.Drawing.Size(400, 14)
-    [void]$resumoHeader.Controls.Add($lblLocHint)
-
-    $resumoPanel = New-Object System.Windows.Forms.Panel
-    $resumoPanel.BackColor   = [System.Drawing.Color]::FromArgb(9, 18, 29)
-    $resumoPanel.BorderStyle = 'FixedSingle'
-    $resumoPanel.Location    = New-Object System.Drawing.Point(20, 468)
-    $resumoPanel.Size        = New-Object System.Drawing.Size(800, 112)
-    [void]$dlg.Controls.Add($resumoPanel)
-
-    $resumoTopBar = New-Object System.Windows.Forms.Panel
-    $resumoTopBar.BackColor = $cGreen
-    $resumoTopBar.Location  = New-Object System.Drawing.Point(0, 0)
-    $resumoTopBar.Size      = New-Object System.Drawing.Size(800, 2)
-    [void]$resumoPanel.Controls.Add($resumoTopBar)
-
-    $resumoValores = @{}
-
-    # Linha 1: labels em cinza + valores em branco, separados por pipes discretos
-    $campos1 = @(
-        @{ Chave='tecnico';     Titulo='Tecnico';     X=12;  W=90  }
-        @{ Chave='osAtual';     Titulo='OS atual';    X=110; W=90  }
-        @{ Chave='serial';      Titulo='Serial';      X=208; W=130 }
-        @{ Chave='referencia';  Titulo='Referencia';  X=346; W=110 }
-        @{ Chave='quantidade';  Titulo='Qtd';         X=464; W=64  }
-        @{ Chave='localizacao'; Titulo='Localizacao'; X=536; W=256 }
-    )
-    foreach ($c in $campos1) {
-        $lbl = New-Object System.Windows.Forms.Label
-        $lbl.Text      = [string]$c.Titulo
-        $lbl.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-        $lbl.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 158)
-        $lbl.Location  = New-Object System.Drawing.Point([int]$c.X, 10)
-        $lbl.Size      = New-Object System.Drawing.Size([int]$c.W, 13)
-        [void]$resumoPanel.Controls.Add($lbl)
-
-        $val = New-Object System.Windows.Forms.Label
-        $val.Text         = '-'
-        $val.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
-        $val.ForeColor    = if ($c.Chave -eq 'osAtual') { $cGreen } else { [System.Drawing.Color]::FromArgb(216, 236, 252) }
-        $val.Location     = New-Object System.Drawing.Point([int]$c.X, 24)
-        $val.Size         = New-Object System.Drawing.Size([int]$c.W, 18)
-        $val.AutoEllipsis = $true
-        [void]$resumoPanel.Controls.Add($val)
-        $resumoValores[[string]$c.Chave] = $val
-    }
-
-    # Pipes separadores linha 1
-    foreach ($xPipe in @(102, 200, 338, 456, 528)) {
-        $pipe = New-Object System.Windows.Forms.Panel
-        $pipe.BackColor = [System.Drawing.Color]::FromArgb(24, 48, 70)
-        $pipe.Location  = New-Object System.Drawing.Point($xPipe, 12)
-        $pipe.Size      = New-Object System.Drawing.Size(1, 28)
-        [void]$resumoPanel.Controls.Add($pipe)
-    }
-
-    # Divisor horizontal
-    $resumoDivider = New-Object System.Windows.Forms.Panel
-    $resumoDivider.BackColor = [System.Drawing.Color]::FromArgb(18, 36, 54)
-    $resumoDivider.Location  = New-Object System.Drawing.Point(0, 50)
-    $resumoDivider.Size      = New-Object System.Drawing.Size(798, 1)
-    [void]$resumoPanel.Controls.Add($resumoDivider)
-
-    # Linha 2: produto (largo) + servicos
-    $lblProdTit = New-Object System.Windows.Forms.Label
-    $lblProdTit.Text      = 'Produto'
-    $lblProdTit.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-    $lblProdTit.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 158)
-    $lblProdTit.Location  = New-Object System.Drawing.Point(12, 57)
-    $lblProdTit.Size      = New-Object System.Drawing.Size(580, 13)
-    [void]$resumoPanel.Controls.Add($lblProdTit)
-
-    $valProd = New-Object System.Windows.Forms.Label
-    $valProd.Text         = '-'
-    $valProd.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
-    $valProd.ForeColor    = [System.Drawing.Color]::FromArgb(120, 200, 255)
-    $valProd.Location     = New-Object System.Drawing.Point(12, 71)
-    $valProd.Size         = New-Object System.Drawing.Size(576, 18)
-    $valProd.AutoEllipsis = $true
-    [void]$resumoPanel.Controls.Add($valProd)
-    $resumoValores['produto'] = $valProd
-
-    $pipe2 = New-Object System.Windows.Forms.Panel
-    $pipe2.BackColor = [System.Drawing.Color]::FromArgb(24, 48, 70)
-    $pipe2.Location  = New-Object System.Drawing.Point(596, 56)
-    $pipe2.Size      = New-Object System.Drawing.Size(1, 32)
-    [void]$resumoPanel.Controls.Add($pipe2)
-
-    $lblSvcTit = New-Object System.Windows.Forms.Label
-    $lblSvcTit.Text      = 'Servicos'
-    $lblSvcTit.Font      = New-Object System.Drawing.Font('Segoe UI', 7)
-    $lblSvcTit.ForeColor = [System.Drawing.Color]::FromArgb(80, 120, 158)
-    $lblSvcTit.Location  = New-Object System.Drawing.Point(604, 57)
-    $lblSvcTit.Size      = New-Object System.Drawing.Size(188, 13)
-    [void]$resumoPanel.Controls.Add($lblSvcTit)
-
-    $valSvc = New-Object System.Windows.Forms.Label
-    $valSvc.Text         = 'nenhum'
-    $valSvc.Font         = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
-    $valSvc.ForeColor    = [System.Drawing.Color]::FromArgb(216, 236, 252)
-    $valSvc.Location     = New-Object System.Drawing.Point(604, 71)
-    $valSvc.Size         = New-Object System.Drawing.Size(188, 18)
-    $valSvc.AutoEllipsis = $true
-    [void]$resumoPanel.Controls.Add($valSvc)
-    $resumoValores['servicos'] = $valSvc
-
-    $txtResumo = New-Object System.Windows.Forms.Label
-    $txtResumo.Text         = 'Selecione um produto para preparar o cadastro.'
-    $txtResumo.Font         = New-Object System.Drawing.Font('Segoe UI', 7)
-    $txtResumo.ForeColor    = [System.Drawing.Color]::FromArgb(54, 90, 122)
-    $txtResumo.Location     = New-Object System.Drawing.Point(12, 95)
-    $txtResumo.Size         = New-Object System.Drawing.Size(780, 14)
-    $txtResumo.AutoEllipsis = $true
-    [void]$resumoPanel.Controls.Add($txtResumo)
+    $obsPanelCadastro = New-Object System.Windows.Forms.Panel
+    $obsPanelCadastro.BackColor = $osUiSurface
+    $obsPanelCadastro.Location = New-Object System.Drawing.Point(20, 382)
+    $obsPanelCadastro.Size = New-Object System.Drawing.Size(800, 148)
+    [void]$dlg.Controls.Add($obsPanelCadastro)
+    Set-RoundedControl -Control $obsPanelCadastro -Radius 6
+    $obsRailCadastro = New-Object System.Windows.Forms.Panel
+    $obsRailCadastro.BackColor = [System.Drawing.Color]::FromArgb(34,211,238)
+    $obsRailCadastro.Location = New-Object System.Drawing.Point(0,0)
+    $obsRailCadastro.Size = New-Object System.Drawing.Size(3,148)
+    [void]$obsPanelCadastro.Controls.Add($obsRailCadastro)
+    $lblObsCadastro = New-Object System.Windows.Forms.Label
+    $lblObsCadastro.Text = 'OBSERVACAO'
+    $lblObsCadastro.Font = New-Object System.Drawing.Font('Segoe UI',6.5,[System.Drawing.FontStyle]::Bold)
+    $lblObsCadastro.ForeColor = [System.Drawing.Color]::FromArgb(34,211,238)
+    $lblObsCadastro.Location = New-Object System.Drawing.Point(12,6)
+    $lblObsCadastro.Size = New-Object System.Drawing.Size(110,13)
+    [void]$obsPanelCadastro.Controls.Add($lblObsCadastro)
+    $txtObsCadastro = New-Object System.Windows.Forms.TextBox
+    $txtObsCadastro.Multiline = $true
+    $txtObsCadastro.MaxLength = 500
+    $txtObsCadastro.BorderStyle = 'None'
+    $txtObsCadastro.BackColor = $osUiSurface
+    $txtObsCadastro.ForeColor = $osUiText
+    $txtObsCadastro.Font = New-Object System.Drawing.Font('Segoe UI',8.5)
+    $txtObsCadastro.Location = New-Object System.Drawing.Point(12,22)
+    $txtObsCadastro.Size = New-Object System.Drawing.Size(774,112)
+    [void]$obsPanelCadastro.Controls.Add($txtObsCadastro)
 
     function Split-ProdutoOpcaoTexto {
         param([string]$Texto)
@@ -3659,7 +5279,10 @@ function Show-CadastroOsAltertagDraft {
         # ── Codigos T (avulsos Altertag, com ID VHSys) ──────────────────────
         @{c='T023';n='Notebook Dell Latitude 3420 I5 11th';e='0';i=83020915}
         @{c='T029';n='CPU DELL OptiPlex 3050 i5 07th';e='1';i=83145792}
+        @{c='T031';n='Notebook Lenovo T14 i5 10th';e='1';i=83590341}
+        @{c='T031-';n='Notebook Lenovo T14 i7 10th';e='1';i=83591236}
         @{c='T032';n='Notebook Lenovo T14 i5 11th';e='0';i=83064775}
+        @{c='T032-';n='Notebook Lenovo T14 i7 11th';e='1';i=83717625}
         @{c='T034';n='CPU DELL OptiPlex 3090 i5 10th';e='1';i=83267127}
         @{c='T035';n='Notebook Dell Latitude 5420 i5 11th';e='1';i=80612872}
         @{c='T047';n='Notebook DELL Latitude 7320 I7 11th';e='1';i=83011147}
@@ -3798,16 +5421,12 @@ function Show-CadastroOsAltertagDraft {
         @{c='C019-G2F';n='Notebook Lenovo E14 Ryzen 5 5500 8GB SSD 256GB W11P';e='0'}
         @{c='C019-H3G';n='Notebook Lenovo E14 Ryzen 7 5700 16GB SSD 480GB W11P';e='0'}
         # ── Lenovo ThinkPad T14 ─────────────────────────────────────────────
-        @{c='P031';n='Notebook Lenovo T14 I5 10th';e='0'}
         @{c='A031-C2F';n='Notebook Lenovo T14 I5 10th 8GB 256GB W11P';e='0'}
         @{c='A031-C3F';n='Notebook Lenovo T14 I5 10th 16GB SSD 256 W11P';e='0'}
         @{c='A031-C3H';n='Notebook Lenovo T14 I5 10th 16GB SSD 512 W11P';e='0'}
-        @{c='P031-';n='Notebook Lenovo T14 I7 10th';e='0'}
         @{c='A031-D3F';n='Notebook Lenovo T14 I7 10th 16GB SSD 256 W11P';e='0'}
-        @{c='P032';n='Notebook Lenovo T14 I5 11th';e='0'}
         @{c='A032-C2F';n='Notebook Lenovo T14 I5 11th 8GB 256GB W11P';e='0'}
         @{c='A032-C3F';n='Notebook Lenovo T14 I5 11th 16GB SSD 256GB W11P';e='0'}
-        @{c='P032-';n='Notebook Lenovo T14 I7 11th';e='0'}
         @{c='A032-D3F';n='Notebook Lenovo T14 I7 11th 16GB SSD 256 W11P';e='0'}
         @{c='A032-G3F';n='Notebook Lenovo T14 AMD Ryzen 5 PRO 4650U 16GB SSD 256GB W11P';e='0'}
         # ── Lenovo ThinkPad T/X/V ───────────────────────────────────────────
@@ -3880,9 +5499,40 @@ function Show-CadastroOsAltertagDraft {
 
     function Search-CatalogoProdutosLocal {
         param([string]$Termo)
-        $palavras = ($Termo.ToUpper() -replace '[^A-Z0-9]', ' ' -split '\s+') | Where-Object { $_.Length -ge 2 }
+        $termoUpper = ([string]$Termo).Trim().ToUpper()
+        $buscaCodigo = $termoUpper -match '^[A-Z]+\d+-*$'
+        if ($buscaCodigo) {
+            $resultadosCodigo = @(
+                $script:catalogoProdutosLocal | Where-Object {
+                    $codigoAtual = ([string]$_.c).Trim().ToUpper()
+                    if ($codigoAtual -match '^P') { return $false }
+                    if ($termoUpper.EndsWith('-')) {
+                        return ($codigoAtual -eq $termoUpper)
+                    }
+                    return ($codigoAtual -eq $termoUpper -or $codigoAtual.StartsWith($termoUpper + '-'))
+                }
+            )
+            return @(
+                $resultadosCodigo |
+                    ForEach-Object {
+                        [pscustomobject]@{
+                            texto = "$($_.c) - $($_.n)"
+                            codigo = $_.c
+                            idProduto = if ($_.ContainsKey('i')) { [int]$_.i } else { 0 }
+                            descricao = $_.n
+                            valor = '0.00'
+                            estoque = $_.e
+                            estoqueDisplay = if ($_.e -and $_.e -ne '0') { $_.e } else { '' }
+                        }
+                    } |
+                    Sort-Object -Property @{ Expression = { Get-ProdutoSortKeyLocal $_ } }
+            )
+        }
+
+        $palavras = ($termoUpper -replace '[^A-Z0-9]', ' ' -split '\s+') | Where-Object { $_.Length -ge 2 }
         if ($palavras.Count -eq 0) { return @() }
         $resultados = $script:catalogoProdutosLocal | Where-Object {
+            if (([string]$_.c).Trim().ToUpper() -match '^P') { return $false }
             $nomeUpper = $_.n.ToUpper()
             $codigoUpper = $_.c.ToUpper()
             $todosPresentes = $true
@@ -3964,22 +5614,107 @@ function Show-CadastroOsAltertagDraft {
     function Test-ProdutoSelecionavel {
         param($Produto)
         if (-not $Produto) { return $false }
+        $codigoProduto = Get-ProdutoCodigoLocal $Produto
+        if ($codigoProduto -match '^P') { return $false }
         if ([int]$Produto.idProduto -gt 0) { return $true }
-        return ((Get-ProdutoCodigoLocal $Produto) -match '^[A-Z]')
+        return ($codigoProduto -match '^[A-Z]')
+    }
+
+    function Format-TecnicoCadastroObservacaoLocal {
+        param([string]$Tecnico)
+        $t = ([string]$Tecnico).Trim()
+        if (-not $t) { return '' }
+        return (Get-Culture).TextInfo.ToTitleCase($t.ToLower())
+    }
+
+    function Get-CadastroOsDiaPrefixoLocal {
+        $agora = Get-Date
+        return ('{0} - {1}' -f $agora.ToString('dd/MM/yy'), $agora.ToString('HH:mm'))
+    }
+
+    function Format-CadastroOsCpuConfigLocal {
+        param([string]$Cpu)
+
+        $cpuTexto = (([string]$Cpu -replace '\s+', ' ').Trim())
+        if (-not $cpuTexto) { return '' }
+        $cpuTexto = $cpuTexto -replace '(?i)\b(I[3579])\s+([7-9]|1[0-4])\b(?!\s*th)', '$1 $2th'
+        $cpuTexto = $cpuTexto -replace '(?i)\bi([3579])\b', 'I$1'
+        return $cpuTexto
+    }
+
+    function Get-CadastroOsConfiguracaoAtualLocal {
+        param([string]$TipoEquipamento = 'Notebook')
+
+        $tipoAtualCadastro = ([string]$TipoEquipamento).Trim()
+        if ($tipoAtualCadastro -eq 'Celular') {
+            # Nao reutiliza a configuracao detectada do notebook ao cadastrar celular/tablet.
+            # Dados lidos pelo 3uTools ja entram na observacao; dados manuais so podem vir
+            # do estado que foi efetivamente salvo como Celular.
+            if ([string]$script:tipoEtiqueta -ne 'Celular') { return '' }
+
+            $dadosCelular = @()
+            foreach ($itemCelular in @(
+                @('Armazenamento', [string]$script:memEtiqueta),
+                @('Bateria', [string]$script:bateriaEtiqueta),
+                @('IMEI', [string]$script:celularImeiEtiqueta)
+            )) {
+                $valorCelular = (([string]$itemCelular[1] -replace '\s+', ' ').Trim())
+                if ($valorCelular -and $valorCelular -notmatch '^(N/A|NA|-)$') {
+                    $dadosCelular += ('{0}: {1}' -f [string]$itemCelular[0], $valorCelular)
+                }
+            }
+            if ($dadosCelular.Count -eq 0) { return '' }
+            return ('Dados do celular: ' + ($dadosCelular -join ' - '))
+        }
+
+        if ($tipoAtualCadastro -eq 'Monitor') { return '' }
+        if ($tipoAtualCadastro -eq 'Desktop' -and [string]$script:tipoEtiqueta -ne 'Desktop') { return '' }
+        if ($tipoAtualCadastro -eq 'Notebook' -and [string]$script:tipoEtiqueta -ne 'Notebook') { return '' }
+
+        $itensConfig = @()
+        foreach ($valor in @(
+            (Format-CadastroOsCpuConfigLocal -Cpu $script:cpuEtiqueta),
+            [string]$script:memEtiqueta,
+            [string]$script:ramEtiqueta
+        )) {
+            $v = (($valor -replace '\s+', ' ').Trim())
+            if ($v -and $v -notmatch '^(N/A|NA|-)$') { $itensConfig += $v }
+        }
+        if ($itensConfig.Count -eq 0) { return '' }
+        return ('Configuracao atual: ' + ($itensConfig -join ' - '))
+    }
+
+    function New-CadastroOsObservacaoLocal {
+        param(
+            [string]$Observacao,
+            [string]$Tecnico,
+            [string]$TipoEquipamento = 'Notebook'
+        )
+
+        $linhas = @()
+        $texto = ([string]$Observacao).Trim()
+        if ($texto) {
+            $linhas += @($texto -split "\r?\n" | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+        }
+
+        $configAtual = Get-CadastroOsConfiguracaoAtualLocal -TipoEquipamento $TipoEquipamento
+        if ($configAtual -and -not (($linhas -join "`n") -match '(?i)Configuracao atual\s*:')) {
+            $linhas += $configAtual
+        }
+
+        $conteudo = ($linhas -join "`r`n").Trim()
+        if (-not $conteudo) { return '' }
+        if ($conteudo -match '^[A-Z]{3}\s+\(\d{2}/\d{2}/\d{2}\)\s+\d{2}:\d{2}\s+/') { return $conteudo }
+        if ($conteudo -match '^\d{2}/\d{2}/\d{4}\s+-\s+\d{2}:\d{2}\s+-') { return $conteudo }
+
+        $tecnicoDisplay = Format-TecnicoCadastroObservacaoLocal -Tecnico $Tecnico
+        $prefixo = Get-CadastroOsDiaPrefixoLocal
+        if ($tecnicoDisplay) { $prefixo = "$prefixo - ${tecnicoDisplay}" }
+        return "${prefixo}: $conteudo"
     }
 
     function Update-ResumoOs {
         param($Produto)
-        $servicosMarcados = @($servChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text })
-        $qtdSel = Get-ProdutoQuantidadeOsDisplayLocal $Produto
-        $resumoValores['tecnico'].Text = [string]$cmbTec.SelectedItem
-        $resumoValores['osAtual'].Text = (Format-OsCodigo -Numero $script:osNumero)
-        $resumoValores['serial'].Text = [string]$txtSerialOs.Text
-        $resumoValores['referencia'].Text = [string]$btnGradeOs.Text
-        $resumoValores['quantidade'].Text = if ($qtdSel) { $qtdSel } else { '-' }
-        $resumoValores['localizacao'].Text = 'Bancada tecnica'
-        $resumoValores['produto'].Text = if ($Produto) { [string]$Produto.texto } else { '-' }
-        $resumoValores['servicos'].Text = if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' }
         if ($Produto) {
             $codigoResumo = Get-ProdutoCodigoLocal $Produto
             if ([int]$Produto.idProduto -gt 0) {
@@ -3987,7 +5722,7 @@ function Show-CadastroOsAltertagDraft {
             } elseif ($codigoResumo -match '^[A-Z]') {
                 $txtResumo.Text = "Produto sem ID na lista; o servidor vai resolver pelo codigo $codigoResumo ao criar."
             } else {
-                $txtResumo.Text = 'Selecione um produto com codigo Altertag (P/A/T) ou com ID valido.'
+                $txtResumo.Text = 'Selecione um produto com codigo Altertag atual (A/T) ou com ID valido.'
             }
         }
     }
@@ -4069,7 +5804,12 @@ function Show-CadastroOsAltertagDraft {
         )
 
         $listProd.Items.Clear()
-        foreach ($itemProd in @($Items)) { [void]$listProd.Items.Add($itemProd) }
+        $itemsAtuais = @(
+            $Items | Where-Object {
+                (Get-ProdutoCodigoLocal $_) -notmatch '^P'
+            }
+        )
+        foreach ($itemProd in $itemsAtuais) { [void]$listProd.Items.Add($itemProd) }
         if ($listProd.Items.Count -gt 0) { $listProd.SelectedIndex = 0 }
         $scrollProd.Invalidate()
         $lblListaVazia.Visible = ($listProd.Items.Count -eq 0)
@@ -4087,11 +5827,11 @@ function Show-CadastroOsAltertagDraft {
         $isSelected = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -eq [System.Windows.Forms.DrawItemState]::Selected)
 
         $back = if ($isSelected) {
-            [System.Drawing.Color]::FromArgb(0, 88, 148)
+            [System.Drawing.Color]::FromArgb(82, 33, 150)
         } elseif (($e.Index % 2) -eq 0) {
-            [System.Drawing.Color]::FromArgb(9, 17, 28)
+            [System.Drawing.Color]::FromArgb(18, 16, 38)
         } else {
-            [System.Drawing.Color]::FromArgb(11, 22, 34)
+            [System.Drawing.Color]::FromArgb(17, 34, 51)
         }
 
         $brush = New-Object System.Drawing.SolidBrush($back)
@@ -4110,7 +5850,7 @@ function Show-CadastroOsAltertagDraft {
         $tagColor = if ($codigoItem -match '^P') {
             [System.Drawing.Color]::FromArgb(0, 200, 120)
         } elseif ($codigoItem -match '^A') {
-            [System.Drawing.Color]::FromArgb(100, 160, 255)
+            [System.Drawing.Color]::FromArgb(196, 181, 253)
         } elseif ($codigoItem -match '^T') {
             [System.Drawing.Color]::FromArgb(255, 190, 70)
         } else {
@@ -4151,11 +5891,11 @@ function Show-CadastroOsAltertagDraft {
         # Estoque: verde quando ha unidades, apagado quando zerado
         $temEstoque = ($qtdItem -and $qtdItem -notmatch '^[0.,\s-]*$')
         $qtyColor = if ($isSelected) {
-            [System.Drawing.Color]::FromArgb(220, 244, 255)
+            [System.Drawing.Color]::FromArgb(239, 233, 255)
         } elseif ($temEstoque) {
             [System.Drawing.Color]::FromArgb(90, 220, 150)
         } else {
-            [System.Drawing.Color]::FromArgb(60, 100, 130)
+            [System.Drawing.Color]::FromArgb(159, 150, 180)
         }
         $qtyFontStyle = if ($temEstoque) { [System.Drawing.FontStyle]::Bold } else { [System.Drawing.FontStyle]::Regular }
         $qtyRect = New-Object System.Drawing.Rectangle(($e.Bounds.Left + 464), ($e.Bounds.Top + 5), 88, 18)
@@ -4167,13 +5907,28 @@ function Show-CadastroOsAltertagDraft {
         )
 
         # Linha separadora
-        $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(16, 36, 54))
+        $linePen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(62, 52, 88))
         $e.Graphics.DrawLine($linePen, ($e.Bounds.Left + 4), ($e.Bounds.Bottom - 1), $e.Bounds.Right, ($e.Bounds.Bottom - 1))
         $linePen.Dispose()
     })
 
+    $cadastroFooterLine = New-Object System.Windows.Forms.Panel
+    $cadastroFooterLine.BackColor = [System.Drawing.Color]::FromArgb(35, 67, 91)
+    $cadastroFooterLine.Location = New-Object System.Drawing.Point(20, 542)
+    $cadastroFooterLine.Size = New-Object System.Drawing.Size(800, 1)
+    [void]$dlg.Controls.Add($cadastroFooterLine)
+
+    $cadastroFooterHint = New-Object System.Windows.Forms.Label
+    $cadastroFooterHint.Text = 'A confirmacao completa sera exibida antes do envio.'
+    $cadastroFooterHint.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $cadastroFooterHint.ForeColor = $osUiDim
+    $cadastroFooterHint.Location = New-Object System.Drawing.Point(198, 567)
+    $cadastroFooterHint.Size = New-Object System.Drawing.Size(360, 18)
+    $cadastroFooterHint.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    [void]$dlg.Controls.Add($cadastroFooterHint)
+
     $btnCriar = New-Object System.Windows.Forms.Button
-    $btnCriar.Text = 'Criar OS  >'
+    $btnCriar.Text = 'Criar OS'
     $btnCriar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9.5, [System.Drawing.FontStyle]::Bold)
     $btnCriar.ForeColor = [System.Drawing.Color]::White
     $btnCriar.BackColor = [System.Drawing.Color]::FromArgb(16, 130, 78)
@@ -4183,9 +5938,22 @@ function Show-CadastroOsAltertagDraft {
     $btnCriar.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(10, 100, 60)
     $btnCriar.Cursor = [System.Windows.Forms.Cursors]::Hand
     $btnCriar.Enabled = $false
-    $btnCriar.Location = New-Object System.Drawing.Point(620, 582)
-    $btnCriar.Size = New-Object System.Drawing.Size(200, 38)
+    $btnCriar.Tag = $servicosCadastroEstado
+    $btnCriar.Location = New-Object System.Drawing.Point(600, 554)
+    $btnCriar.Size = New-Object System.Drawing.Size(220, 42)
     $dlg.Controls.Add($btnCriar)
+    Set-RoundedControl -Control $btnCriar -Radius 6
+    $btnCriar.Add_EnabledChanged({
+        if ($this.Enabled) {
+            $this.BackColor = $osUiPrimary
+            $this.ForeColor = [System.Drawing.Color]::White
+        } else {
+            $this.BackColor = $osUiSurfaceRaised
+            $this.ForeColor = $osUiDim
+        }
+    })
+    $btnCriar.BackColor = $osUiSurfaceRaised
+    $btnCriar.ForeColor = $osUiDim
 
     $script:cadastroOsProdutoBuscaClient = $null
     $script:cadastroOsProdutoBuscaClients = @()
@@ -4215,7 +5983,7 @@ function Show-CadastroOsAltertagDraft {
                 $lblListaVazia.Text = 'A busca demorou demais'
                 $lblListaVazia.Visible = $true
                 $lblListaVazia.BringToFront()
-                $txtResumo.Text = "Falha na busca:`r`nO catalogo demorou demais para responder."
+                $txtResumo.Text = 'Falha na busca - o catalogo demorou demais para responder.'
                 $btnBuscaProd.Enabled = $true
                 $btnBuscaProd.Text = 'Buscar'
                 try { if ($script:cadastroOsProdutoBuscaClient) { $script:cadastroOsProdutoBuscaClient.Dispose() } } catch {}
@@ -4271,26 +6039,26 @@ function Show-CadastroOsAltertagDraft {
                     $lblListaVazia.Text = 'Nenhum produto encontrado'
                     $lblListaVazia.Visible = $true
                     $lblListaVazia.BringToFront()
-                    $txtResumo.Text = "Falha na busca:`r`n$(if ($errosBusca.Count -gt 0) { $errosBusca -join ' | ' } else { 'Nenhum produto encontrado.' })"
+                    $txtResumo.Text = "Falha na busca - $(if ($errosBusca.Count -gt 0) { $errosBusca -join ' | ' } else { 'Nenhum produto encontrado.' })"
                 }
             } elseif ($script:cadastroOsProdutoBuscaTask.IsFaulted) {
                 $erroBusca = $script:cadastroOsProdutoBuscaTask.Exception.GetBaseException().Message
                 $lblListaVazia.Text = 'Falha na busca. Tente novamente.'
                 $lblListaVazia.Visible = $true
                 $lblListaVazia.BringToFront()
-                $txtResumo.Text = "Falha na busca:`r`n$erroBusca"
+                $txtResumo.Text = "Falha na busca - $erroBusca"
             } elseif ($script:cadastroOsProdutoBuscaTask.IsCanceled) {
                 $lblListaVazia.Text = 'Busca cancelada por demora'
                 $lblListaVazia.Visible = $true
                 $lblListaVazia.BringToFront()
-                $txtResumo.Text = "Falha na busca:`r`nBusca cancelada por demora no catalogo."
+                $txtResumo.Text = 'Falha na busca - busca cancelada por demora no catalogo.'
             } else {
                 $resp = $script:cadastroOsProdutoBuscaTask.Result | ConvertFrom-Json
                 if ($resp.status -and [string]$resp.status -ne 'ok') {
                     $lblListaVazia.Text = 'Nenhum produto encontrado'
                     $lblListaVazia.Visible = $true
                     $lblListaVazia.BringToFront()
-                    $txtResumo.Text = "Falha na busca:`r`n$([string]$resp.mensagem)"
+                    $txtResumo.Text = "Falha na busca - $([string]$resp.mensagem)"
                 } else {
                     $items = @(Convert-ProdutoResponseToItems -Resp $resp)
                     Set-ProdutoItems -Items $items -Fonte ([string]$resp.fonte) -Mensagem ([string]$resp.mensagem)
@@ -4300,7 +6068,7 @@ function Show-CadastroOsAltertagDraft {
             $lblListaVazia.Text = 'Falha na busca. Tente novamente.'
             $lblListaVazia.Visible = $true
             $lblListaVazia.BringToFront()
-            $txtResumo.Text = "Falha na busca:`r`n$($_.Exception.Message)"
+            $txtResumo.Text = "Falha na busca - $($_.Exception.Message)"
         } finally {
             $btnBuscaProd.Enabled = $true
             $btnBuscaProd.Text = 'Buscar'
@@ -4328,7 +6096,7 @@ function Show-CadastroOsAltertagDraft {
         }
         $multiEmAndamento = (@($script:cadastroOsProdutoBuscaTasks | Where-Object { $_ -and -not $_.IsCompleted }).Count -gt 0)
         if (($script:cadastroOsProdutoBuscaTask -and -not $script:cadastroOsProdutoBuscaTask.IsCompleted) -or $multiEmAndamento) {
-            $txtResumo.Text = "Busca em andamento:`r`n$termo"
+            $txtResumo.Text = "Busca em andamento - $termo"
             return
         }
         $btnBuscaProd.Enabled = $false
@@ -4345,7 +6113,7 @@ function Show-CadastroOsAltertagDraft {
             }
             $termosServidor = @(Resolve-ProdutoBuscaTermosLocal -Termo $termo)
             $urlBuscaProd = '{0}/buscar-opcoes-altertag' -f (Get-ServidorBaseUrl)
-            $txtResumo.Text = "Buscando produtos no catalogo:`r`n$termo$(if ($termosServidor.Count -gt 1) { " -> $($termosServidor -join ', ')" } elseif ($termosServidor[0] -ne $termo) { " -> $($termosServidor[0])" } else { '' })"
+            $txtResumo.Text = "Buscando produtos no catalogo - $termo$(if ($termosServidor.Count -gt 1) { " -> $($termosServidor -join ', ')" } elseif ($termosServidor[0] -ne $termo) { " -> $($termosServidor[0])" } else { '' })"
             $script:cadastroOsProdutoBuscaInicio = Get-Date
             if ($termosServidor.Count -gt 1) {
                 $script:cadastroOsProdutoBuscaClients = @()
@@ -4372,7 +6140,7 @@ function Show-CadastroOsAltertagDraft {
             $lblListaVazia.Text = 'Falha na busca. Tente novamente.'
             $lblListaVazia.Visible = $true
             $lblListaVazia.BringToFront()
-            $txtResumo.Text = "Falha na busca:`r`n$($_.Exception.Message)"
+            $txtResumo.Text = "Falha na busca - $($_.Exception.Message)"
             $btnBuscaProd.Enabled = $true
             $btnBuscaProd.Text = 'Buscar'
             try { if ($script:cadastroOsProdutoBuscaClient) { $script:cadastroOsProdutoBuscaClient.Dispose() } } catch {}
@@ -4390,45 +6158,83 @@ function Show-CadastroOsAltertagDraft {
         }
     })
 
-    foreach ($chkSvc in $servChecks) {
-        $chkSvc.Add_CheckedChanged({
-            Update-ResumoOs -Produto $listProd.SelectedItem
-        })
-    }
+    $btnLer3uCadastro.Add_Click({
+        $btnLer3uCadastro.Enabled = $false
+        $btnLer3uCadastro.Text = 'Lendo...'
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            $device3u = Get-3uToolsDeviceInfo
+            $servicosCadastroEstado.DadosCelular = $device3u
+            $txtSerialOs.Text = [string]$device3u.Serial
+            $txtBuscaProd.Text = [string]$device3u.Modelo
+            $detalhes3u = @("IMEI: $([string]$device3u.Imei)")
+            if ($device3u.Armazenamento) { $detalhes3u += "Armazenamento: $([string]$device3u.Armazenamento)" }
+            if ($device3u.Bateria) { $detalhes3u += "Bateria: $([string]$device3u.Bateria)" }
+            if ([int]$device3u.Ciclos -gt 0) { $detalhes3u += "Ciclos: $([int]$device3u.Ciclos)" }
+            $linha3u = $detalhes3u -join ' | '
+            $obsAtual = $txtObsCadastro.Text.Trim()
+            if ($obsAtual -notmatch '(?i)\bIMEI\s*:') {
+                $txtObsCadastro.Text = if ($obsAtual) { "$obsAtual`r`n$linha3u" } else { $linha3u }
+            }
+            $txtResumo.Text = "3uTools: $([string]$device3u.Modelo) | $linha3u"
+            $btnBuscaProd.PerformClick()
+        } catch {
+            [System.Windows.Forms.MessageBox]::Show(
+                "Nao foi possivel ler o iPhone.`r`n`r`n$($_.Exception.Message)",
+                'Leitura do 3uTools', 'OK', 'Warning'
+            ) | Out-Null
+        } finally {
+            $btnLer3uCadastro.Enabled = $true
+            $btnLer3uCadastro.Text = 'Ler informacoes 3uTools'
+        }
+    })
 
     # $cmbTec e PSCustomObject — atualizacao do resumo feita no Add_Click de cada botao toggle
     $txtSerialOs.Add_TextChanged({ Update-ResumoOs -Produto $listProd.SelectedItem })
 
     $btnFecharDlg = New-Object System.Windows.Forms.Button
-    $btnFecharDlg.Text = 'Fechar'
+    $btnFecharDlg.Text = 'Cancelar'
     $btnFecharDlg.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $btnFecharDlg.ForeColor = [System.Drawing.Color]::FromArgb(200, 160, 165)
-    $btnFecharDlg.BackColor = [System.Drawing.Color]::FromArgb(14, 20, 30)
+    $btnFecharDlg.ForeColor = [System.Drawing.Color]::FromArgb(218, 176, 184)
+    $btnFecharDlg.BackColor = [System.Drawing.Color]::FromArgb(31, 22, 31)
     $btnFecharDlg.FlatStyle = 'Flat'
     $btnFecharDlg.FlatAppearance.BorderSize = 1
-    $btnFecharDlg.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(84, 36, 46)
-    $btnFecharDlg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(52, 18, 26)
+    $btnFecharDlg.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(112, 55, 69)
+    $btnFecharDlg.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(59, 28, 39)
     $btnFecharDlg.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(70, 22, 32)
     $btnFecharDlg.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnFecharDlg.Location = New-Object System.Drawing.Point(20, 582)
-    $btnFecharDlg.Size = New-Object System.Drawing.Size(150, 38)
+    $btnFecharDlg.Location = New-Object System.Drawing.Point(20, 554)
+    $btnFecharDlg.Size = New-Object System.Drawing.Size(160, 42)
     $btnFecharDlg.Add_Click({ $dlg.Close() })
     $dlg.Controls.Add($btnFecharDlg)
+    Set-RoundedControl -Control $btnFecharDlg -Radius 6
 
     $btnCriar.Add_Click({
         if (-not $listProd.SelectedItem) { return }
         $prodSel = $listProd.SelectedItem
         $codigoProdutoSel = Get-ProdutoCodigoLocal $prodSel
         if (-not (Test-ProdutoSelecionavel $prodSel)) {
-            [System.Windows.Forms.MessageBox]::Show('Selecione um produto com codigo Altertag (P/A/T) ou retornado com ID pela API antes de criar a OS.', 'Cadastrar OS', 'OK', 'Warning') | Out-Null
+            [System.Windows.Forms.MessageBox]::Show('Selecione um produto com codigo Altertag atual (A/T) ou retornado com ID pela API antes de criar a OS.', 'Cadastrar OS', 'OK', 'Warning') | Out-Null
             return
         }
         if (-not $txtSerialOs.Text.Trim()) {
             [System.Windows.Forms.MessageBox]::Show('Informe o serial antes de criar a OS.', 'Cadastrar OS', 'OK', 'Warning') | Out-Null
             return
         }
-        $servicosMarcados = @($servChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text })
+        $estadoServicosAtual = $this.Tag
+        $servicosMarcados = @()
+        $produtoDescricaoSel = [string]$prodSel.descricao
+        $tipoCadastroInferido = if ($estadoServicosAtual.DadosCelular -or (Test-CelularProduto -Descricao $produtoDescricaoSel)) {
+            'Celular'
+        } elseif ($produtoDescricaoSel -match '(?i)\b(Monitor|Display|Tela)\b') {
+            'Monitor'
+        } elseif (Test-DesktopProduto -Descricao $produtoDescricaoSel) {
+            'Desktop'
+        } else {
+            'Notebook'
+        }
         $qtdSel = Get-ProdutoQuantidadeOsDisplayLocal $prodSel
+        $observacaoCadastroFinal = New-CadastroOsObservacaoLocal -Observacao ($txtObsCadastro.Text.Trim()) -Tecnico ([string]$cmbTec.SelectedItem) -TipoEquipamento $tipoCadastroInferido
         $confirm = Show-CadastroOsConfirm `
             -Owner $dlg `
             -OsCodigo (Format-OsCodigo -Numero $script:osNumero) `
@@ -4436,8 +6242,9 @@ function Show-CadastroOsAltertagDraft {
             -Quantidade $(if ($qtdSel) { $qtdSel } else { '1,00' }) `
             -Serial ($txtSerialOs.Text.Trim()) `
             -Referencia ($btnGradeOs.Text.Trim()) `
-            -Servicos $(if ($servicosMarcados.Count -gt 0) { $servicosMarcados -join ', ' } else { 'nenhum' }) `
-            -Localizacao 'Bancada tecnica'
+            -Servicos 'nao utilizado' `
+            -Localizacao 'Bancada tecnica' `
+            -Observacao $observacaoCadastroFinal
         if (-not $confirm) { return }
 
         $btnCriar.Enabled = $false
@@ -4450,14 +6257,17 @@ function Show-CadastroOsAltertagDraft {
                 referencia = $btnGradeOs.Text.Trim()
                 idProduto = [int]$prodSel.idProduto
                 produtoCodigo = $codigoProdutoSel
-                produtoDescricao = [string]$prodSel.descricao
+                produtoDescricao = $produtoDescricaoSel
                 produtoValor = [string]$prodSel.valor
                 servicos = @($servicosMarcados)
+                tipoEquipamento = $tipoCadastroInferido
+                observacao = $observacaoCadastroFinal
             }
             $payload = $payloadObj | ConvertTo-Json -Depth 5 -Compress
             $resp = Invoke-RestMethod -Uri ('{0}/criar-os-altertag' -f (Get-ServidorBaseUrl)) -Method Post -Body $payload -ContentType 'application/json; charset=utf-8' -TimeoutSec 45 -ErrorAction Stop
             if ([string]$resp.status -ne 'ok') { throw [Exception]::new([string]$resp.mensagem) }
-            Set-OsNumeroAtual -Numero ([int]$resp.osNumero) -Fonte 'altertag'
+            $osCriadaNumero = [int]$resp.osNumero
+            $proximaOsNumero = if ($resp.proximoDisponivel) { [int]$resp.proximoDisponivel } else { $osCriadaNumero + 1 }
             $script:altertagOsAtual = [pscustomobject]@{
                 idOrdem = [int]$resp.idOrdem
                 numero = [int]$resp.osNumero
@@ -4465,23 +6275,70 @@ function Show-CadastroOsAltertagDraft {
                 cliente = [string]$resp.cliente
                 tecnico = [string]$resp.tecnico
                 statusOs = 'Em Aberto'
-                equipamento = ''
+                equipamento = Get-ModeloEtiquetaProduto -Descricao $produtoDescricaoSel -CodigoProduto $codigoProdutoSel
                 garantia = [string]$resp.garantia
                 referencia = [string]$resp.referencia
             }
             $script:incluirOSAtual = $true
-            Set-AppStatus -Texto "OS criada no Altertag: $($resp.osCodigo)" -Cor $cGreen
-            Show-CadastroOsResult `
+            $script:maiorOsVistaAltertag = [Math]::Max([int]$script:maiorOsVistaAltertag, $osCriadaNumero)
+            $script:ultimoAlertaOsNumero = [Math]::Max([int]$script:ultimoAlertaOsNumero, $osCriadaNumero)
+            $script:ultimoConfirmadoServidor = [Math]::Max([int]$script:ultimoConfirmadoServidor, $osCriadaNumero)
+            Set-OsNumeroAtual -Numero $proximaOsNumero -Fonte 'concorrencia'
+            Set-AppStatus -Texto "OS $($resp.osCodigo) criada | proxima disponivel: $(Format-OsCodigo -Numero $proximaOsNumero)" -Cor $cGreen
+            $acaoResultado = Show-CadastroOsResult `
                 -Owner $dlg `
                 -OsCodigo ([string]$resp.osCodigo) `
                 -ProdutoErro ([string]$resp.produtoErro) `
                 -ServicosErro ([string]$resp.servicosErro)
+            if ($acaoResultado -eq 'imprimir') {
+                $etiquetaCadastro = $null
+                if ($tipoCadastroInferido -eq 'Celular') {
+                    $dadosCelularCadastro = $estadoServicosAtual.DadosCelular
+                    $modeloCelularCadastro = if ($dadosCelularCadastro -and ([string]$dadosCelularCadastro.Modelo).Trim()) {
+                        ([string]$dadosCelularCadastro.Modelo).Trim()
+                    } else {
+                        Get-ModeloEtiquetaProduto -Descricao $produtoDescricaoSel -CodigoProduto $codigoProdutoSel
+                    }
+                    $etiquetaCadastro = [pscustomobject]@{
+                        tipoEquipamento = 'Celular'
+                        produtoCodigo = $codigoProdutoSel
+                        modelo = $modeloCelularCadastro
+                        serial = $txtSerialOs.Text.Trim()
+                        imei = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Imei } else { '' }
+                        bateria = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Bateria } else { '' }
+                        armazenamento = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Armazenamento } else { '' }
+                    }
+                } elseif ($tipoCadastroInferido -eq 'Desktop') {
+                    $etiquetaCadastro = [pscustomobject]@{
+                        tipoEquipamento = 'Desktop'
+                        produtoCodigo = $codigoProdutoSel
+                        modelo = Get-ModeloEtiquetaProduto -Descricao $produtoDescricaoSel -CodigoProduto $codigoProdutoSel
+                        serial = $txtSerialOs.Text.Trim()
+                        cpu = ''
+                        ram = ''
+                        armazenamento = ''
+                        gpu = ''
+                        bateria = ''
+                    }
+                }
+                $script:osImpressaoPendente = [pscustomobject]@{
+                    osNumero = $osCriadaNumero
+                    ordem = $script:altertagOsAtual
+                    etiqueta = $etiquetaCadastro
+                    observacao = $observacaoCadastroFinal
+                }
+            }
             $dlg.Close()
+            if ($acaoResultado -eq 'imprimir') {
+                [void]$form.BeginInvoke([System.Action]{
+                    if ($btnImprimir.Enabled) { $btnImprimir.PerformClick() }
+                })
+            }
         } catch {
             [System.Windows.Forms.MessageBox]::Show("Falha ao criar OS:`n$($_.Exception.Message)", 'Cadastrar OS', 'OK', 'Error') | Out-Null
         } finally {
             $btnCriar.Enabled = ($listProd.SelectedItem -and (Test-ProdutoSelecionavel $listProd.SelectedItem))
-            $btnCriar.Text = 'Criar OS  >'
+            $btnCriar.Text = 'Criar OS'
         }
     })
 
@@ -4499,19 +6356,183 @@ function Show-CadastroOsAltertagDraft {
         $script:cadastroOsProdutoBuscaInicio = $null
     })
 
+    # Composicao final: hierarquia compacta, superfícies consistentes e uma unica cor de acao.
+    $infoOsPanel.Location = New-Object System.Drawing.Point(664, 106)
+    $infoOsPanel.Size = New-Object System.Drawing.Size(232, 304)
+    $infoOsPanel.BackColor = $osUiSurface
+    $infoOsAccent.Visible = $false
+
+    $cardTec.Location = New-Object System.Drawing.Point(12, 12)
+    $cardTec.Size = New-Object System.Drawing.Size(208, 88)
+    $cardSerial.Location = New-Object System.Drawing.Point(12, 106)
+    $cardSerial.Size = New-Object System.Drawing.Size(208, 50)
+    $cardGrade.Location = New-Object System.Drawing.Point(12, 162)
+    $cardGrade.Size = New-Object System.Drawing.Size(208, 50)
+    $cardOs.Location = New-Object System.Drawing.Point(12, 218)
+    $cardOs.Size = New-Object System.Drawing.Size(208, 74)
+    foreach ($card in @($cardTec, $cardSerial, $cardGrade)) { $card.BackColor = $osUiSurfaceRaised }
+    foreach ($rail in @($cardTecBar, $cardSerialBar, $cardGradeBar)) { $rail.Visible = $false }
+    $cardOs.BackColor = [System.Drawing.Color]::FromArgb(10, 41, 34)
+    $cardOsBar.Size = New-Object System.Drawing.Size(3, 74)
+
+    $lblTecCaption.Location = New-Object System.Drawing.Point(12, 9)
+    $lblTecCaption.Size = New-Object System.Drawing.Size(184, 13)
+    $lblTecCaption.ForeColor = $osUiMuted
+    $lblTecnicoEscolhido.Location = New-Object System.Drawing.Point(12, 30)
+    $lblTecnicoEscolhido.Size = New-Object System.Drawing.Size(116, 30)
+    $btnTrocarTecnico.Location = New-Object System.Drawing.Point(134, 29)
+    $btnTrocarTecnico.Size = New-Object System.Drawing.Size(62, 30)
+    $btnTrocarTecnico.BackColor = $osUiSurface
+    $btnTrocarTecnico.ForeColor = $osUiText
+    $btnTrocarTecnico.FlatAppearance.BorderColor = $osUiBorder
+
+    $lblSerialCaption.Location = New-Object System.Drawing.Point(12, 7)
+    $lblSerialCaption.Size = New-Object System.Drawing.Size(184, 13)
+    $lblSerialCaption.ForeColor = $osUiMuted
+    $txtSerialOs.Location = New-Object System.Drawing.Point(12, 25)
+    $txtSerialOs.Size = New-Object System.Drawing.Size(184, 20)
+    $txtSerialOs.BackColor = $osUiSurfaceRaised
+
+    $lblGradeCaption.Location = New-Object System.Drawing.Point(12, 7)
+    $lblGradeCaption.Size = New-Object System.Drawing.Size(184, 13)
+    $lblGradeCaption.ForeColor = $osUiMuted
+    $btnGradeOs.Location = New-Object System.Drawing.Point(7, 21)
+    $btnGradeOs.Size = New-Object System.Drawing.Size(194, 27)
+
+    $lblOsCaption.Location = New-Object System.Drawing.Point(12, 10)
+    $lblOsCaption.Size = New-Object System.Drawing.Size(184, 13)
+    $lblOsTopoValor.Location = New-Object System.Drawing.Point(12, 31)
+    $lblOsTopoValor.Size = New-Object System.Drawing.Size(184, 30)
+
+    $buscaHeader.Location = New-Object System.Drawing.Point(24, 106)
+    $buscaHeader.Size = New-Object System.Drawing.Size(620, 30)
+    $buscaHeader.BackColor = $osUiBg
+    $buscaHeaderAccent.Visible = $false
+    $lblBusca.Location = New-Object System.Drawing.Point(0, 8)
+    $lblBusca.ForeColor = $osUiPrimaryHover
+    $lblBuscaHint.Location = New-Object System.Drawing.Point(86, 8)
+    $lblBuscaHint.Size = New-Object System.Drawing.Size(520, 14)
+
+    $buscaPanel.Location = New-Object System.Drawing.Point(24, 138)
+    $buscaPanel.Size = New-Object System.Drawing.Size(620, 48)
+    $buscaPanel.BackColor = $osUiSurfaceRaised
+    $lblLupa.Location = New-Object System.Drawing.Point(12, 11)
+    $lblLupa.ForeColor = $osUiPrimaryHover
+    $txtBuscaProd.Location = New-Object System.Drawing.Point(44, 14)
+    $txtBuscaProd.Size = New-Object System.Drawing.Size(422, 22)
+    $txtBuscaProd.BackColor = $osUiSurfaceRaised
+    $buscaDivider.Location = New-Object System.Drawing.Point(474, 9)
+    $btnBuscaProd.Location = New-Object System.Drawing.Point(480, 4)
+    $btnBuscaProd.Size = New-Object System.Drawing.Size(136, 40)
+    $btnBuscaProd.BackColor = $osUiPrimary
+    $btnBuscaProd.FlatAppearance.MouseOverBackColor = $osUiPrimaryHover
+    $btnBuscaProd.FlatAppearance.MouseDownBackColor = $osUiBorderStrong
+
+    $prodPanel.Location = New-Object System.Drawing.Point(24, 194)
+    $prodPanel.Size = New-Object System.Drawing.Size(620, 174)
+    $prodPanel.BackColor = $osUiSurface
+    $prodHead.Size = New-Object System.Drawing.Size(618, 30)
+    $prodHead.BackColor = $osUiSurfaceRaised
+    $prodHeadAccent.Visible = $false
+    foreach ($cabecalho in @($prodHead.Controls | Where-Object { $_ -is [System.Windows.Forms.Label] })) {
+        switch ([string]$cabecalho.Text) {
+            'CODIGO'  { $cabecalho.Location = New-Object System.Drawing.Point(12, 9);  $cabecalho.Size = New-Object System.Drawing.Size(88, 13) }
+            'PRODUTO' { $cabecalho.Location = New-Object System.Drawing.Point(116, 9); $cabecalho.Size = New-Object System.Drawing.Size(388, 13) }
+            'ESTOQUE' { $cabecalho.Location = New-Object System.Drawing.Point(538, 9); $cabecalho.Size = New-Object System.Drawing.Size(68, 13) }
+        }
+    }
+    $divisoresProduto = @($prodHead.Controls | Where-Object { $_ -is [System.Windows.Forms.Panel] -and $_ -ne $prodHeadAccent })
+    if ($divisoresProduto.Count -ge 2) {
+        $divisoresProduto[0].Location = New-Object System.Drawing.Point(104, 7)
+        $divisoresProduto[1].Location = New-Object System.Drawing.Point(522, 7)
+    }
+    $listProd.Location = New-Object System.Drawing.Point(1, 31)
+    $listProd.Size = New-Object System.Drawing.Size((616 + [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth + 2), 141)
+    $scrollProd.Location = New-Object System.Drawing.Point(608, 33)
+    $scrollProd.Size = New-Object System.Drawing.Size(8, 137)
+    $lblListaVazia.Location = New-Object System.Drawing.Point(1, 31)
+    $lblListaVazia.Size = New-Object System.Drawing.Size(616, 141)
+
+    $buscaStatus.Location = New-Object System.Drawing.Point(24, 376)
+    $buscaStatus.Size = New-Object System.Drawing.Size(620, 34)
+    $buscaStatus.BackColor = $osUiSurface
+    $buscaStatusDot.Location = New-Object System.Drawing.Point(14, 13)
+    $buscaStatusDot.BackColor = $osUiPrimary
+    $txtResumo.Location = New-Object System.Drawing.Point(32, 9)
+    $txtResumo.Size = New-Object System.Drawing.Size(574, 17)
+
+    $servHeader.Location = New-Object System.Drawing.Point(24, 428)
+    $servHeader.Size = New-Object System.Drawing.Size(872, 38)
+    $servHeader.BackColor = $osUiBg
+    $servHeaderAccent.Visible = $false
+    $lblServ.Location = New-Object System.Drawing.Point(0, 12)
+    $lblServ.Size = New-Object System.Drawing.Size(154, 14)
+    $lblServ.ForeColor = $osUiPrimaryHover
+    $lblServHint.Location = New-Object System.Drawing.Point(164, 12)
+    $lblServHint.Size = New-Object System.Drawing.Size(490, 14)
+    $btnLer3uCadastro.Location = New-Object System.Drawing.Point(674, 4)
+    $btnLer3uCadastro.Size = New-Object System.Drawing.Size(198, 30)
+    $btnLer3uCadastro.BackColor = $osUiSurfaceRaised
+    $btnLer3uCadastro.ForeColor = $osUiText
+    $btnLer3uCadastro.FlatAppearance.BorderSize = 1
+    $btnLer3uCadastro.FlatAppearance.BorderColor = $osUiBorder
+
+    $tipoPanel.Location = New-Object System.Drawing.Point(24, 468)
+    $tipoPanel.Size = New-Object System.Drawing.Size(872, 34)
+    $servPanel.Location = New-Object System.Drawing.Point(24, 506)
+    $servPanel.Size = New-Object System.Drawing.Size(872, 52)
+
+    $obsPanelCadastro.Location = New-Object System.Drawing.Point(24, 474)
+    $obsPanelCadastro.Size = New-Object System.Drawing.Size(872, 132)
+    $obsPanelCadastro.BackColor = $osUiSurface
+    $obsRailCadastro.Visible = $false
+    $lblObsCadastro.Location = New-Object System.Drawing.Point(14, 10)
+    $lblObsCadastro.ForeColor = $osUiMuted
+    $txtObsCadastro.Location = New-Object System.Drawing.Point(14, 30)
+    $txtObsCadastro.Size = New-Object System.Drawing.Size(844, 90)
+    $txtObsCadastro.BackColor = $osUiSurface
+
+    $cadastroFooterLine.Location = New-Object System.Drawing.Point(24, 622)
+    $cadastroFooterLine.Size = New-Object System.Drawing.Size(872, 1)
+    $cadastroFooterLine.BackColor = $osUiBorder
+    $cadastroFooterHint.Location = New-Object System.Drawing.Point(250, 646)
+    $cadastroFooterHint.Size = New-Object System.Drawing.Size(420, 18)
+    $btnFecharDlg.Location = New-Object System.Drawing.Point(24, 636)
+    $btnFecharDlg.Size = New-Object System.Drawing.Size(144, 42)
+    $btnFecharDlg.BackColor = $osUiSurface
+    $btnFecharDlg.ForeColor = $osUiText
+    $btnFecharDlg.FlatAppearance.BorderColor = $osUiBorder
+    $btnFecharDlg.FlatAppearance.MouseOverBackColor = $osUiSurfaceRaised
+    $btnFecharDlg.FlatAppearance.MouseDownBackColor = $osUiBorder
+    $btnCriar.Location = New-Object System.Drawing.Point(704, 636)
+    $btnCriar.Size = New-Object System.Drawing.Size(192, 42)
+    $btnCriar.FlatAppearance.MouseOverBackColor = $osUiPrimaryHover
+    $btnCriar.FlatAppearance.MouseDownBackColor = $osUiBorderStrong
+
+    $dlg.AcceptButton = $btnCriar
+    $dlg.CancelButton = $btnFecharDlg
+    $dlg.Add_KeyDown({ if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $dlg.Close() } })
+    $btnFecharCadastroTopo.BringToFront()
+
+    Set-CaijWindowsTypography -Root $dlg
     [void]$dlg.ShowDialog($form)
 }
 
-$btnOsAltertag.Add_Click({ Sync-OsFromAltertag })
-$btnCadastrarOs.Add_Click({ Show-CadastroOsAltertagDraft })
+$btnCadastrarOs.Add_Click({
+    $tecnicoCadastro = Show-TecnicoCadastroOs -Owner $form
+    if (-not [string]::IsNullOrWhiteSpace($tecnicoCadastro)) {
+        Show-CadastroOsAltertagDraft -TecnicoInicial $tecnicoCadastro
+    }
+})
 
 $btnTestes.Add_Click({
     try {
-        $scriptPathTeste = Join-Path (Split-Path -Parent $PSCommandPath) 'TestarNotebook.ps1'
-        if (Test-Path $scriptPathTeste) {
-            Start-Process powershell -ArgumentList ('-ExecutionPolicy Bypass -WindowStyle Hidden -File "' + $scriptPathTeste + '"')
+        $workspaceDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
+        $launcherTeste = Join-Path $workspaceDir 'TestarNotebook.vbs'
+        if (Test-Path $launcherTeste) {
+            Start-Process wscript.exe -ArgumentList ('//B //Nologo "' + $launcherTeste + '"') -WindowStyle Hidden
         } else {
-            [System.Windows.Forms.MessageBox]::Show("Arquivo de testes nao encontrado:`n$scriptPathTeste", 'Central de Testes', 'OK', 'Warning') | Out-Null
+            [System.Windows.Forms.MessageBox]::Show("Inicializador de testes nao encontrado:`n$launcherTeste", 'Central de Testes', 'OK', 'Warning') | Out-Null
         }
     } catch {
         [System.Windows.Forms.MessageBox]::Show("Falha ao abrir central de testes:`n$($_.Exception.Message)", 'Central de Testes', 'OK', 'Error') | Out-Null
@@ -4524,6 +6545,21 @@ $btnImprimir.Add_Click({
     $reusarPreviaManual = [bool]$script:reabrindoPreviaManual
     $script:reabrindoPreviaManual = $false
     $impressaoConcluida = $false
+    $printContext = [pscustomobject]@{
+        OsNumero = [int]$script:osNumero
+        Ordem = $script:altertagOsAtual
+        CriadaAgora = $false
+        Etiqueta = $null
+        Observacao = ''
+    }
+    if ($script:osImpressaoPendente -and [int]$script:osImpressaoPendente.osNumero -gt 0) {
+        $printContext.OsNumero = [int]$script:osImpressaoPendente.osNumero
+        $printContext.Ordem = $script:osImpressaoPendente.ordem
+        $printContext.CriadaAgora = $true
+        $printContext.Etiqueta = $script:osImpressaoPendente.etiqueta
+        $printContext.Observacao = [string]$script:osImpressaoPendente.observacao
+        $script:osImpressaoPendente = $null
+    }
     [System.Windows.Forms.Application]::DoEvents()
 
     # Prepara dados
@@ -4574,14 +6610,23 @@ $btnImprimir.Add_Click({
     if ($gpuCurta -match '(?i)\b(\d+(?:[.,]\d+)?)\s*GB\b') {
         $gpuVramSuf = ' ' + ($matches[1] -replace ',', '.') + 'GB'
     }
-    if ($gpuCurta -match '(?i)MX\s*450') { $gpuCurta = 'MX450 Dedicada' }
-    elseif ($gpuCurta -match '(?i)MX\s*350') { $gpuCurta = 'MX350 Dedicada' }
-    elseif ($gpuCurta -match '(?i)RTX\s*([0-9]{4})') { $gpuCurta = "RTX $($Matches[1]) Dedicada" }
-    elseif ($gpuCurta -match '(?i)GTX\s*([0-9]{3,4})') { $gpuCurta = "GTX $($Matches[1]) Dedicada" }
+    if ($gpuCurta -match '(?i)MX\s*450') { $gpuCurta = "MX450$gpuVramSuf Dedicada" }
+    elseif ($gpuCurta -match '(?i)MX\s*350') { $gpuCurta = "MX350$gpuVramSuf Dedicada" }
+    elseif ($gpuCurta -match '(?i)QUADRO\s+RTX\s*([0-9]{4})') { $gpuCurta = "Quadro RTX $($Matches[1])$gpuVramSuf Dedicada" }
+    elseif ($gpuCurta -match '(?i)RTX\s*([0-9]{4})') { $gpuCurta = "RTX $($Matches[1])$gpuVramSuf Dedicada" }
+    elseif ($gpuCurta -match '(?i)GTX\s*([0-9]{3,4})') { $gpuCurta = "GTX $($Matches[1])$gpuVramSuf Dedicada" }
     elseif ($gpuCurta -match '(?i)Iris\s*Xe') { $gpuCurta = 'Intel Iris Xe' }
     elseif ($gpuCurta -match '(?i)UHD') { $gpuCurta = 'Intel UHD' }
     elseif ($gpuCurta.Length -gt 28) { $gpuCurta = $gpuCurta.Substring(0, 28) }
     if ($gpuVramSuf -and $gpuCurta -notmatch '(?i)\bGB\b') { $gpuCurta += $gpuVramSuf }
+    function Format-GpuEtiquetaLocal {
+        param([string]$Gpu)
+        $gpuTexto = (([string]$Gpu -replace '\s+', ' ').Trim())
+        $gpuTexto = $gpuTexto -replace '(?i)^NVIDIA\s+', ''
+        $gpuTexto = $gpuTexto -replace '(?i)\s*\(\s*DEDICADA\s*\)\s*$', ' DED.'
+        $gpuTexto = $gpuTexto -replace '(?i)\s+DEDICADA\s*$', ' DED.'
+        return $gpuTexto.Trim()
+    }
     $script:IsGpuEtiquetaVisivel = {
         param([string]$Gpu)
         $g = if ($Gpu) { $Gpu.Trim() } else { '' }
@@ -4589,7 +6634,11 @@ $btnImprimir.Add_Click({
     }
     $script:IsBateriaEtiquetaVisivel = {
         param([string]$Bateria)
-        return ([bool]$info.MostrarBateria)
+        return (
+            [bool]$info.MostrarBateria -and
+            [string]$script:tipoEtiqueta -ne 'Desktop' -and
+            -not [string]::IsNullOrWhiteSpace($Bateria)
+        )
     }
 
     # ================================================
@@ -4597,10 +6646,19 @@ $btnImprimir.Add_Click({
     # ================================================
     $popup = New-Object System.Windows.Forms.Form
     $popup.Text            = 'Previa de Impressao'
+    $previewUiBg = [System.Drawing.Color]::FromArgb(7, 9, 17)
+    $previewUiSurface = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    $previewUiRaised = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $previewUiBorder = [System.Drawing.Color]::FromArgb(42, 46, 63)
+    $previewUiPrimary = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $previewUiPrimaryHover = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $previewUiText = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $previewUiMuted = [System.Drawing.Color]::FromArgb(166, 170, 184)
+
     $popup.AutoScaleMode   = [System.Windows.Forms.AutoScaleMode]::None
-    $popup.ClientSize      = New-Object System.Drawing.Size(920, 660)
+    $popup.ClientSize      = New-Object System.Drawing.Size(920, 628)
     $popup.StartPosition   = 'CenterScreen'
-    $popup.BackColor       = [System.Drawing.Color]::FromArgb(5, 11, 19)
+    $popup.BackColor       = $previewUiBg
     $popup.FormBorderStyle = 'None'
     $popup.MaximizeBox     = $false
     $popup.MinimizeBox     = $false
@@ -4612,7 +6670,7 @@ $btnImprimir.Add_Click({
     $popup.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
     $popup.Add_Paint({
         param($s, $e)
-        $border = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(31, 91, 126), 1)
+        $border = New-Object System.Drawing.Pen($previewUiBorder, 1)
         $e.Graphics.DrawRectangle($border, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
         $border.Dispose()
     })
@@ -4621,24 +6679,25 @@ $btnImprimir.Add_Click({
     $headerAccent.Location = New-Object System.Drawing.Point(0, 0)
     $headerAccent.Size = New-Object System.Drawing.Size(5, 72)
     $headerAccent.BackColor = $cAccent
+    $headerAccent.Visible = $false
     $popup.Controls.Add($headerAccent)
 
     $headerSurface = New-Object System.Windows.Forms.Panel
-    $headerSurface.Location = New-Object System.Drawing.Point(5, 0)
-    $headerSurface.Size = New-Object System.Drawing.Size(915, 72)
-    $headerSurface.BackColor = [System.Drawing.Color]::FromArgb(8, 20, 32)
+    $headerSurface.Location = New-Object System.Drawing.Point(0, 0)
+    $headerSurface.Size = New-Object System.Drawing.Size(920, 72)
+    $headerSurface.BackColor = $previewUiSurface
     $popup.Controls.Add($headerSurface)
     $headerSurface.Add_Paint({
         param($s, $e)
-        $line = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(24, 185, 255), 2)
-        $e.Graphics.DrawLine($line, 0, ($s.Height - 2), $s.Width, ($s.Height - 2))
+        $line = New-Object System.Drawing.Pen($previewUiBorder, 1)
+        $e.Graphics.DrawLine($line, 0, ($s.Height - 1), $s.Width, ($s.Height - 1))
         $line.Dispose()
     })
 
     $popEyebrow = New-Object System.Windows.Forms.Label
     $popEyebrow.Text = 'IMPRESSAO / ETIQUETA TERMICA'
     $popEyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
-    $popEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(79, 185, 231)
+    $popEyebrow.ForeColor = $previewUiPrimaryHover
     $popEyebrow.Location = New-Object System.Drawing.Point(19, 9)
     $popEyebrow.Size = New-Object System.Drawing.Size(260, 14)
     $headerSurface.Controls.Add($popEyebrow)
@@ -4646,7 +6705,7 @@ $btnImprimir.Add_Click({
     $popTitle = New-Object System.Windows.Forms.Label
     $popTitle.Text = 'Previa de impressao'
     $popTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
-    $popTitle.ForeColor = [System.Drawing.Color]::FromArgb(224, 244, 255)
+    $popTitle.ForeColor = $previewUiText
     $popTitle.Location = New-Object System.Drawing.Point(17, 25)
     $popTitle.Size = New-Object System.Drawing.Size(310, 28)
     $headerSurface.Controls.Add($popTitle)
@@ -4654,7 +6713,7 @@ $btnImprimir.Add_Click({
     $popSub = New-Object System.Windows.Forms.Label
     $popSub.Text = 'A imagem abaixo acompanha o layout enviado para a impressora'
     $popSub.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
-    $popSub.ForeColor = $cMuted
+    $popSub.ForeColor = $previewUiMuted
     $popSub.Location = New-Object System.Drawing.Point(20, 52)
     $popSub.Size = New-Object System.Drawing.Size(410, 15)
     $headerSurface.Controls.Add($popSub)
@@ -4662,7 +6721,7 @@ $btnImprimir.Add_Click({
     $popChip = New-Object System.Windows.Forms.Panel
     $popChip.Location = New-Object System.Drawing.Point(718, 21)
     $popChip.Size = New-Object System.Drawing.Size(142, 32)
-    $popChip.BackColor = [System.Drawing.Color]::FromArgb(7, 42, 54)
+    $popChip.BackColor = $previewUiRaised
     $popChip.BorderStyle = 'None'
     $headerSurface.Controls.Add($popChip)
     Set-RoundedControl -Control $popChip -Radius 8
@@ -4670,7 +6729,7 @@ $btnImprimir.Add_Click({
     $popChipText = New-Object System.Windows.Forms.Label
     $popChipText.Text = '80 x 50 mm'
     $popChipText.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
-    $popChipText.ForeColor = [System.Drawing.Color]::FromArgb(132, 231, 255)
+    $popChipText.ForeColor = $previewUiText
     $popChipText.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
     $popChipText.Location = New-Object System.Drawing.Point(0, 7)
     $popChipText.Size = New-Object System.Drawing.Size(142, 18)
@@ -4679,24 +6738,38 @@ $btnImprimir.Add_Click({
     $popClose = New-Object System.Windows.Forms.Button
     $popClose.Text = 'X'
     $popClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-    $popClose.ForeColor = [System.Drawing.Color]::FromArgb(124, 160, 188)
+    $popClose.ForeColor = $previewUiMuted
     $popClose.BackColor = $headerSurface.BackColor
     $popClose.FlatStyle = 'Flat'
     $popClose.FlatAppearance.BorderSize = 0
-    $popClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(68, 24, 34)
+    $popClose.FlatAppearance.MouseOverBackColor = $previewUiRaised
     $popClose.Location = New-Object System.Drawing.Point(878, 8)
     $popClose.Size = New-Object System.Drawing.Size(28, 28)
     $popClose.Cursor = [System.Windows.Forms.Cursors]::Hand
     $popClose.Add_Click({ $popup.DialogResult = 'Cancel'; $popup.Close() })
     $headerSurface.Controls.Add($popClose)
 
+    $previewDrag = [pscustomobject]@{ Ativo=$false; Origem=[System.Drawing.Point]::Empty }
+    $headerSurface.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $previewDrag.Ativo=$true; $previewDrag.Origem=$_.Location }
+    })
+    $headerSurface.Add_MouseMove({
+        if ($previewDrag.Ativo) { $popup.Location = New-Object System.Drawing.Point(($popup.Left + $_.X - $previewDrag.Origem.X), ($popup.Top + $_.Y - $previewDrag.Origem.Y)) }
+    })
+    $headerSurface.Add_MouseUp({ $previewDrag.Ativo=$false })
+
     $previewBack = New-Object System.Windows.Forms.Panel
     $previewBack.Location = New-Object System.Drawing.Point(20, 88)
     $previewBack.Size = New-Object System.Drawing.Size(592, 376)
-    $previewBack.BackColor = [System.Drawing.Color]::FromArgb(15, 27, 40)
+    $previewBack.BackColor = $previewUiSurface
     $previewBack.BorderStyle = 'None'
     $popup.Controls.Add($previewBack)
     Set-RoundedControl -Control $previewBack -Radius 8
+    $previewBack.Add_Paint({
+        $pen = New-Object System.Drawing.Pen($previewUiBorder, 1)
+        $_.Graphics.DrawRectangle($pen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $pen.Dispose()
+    })
 
     # Painel previa
     $prevPanel = New-Object System.Windows.Forms.Panel
@@ -4710,10 +6783,15 @@ $btnImprimir.Add_Click({
 
     $controlDeck = New-Object System.Windows.Forms.Panel
     $controlDeck.Location = New-Object System.Drawing.Point(628, 88)
-    $controlDeck.Size = New-Object System.Drawing.Size(272, 486)
-    $controlDeck.BackColor = [System.Drawing.Color]::FromArgb(8, 18, 29)
+    $controlDeck.Size = New-Object System.Drawing.Size(272, 340)
+    $controlDeck.BackColor = $previewUiSurface
     $popup.Controls.Add($controlDeck)
     Set-RoundedControl -Control $controlDeck -Radius 8
+    $controlDeck.Add_Paint({
+        $pen = New-Object System.Drawing.Pen($previewUiBorder, 1)
+        $_.Graphics.DrawRectangle($pen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $pen.Dispose()
+    })
     $controlDeck.SendToBack()
 
     if (-not $reusarPreviaManual) {
@@ -4729,12 +6807,38 @@ $btnImprimir.Add_Click({
         $script:ramEtiqueta    = $ramCurto
         $script:gpuEtiqueta    = $gpuCurta
         $script:bateriaEtiqueta = if ($info.MostrarBateria) { $info.BatSaude } else { $null }
+        $script:tipoEtiqueta = [string]$info.TipoEquipamento
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
         $script:modoManualEtiqueta = $false
         $script:rnaAtivo = $false
         $script:rnaItensOk = @()
         $script:gradeAnteriorRma = 'A'
         $script:pinturaOpcaoAtual = ''
     }
+    if ($printContext.CriadaAgora) {
+        $script:incluirOSAtual = $true
+        if (-not [string]::IsNullOrWhiteSpace($printContext.Observacao)) {
+            $script:obsAtual = $printContext.Observacao.Trim()
+        }
+        Apply-OsAltertagNaEtiqueta -Ordem $printContext.Ordem
+        Apply-CadastroOsEtiquetaNaImpressao -Etiqueta $printContext.Etiqueta
+        $referenciaCriada = if ($printContext.Ordem) { ([string]$printContext.Ordem.referencia).Trim().ToUpperInvariant() } else { '' }
+        foreach ($gradeOpcaoCriada in @(Get-CaijGradeOptions)) {
+            if ((Format-CaijGradeReference $gradeOpcaoCriada).ToUpperInvariant() -eq $referenciaCriada) {
+                $script:gradeAtual = $gradeOpcaoCriada
+                break
+            }
+        }
+    } elseif ($script:osDefinidaPorAltertag -and $script:altertagOsAtual) {
+        $script:incluirOSAtual = $true
+        Apply-OsAltertagNaEtiqueta -Ordem $script:altertagOsAtual
+    }
+
+    $altertagResumoPreview = Get-OsAltertagResumoPreview `
+        -OsNumero $printContext.OsNumero `
+        -OrdemFallback $printContext.Ordem
 
     $script:GetObsImpressao = {
         $baseObs = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
@@ -4752,10 +6856,10 @@ $btnImprimir.Add_Click({
         $prevPanel.Controls.Clear()
         $scaleX = $prevPanel.ClientSize.Width / 640.0
         $scaleY = $prevPanel.ClientSize.Height / 400.0
-        $f1 = New-Object System.Drawing.Font('Cascadia Mono', 5.8, [System.Drawing.FontStyle]::Bold)
-        $f2 = New-Object System.Drawing.Font('Cascadia Mono', 7.2, [System.Drawing.FontStyle]::Bold)
-        $f3 = New-Object System.Drawing.Font('Cascadia Mono', 9.4, [System.Drawing.FontStyle]::Bold)
-        $f4 = New-Object System.Drawing.Font('Cascadia Mono', 13.2, [System.Drawing.FontStyle]::Bold)
+        $f1 = New-Object System.Drawing.Font('Segoe UI', 5.8, [System.Drawing.FontStyle]::Bold)
+        $f2 = New-Object System.Drawing.Font('Segoe UI Semibold', 7.2, [System.Drawing.FontStyle]::Bold)
+        $f3 = New-Object System.Drawing.Font('Segoe UI Semibold', 9.4, [System.Drawing.FontStyle]::Bold)
+        $f4 = New-Object System.Drawing.Font('Segoe UI Semibold', 13.2, [System.Drawing.FontStyle]::Bold)
         $preto = [System.Drawing.Color]::Black
         $cinza = [System.Drawing.Color]::FromArgb(72, 72, 72)
         $gradeEfetiva = if ($script:rnaAtivo) { 'RMA' } elseif ($grade) { [string]$grade } else { '' }
@@ -4799,6 +6903,84 @@ $btnImprimir.Add_Click({
             B ($x2 - $thickness) $y1 $thickness ($y2 - $y1)
         }
 
+        function QrPreview($payload, $x, $y, $size) {
+            $qrPanel = New-Object System.Windows.Forms.Panel
+            $qrPanel.BackColor = [System.Drawing.Color]::White
+            $qrPanel.Location = New-Object System.Drawing.Point(
+                [int][math]::Round($x * $scaleX),
+                [int][math]::Round($y * $scaleY)
+            )
+            $qrPanel.Size = New-Object System.Drawing.Size(
+                [int][math]::Max(1, [math]::Round($size * $scaleX)),
+                [int][math]::Max(1, [math]::Round($size * $scaleY))
+            )
+            $qrPayloadLocal = [string]$payload
+            $qrPanel.Add_Paint({
+                param($sender, $e)
+                $modules = 41
+                $cell = [Math]::Max(1, [Math]::Floor([Math]::Min($sender.ClientSize.Width, $sender.ClientSize.Height) / $modules))
+                $drawSize = $cell * $modules
+                $offsetX = [Math]::Floor(($sender.ClientSize.Width - $drawSize) / 2)
+                $offsetY = [Math]::Floor(($sender.ClientSize.Height - $drawSize) / 2)
+                $seed = 0
+                foreach ($ch in $qrPayloadLocal.ToCharArray()) { $seed = (($seed * 31) + [int]$ch) -band 0x7fffffff }
+                $brush = [System.Drawing.Brushes]::Black
+                for ($row = 0; $row -lt $modules; $row++) {
+                    for ($col = 0; $col -lt $modules; $col++) {
+                        $finderRow = -1
+                        $finderCol = -1
+                        if ($row -lt 7 -and $col -lt 7) { $finderRow = $row; $finderCol = $col }
+                        elseif ($row -lt 7 -and $col -ge ($modules - 7)) { $finderRow = $row; $finderCol = $col - ($modules - 7) }
+                        elseif ($row -ge ($modules - 7) -and $col -lt 7) { $finderRow = $row - ($modules - 7); $finderCol = $col }
+
+                        $paintCell = if ($finderRow -ge 0) {
+                            ($finderRow -eq 0 -or $finderRow -eq 6 -or $finderCol -eq 0 -or $finderCol -eq 6 -or
+                             ($finderRow -ge 2 -and $finderRow -le 4 -and $finderCol -ge 2 -and $finderCol -le 4))
+                        } else {
+                            ((($row * 17) + ($col * 31) + $seed) % 7) -lt 3
+                        }
+                        if ($paintCell) {
+                            $e.Graphics.FillRectangle($brush, $offsetX + ($col * $cell), $offsetY + ($row * $cell), $cell, $cell)
+                        }
+                    }
+                }
+            }.GetNewClosure())
+            [void]$prevPanel.Controls.Add($qrPanel)
+        }
+
+        function BarcodePreview($payload, $x, $y, $width, $height) {
+            if ([string]::IsNullOrWhiteSpace([string]$payload)) { return }
+            $barcodePanel = New-Object System.Windows.Forms.Panel
+            $barcodePanel.BackColor = [System.Drawing.Color]::White
+            $barcodePanel.Location = New-Object System.Drawing.Point(
+                [int][math]::Round($x * $scaleX),
+                [int][math]::Round($y * $scaleY)
+            )
+            $barcodePanel.Size = New-Object System.Drawing.Size(
+                [int][math]::Max(1, [math]::Round($width * $scaleX)),
+                [int][math]::Max(1, [math]::Round($height * $scaleY))
+            )
+            $barcodePayloadLocal = ([string]$payload).ToUpperInvariant()
+            $barcodePanel.Add_Paint({
+                param($sender, $e)
+                $cursor = 1
+                $maxX = [Math]::Max(1, $sender.ClientSize.Width - 1)
+                foreach ($ch in $barcodePayloadLocal.ToCharArray()) {
+                    $value = [int]$ch
+                    for ($bit = 0; $bit -lt 7; $bit++) {
+                        $barWidth = 1 + (($value + ($bit * 3)) % 3)
+                        if (($bit % 2) -eq 0) {
+                            $e.Graphics.FillRectangle([System.Drawing.Brushes]::Black, $cursor, 0, $barWidth, $sender.ClientSize.Height)
+                        }
+                        $cursor += $barWidth + 1
+                        if ($cursor -ge $maxX) { break }
+                    }
+                    if ($cursor -ge $maxX) { break }
+                }
+            }.GetNewClosure())
+            [void]$prevPanel.Controls.Add($barcodePanel)
+        }
+
         function Wrap-TextLines {
             param(
                 [string]$Text,
@@ -4807,154 +6989,209 @@ $btnImprimir.Add_Click({
             )
             $clean = ([string]$Text -replace '\s+', ' ').Trim()
             if (-not $clean) { return @() }
-            $words = $clean -split '\s+'
             $lines = New-Object System.Collections.Generic.List[string]
-            $current = ''
-            foreach ($word in $words) {
-                $candidate = if ($current) { "$current $word" } else { $word }
-                if ($candidate.Length -le $MaxLen) {
-                    $current = $candidate
-                    continue
+            $remaining = $clean
+            while ($remaining -and $lines.Count -lt $MaxLines) {
+                if ($remaining.Length -le $MaxLen) {
+                    $lines.Add($remaining)
+                    $remaining = ''
+                    break
                 }
-                if ($current) {
-                    $lines.Add($current)
-                    $current = ''
-                    if ($lines.Count -ge $MaxLines) { break }
-                }
-                if ($word.Length -le $MaxLen) {
-                    $current = $word
-                } else {
-                    $remaining = $word
-                    while ($remaining.Length -gt $MaxLen -and $lines.Count -lt $MaxLines) {
-                        $lines.Add($remaining.Substring(0, $MaxLen))
-                        $remaining = $remaining.Substring($MaxLen)
-                    }
-                    $current = $remaining
-                }
-                if ($lines.Count -ge $MaxLines) { break }
+                $breakAt = $remaining.LastIndexOf(' ', [Math]::Min($MaxLen, ($remaining.Length - 1)))
+                if ($breakAt -lt [Math]::Floor($MaxLen * 0.55)) { $breakAt = $MaxLen }
+                $lines.Add($remaining.Substring(0, $breakAt).Trim())
+                $remaining = $remaining.Substring($breakAt).Trim()
             }
-            if ($current -and $lines.Count -lt $MaxLines) { $lines.Add($current) }
-            if ($lines.Count -gt $MaxLines) { $lines = @($lines[0..($MaxLines - 1)]) }
-            if ($lines.Count -eq $MaxLines -and $current.Length -gt 0) {
+            if ($remaining -and $lines.Count -gt 0) {
                 $last = $lines[$MaxLines - 1]
-                if ($last.Length -gt $MaxLen) {
-                    $cutLen = [math]::Min($last.Length, [math]::Max(0, $MaxLen - 3))
-                    $lines[$MaxLines - 1] = $last.Substring(0, $cutLen) + '...'
-                }
+                $cutLen = [math]::Min($last.Length, [math]::Max(0, $MaxLen - 3))
+                $lines[$MaxLines - 1] = $last.Substring(0, $cutLen).TrimEnd() + '...'
             }
             return @($lines)
         }
 
-        # Replica o canvas TSPL 640x400 usado pela impressora 80x50mm.
-        BoxPreview 2 4 638 398 2
+        function Format-ObservacaoPreview($text) {
+            $clean = ([string]$text).Trim()
+            if (-not $clean) { return '' }
+            $clean = $clean -replace '^\s*\d{2}/\d{2}/\d{2,4}\s*-\s*\d{1,2}:\d{2}(?:\s*-\s*[^:\r\n]{1,60})?\s*:\s*', ''
+            return $clean.Trim()
+        }
+
+        # Canvas TSPL exato de 640x400 para etiqueta 80x50mm a 203 dpi.
+        # Uma unica moldura com margem segura evita o efeito de borda duplicada.
+        BoxPreview 10 10 630 390 2
 
         $modeloTxt = ([string]$script:modeloEtiqueta -replace '\s+', ' ').Trim()
-        if ($modeloTxt.Length -le 16) {
-            $modeloTop = $modeloTxt
-            $modeloFont = $f4
-            $modeloY = 22
-        } elseif ($modeloTxt.Length -le 25) {
+        $modeloTxt = $modeloTxt -replace '(?i)^\s*T\d{3}(?:-+)?\s*(?:[-:|]\s*)?(?=(?:CPU|DESKTOP|MINI\s+DESKTOP|COMPUTADOR\s+DESKTOP)\b)', ''
+        $modeloTxt = $modeloTxt -replace '(?i)^\s*(NOTEBOOK|LAPTOP|COMPUTADOR|CPU)\s+', ''
+        $modeloTxt = $modeloTxt -replace '(?i)\bGEN(?:ERACAO)?\s*(\d+)\b', 'G$1'
+        if ($modeloTxt.Length -le 24) {
             $modeloTop = $modeloTxt
             $modeloFont = $f3
-            $modeloY = 29
+            $modeloY = 36
         } else {
-            $modeloTop = if ($modeloTxt.Length -gt 42) { $modeloTxt.Substring(0, 42) } else { $modeloTxt }
+            $modeloTop = if ($modeloTxt.Length -gt 32) { $modeloTxt.Substring(0, 32) } else { $modeloTxt }
             $modeloFont = $f2
-            $modeloY = 29
+            $modeloY = 36
         }
-        BoxPreview 10 14 430 74 2
-        L $modeloTop 24 $modeloY 394 38 $modeloFont $preto
+        L 'EQUIPAMENTO' 22 16 150 20 $f2 $preto
+        L $modeloTop 22 $modeloY 410 34 $modeloFont $preto
 
         $gradeTxt = ''
         if ($gradeEfetiva) {
             $gradeTxt = if ($gradeEfetiva -eq 'RMA') {
-                'RMA'
+                'GRADE RMA'
             } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') {
-                "GRADE C - PINTURA $($matches[1])"
+                "C - PINTURA $($matches[1])"
             } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') {
                 'T - TRIAGEM'
             } else {
-                [string]$gradeEfetiva
+                "GRADE $([string]$gradeEfetiva)"
             }
-            if ($gradeTxt.Length -gt 22) { $gradeTxt = $gradeTxt.Substring(0, 22) }
-            BoxPreview 442 14 630 74 3
-            if ($gradeTxt -match '^GRADE C') {
-                L $gradeTxt 452 27 166 24 $f1 $preto
-            } elseif ($gradeTxt.Length -le 3) {
-                L $gradeTxt 508 23 92 38 $f4 $preto
-            } else {
-                L $gradeTxt 472 27 146 28 $f2 $preto
-            }
+            if ($gradeTxt.Length -gt 13) { $gradeTxt = $gradeTxt.Substring(0, 13) }
         }
+        if ($gradeTxt) {
+            $gradePreviewFont = if ($gradeTxt.Length -le 9) { $f2 } else { $f1 }
+            BoxPreview 452 20 618 70 2
+            L $gradeTxt 464 34 142 24 $gradePreviewFont $preto
+        }
+
+        B 10 82 620 2
 
         $serialTop = ([string]$script:serialEtiqueta -replace '\s+', '').Trim()
         $serialBar = ($serialTop -replace '[^A-Za-z0-9]', '').ToUpper()
+        $serialPreviewFont = if ($serialTop.Length -le 22) { $f3 } else { $f2 }
         if ($incluirOS) {
-            if ($serialTop.Length -gt 15) { $serialTop = $serialTop.Substring(0, 15) }
-            BoxPreview 10 84 410 154 3
-            L $serialTop 28 89 368 34 $f4 $preto
-            if ($serialBar.Length -ge 4) {
-                $cx = 28
-                $bk = $true
-                foreach ($pw in @(3,2,1,2,4,1,2,3,1,2,4,2,1,3,2,1,4,2,1,3,1,2,4,1,2,3,1,2,1,3,2,1)) {
-                    if ($bk) { B $cx 128 $pw 18 }
-                    $cx += $pw
-                    $bk = -not $bk
-                }
-            }
-            BoxPreview 430 84 630 154 3
-            L (Format-OsCodigo -Numero $script:osNumero) 454 98 162 38 $f4 $preto
-        } else {
             if ($serialTop.Length -gt 22) { $serialTop = $serialTop.Substring(0, 22) }
-            BoxPreview 10 84 630 154 3
-            L $serialTop 28 89 580 34 $f4 $preto
-            if ($serialBar.Length -ge 4) {
-                $cx = 28
-                $bk = $true
-                foreach ($pw in @(3,2,1,2,4,1,2,3,1,2,4,2,1,3,2,1,4,2,1,3,1,2,4,1,2,3,1,2,1,3,2,1)) {
-                    if ($bk) { B $cx 128 $pw 18 }
-                    $cx += $pw
-                    $bk = -not $bk
+            L 'SERIAL' 22 86 80 20 $f2 $preto
+            L $serialTop 22 108 392 24 $serialPreviewFont $preto
+            if ($serialBar.Length -ge 4) { BarcodePreview $serialBar 22 136 300 16 }
+            B 430 82 2 76
+            L 'ORDEM DE SERV.' 446 86 170 20 $f2 $preto
+            L (Format-OsCodigo -Numero $printContext.OsNumero) 446 112 166 34 $f4 $preto
+        } else {
+            if ($serialTop.Length -gt 28) { $serialTop = $serialTop.Substring(0, 28) }
+            L 'SERIAL' 22 86 80 20 $f2 $preto
+            L $serialTop 22 108 590 24 $serialPreviewFont $preto
+            if ($serialBar.Length -ge 4) { BarcodePreview $serialBar 22 136 420 16 }
+        }
+        B 10 158 620 2
+
+        $isMonitorEtiqueta = ([string]$script:tipoEtiqueta -eq 'Monitor')
+        $isCelularEtiqueta = ([string]$script:tipoEtiqueta -eq 'Celular')
+        $isDesktopEtiqueta = ([string]$script:tipoEtiqueta -eq 'Desktop')
+        $obsLines = @()
+        if (-not [string]::IsNullOrWhiteSpace([string]$obs)) {
+            $obsPreview = Format-ObservacaoPreview $obs
+            $obsLines = Wrap-TextLines -Text $obsPreview -MaxLen 69 -MaxLines 3
+        }
+        $temObservacaoEtiqueta = ($obsLines.Count -gt 0)
+        $alturaDivisoriaInferior = if ($temObservacaoEtiqueta) { 172 } else { 232 }
+        B 318 158 2 $alturaDivisoriaInferior
+        B 10 194 308 1
+        $tituloEspecificacoes = if ($isMonitorEtiqueta) {
+            'MONITOR'
+        } elseif ($isCelularEtiqueta) {
+            'CELULAR'
+        } elseif ($isDesktopEtiqueta) {
+            'DESKTOP'
+        } else {
+            'CONFIGURACAO'
+        }
+        L $tituloEspecificacoes 22 173 270 20 $f2 $preto
+
+        $bateriaCelularPreview = 'N/A'
+        if ($isCelularEtiqueta -and [string]$script:bateriaEtiqueta -match '(\d{1,3})') {
+            $bateriaCelularPreview = "$([math]::Min(100, [math]::Max(0, [int]$matches[1])))%"
+        }
+        $desktopSpecRows = @()
+        if ($isDesktopEtiqueta) {
+            foreach ($desktopSpec in @(
+                @('CPU', [string]$script:cpuEtiqueta),
+                @('RAM', [string]$script:ramEtiqueta),
+                @('DISCO', [string]$script:memEtiqueta),
+                @('GPU', [string]$script:gpuEtiqueta)
+            )) {
+                $desktopValue = ([string]$desktopSpec[1]).Trim()
+                if ($desktopValue -and $desktopValue -notmatch '^(?i:N/?A)$') {
+                    $desktopSpecRows += ,$desktopSpec
                 }
             }
         }
-
-        BoxPreview 10 166 630 384 2
-        B 318 166 2 218
-        B 10 194 620 2
-        L 'CONFIGURACAO' 22 173 270 20 $f2 $preto
-        L 'OBSERVACOES' 334 173 270 20 $f2 $preto
-
-        $specRows = @(
-            @('CPU', [string]$script:cpuEtiqueta),
-            @('RAM', [string]$script:ramEtiqueta),
-            @('DISCO', [string]$script:memEtiqueta),
-            @('GPU', $(if (& $script:IsGpuEtiquetaVisivel $script:gpuEtiqueta) { [string]$script:gpuEtiqueta } else { 'N/A' })),
-            @('BAT', $(if (& $script:IsBateriaEtiquetaVisivel $script:bateriaEtiqueta) { [string]$script:bateriaEtiqueta } else { 'N/A' }))
-        )
-        $specY = 204
+        $specRows = if ($isMonitorEtiqueta) {
+            @(
+                @('TAMANHO', [string]$script:monitorTamanhoEtiqueta),
+                @('ENTRADAS', [string]$script:monitorEntradasEtiqueta)
+            )
+        } elseif ($isCelularEtiqueta) {
+            @(
+                @('IMEI', [string]$script:celularImeiEtiqueta),
+                @('ARMAZ.', [string]$script:memEtiqueta),
+                @('BATERIA', $bateriaCelularPreview)
+            )
+        } elseif ($isDesktopEtiqueta) {
+            @($desktopSpecRows)
+        } else {
+            @(
+                @('CPU', [string]$script:cpuEtiqueta),
+                @('RAM', [string]$script:ramEtiqueta),
+                @('DISCO', [string]$script:memEtiqueta),
+                @('GPU', $(if (& $script:IsGpuEtiquetaVisivel $script:gpuEtiqueta) { [string]$script:gpuEtiqueta } else { 'N/A' })),
+                @('BAT', $(if (& $script:IsBateriaEtiquetaVisivel $script:bateriaEtiqueta) { [string]$script:bateriaEtiqueta } else { 'N/A' }))
+            )
+        }
+        $isEtiquetaCompacta = ($isMonitorEtiqueta -or $isCelularEtiqueta)
+        $specY = if ($isEtiquetaCompacta) { 206 } else { 200 }
+        $specStep = if ($isEtiquetaCompacta) { 44 } else { 28 }
         foreach ($row in $specRows) {
+            $specLabel = [string]$row[0]
             $specValue = ([string]$row[1] -replace '\s+', ' ').Trim()
-            if ($specValue.Length -gt 16) { $specValue = $specValue.Substring(0, 16) }
-            L ([string]$row[0]) 22 $specY 48 16 $f1 $preto
-            L $specValue 76 ($specY - 4) 222 24 $f2 $preto
-            if ($specY -lt 332) { B 20 ($specY + 22) 282 1 }
-            $specY += 32
+            if ($specLabel -eq 'GPU' -and $specValue -match '(?i)AMD\s+Radeon\s+Graphics.*Integr') {
+                $specValue = 'AMD Radeon Int.'
+            } elseif ($specLabel -eq 'GPU') {
+                $specValue = Format-GpuEtiquetaLocal $specValue
+            }
+            $specMaxLen = if ($specLabel -eq 'GPU') { 27 } elseif ($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') { 25 } else { 18 }
+            if ($specValue.Length -gt $specMaxLen) { $specValue = $specValue.Substring(0, $specMaxLen) }
+            $labelX = 22
+            $labelWidth = if ($isEtiquetaCompacta) { 50 } else { 48 }
+            $valueX = if ($isCelularEtiqueta -and $specLabel -eq 'BATERIA') { 94 } else { 76 }
+            $specFont = if (($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') -or ($specLabel -eq 'GPU' -and $specValue.Length -gt 18)) {
+                $f1
+            } else {
+                $f2
+            }
+            $specValueY = if ($specFont -eq $f1) { $specY } else { $specY - 4 }
+            L $specLabel $labelX $specY $labelWidth 16 $f1 $preto
+            $valueRight = 298
+            L $specValue $valueX $specValueY ($valueRight - $valueX) 24 $specFont $preto
+            if (-not $isMonitorEtiqueta -or $specLabel -ne 'ENTRADAS') {
+                B 20 ($specY + 25) 282 1
+            }
+            $specY += $specStep
         }
 
-        $obsLines = @()
-        if ($obs -and $obs.Trim()) {
-            $obsLines = Wrap-TextLines -Text $obs.Trim() -MaxLen 19 -MaxLines 5
-        }
-        $obsY = 204
-        foreach ($line in $obsLines) {
-            L $line 336 $obsY 280 28 $f3 $preto
-            $obsY += 30
+        $qrPreviewPayload = 'http://192.168.15.127:9100/f/0000000000'
+        if ($temObservacaoEtiqueta) {
+            QrPreview $qrPreviewPayload 398 172 150
+        } else {
+            QrPreview $qrPreviewPayload 374 174 198
         }
 
-        $diasSemana = @('DOM','SEG','TER','QUA','QUI','SEX','SAB')
-        $dataCurta = "$($diasSemana[[int](Get-Date).DayOfWeek]) $(Get-Date -Format 'dd/MM HH:mm')"
-        L $dataCurta 438 354 178 23 $f2 $cinza
+        if ($obsLines.Count -gt 0) {
+            B 20 330 590 1
+            L 'OBS' 22 334 40 20 $f2 $preto
+            $obsY = 334
+            foreach ($line in $obsLines) {
+                L $line 66 $obsY 540 16 $f1 $preto
+                $obsY += 16
+            }
+        }
+
+        if ($obsLines.Count -eq 0) {
+            $dataCurta = Get-Date -Format 'dd/MM/yy'
+            L $dataCurta 244 368 62 14 $f1 $cinza
+        }
 
         $prevPanel.Refresh()
     }
@@ -4965,20 +7202,21 @@ $btnImprimir.Add_Click({
     $gradeAccentBar.BackColor = $cAccent
     $gradeAccentBar.Location  = New-Object System.Drawing.Point(644, 102)
     $gradeAccentBar.Size      = New-Object System.Drawing.Size(3, 18)
+    $gradeAccentBar.Visible   = $false
     $popup.Controls.Add($gradeAccentBar)
 
     $gradeLabel = New-Object System.Windows.Forms.Label
     $gradeLabel.Text = 'CLASSIFICACAO'
     $gradeLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
-    $gradeLabel.ForeColor = $cAccent
+    $gradeLabel.ForeColor = $previewUiMuted
     $gradeLabel.Location = New-Object System.Drawing.Point(656, 101)
     $gradeLabel.Size = New-Object System.Drawing.Size(126, 20)
     $popup.Controls.Add($gradeLabel)
-    $gradeHairline = New-SectionHairline -Parent $popup -X 788 -Y 111 -W 96
+    $gradeHairline = New-SectionHairline -Parent $popup -X 788 -Y 111 -W 96 -Cor $previewUiBorder
 
-    $gradeIdleColor = [System.Drawing.Color]::FromArgb(13, 26, 40)
-    $gradeHoverColor = [System.Drawing.Color]::FromArgb(23, 42, 60)
-    $gradeDownColor = [System.Drawing.Color]::FromArgb(18, 34, 52)
+    $gradeIdleColor = [System.Drawing.Color]::FromArgb(29, 49, 64)
+    $gradeHoverColor = [System.Drawing.Color]::FromArgb(39, 65, 82)
+    $gradeDownColor = [System.Drawing.Color]::FromArgb(24, 44, 58)
     $coresGrade = @{
         'A' = [System.Drawing.Color]::FromArgb(18, 160, 92)
         'B' = [System.Drawing.Color]::FromArgb(214, 154, 36)
@@ -4992,9 +7230,9 @@ $btnImprimir.Add_Click({
     $coresGradeBorda = @{}
     foreach ($kG in @($coresGrade.Keys)) {
         $cG = $coresGrade[$kG]
-        $coresGradeIdle[$kG]  = [System.Drawing.Color]::FromArgb(([int]($cG.R * 0.13) + 8), ([int]($cG.G * 0.13) + 14), ([int]($cG.B * 0.13) + 22))
-        $coresGradeTexto[$kG] = [System.Drawing.Color]::FromArgb([Math]::Min($cG.R + 120, 255), [Math]::Min($cG.G + 110, 255), [Math]::Min($cG.B + 110, 255))
-        $coresGradeBorda[$kG] = [System.Drawing.Color]::FromArgb([int]($cG.R * 0.55), [int]($cG.G * 0.55), [int]($cG.B * 0.55))
+        $coresGradeIdle[$kG]  = [System.Drawing.Color]::FromArgb(([int]($cG.R * 0.18) + 22), ([int]($cG.G * 0.18) + 30), ([int]($cG.B * 0.18) + 38))
+        $coresGradeTexto[$kG] = [System.Drawing.Color]::FromArgb([Math]::Min($cG.R + 135, 255), [Math]::Min($cG.G + 125, 255), [Math]::Min($cG.B + 125, 255))
+        $coresGradeBorda[$kG] = [System.Drawing.Color]::FromArgb([Math]::Min([int]($cG.R * 0.7) + 24, 255), [Math]::Min([int]($cG.G * 0.7) + 24, 255), [Math]::Min([int]($cG.B * 0.7) + 24, 255))
     }
     $gradesInfo = @(
         @{L='A'; D='Perfeito'},
@@ -5010,35 +7248,110 @@ $btnImprimir.Add_Click({
 
         $pForm = New-Object System.Windows.Forms.Form
         $pForm.Text = 'Grade C - Pintura'
-        $pForm.Size = New-Object System.Drawing.Size(400, 330)
+        $pForm.ClientSize = New-Object System.Drawing.Size(400, 348)
         $pForm.StartPosition = 'CenterParent'
-        $pForm.BackColor = [System.Drawing.Color]::FromArgb(7, 15, 24)
-        $pForm.FormBorderStyle = 'FixedDialog'
+        $pForm.BackColor = [System.Drawing.Color]::FromArgb(7, 9, 17)
+        $pForm.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+        $pForm.FormBorderStyle = 'None'
         $pForm.MaximizeBox = $false
         $pForm.MinimizeBox = $false
+        $pForm.ShowInTaskbar = $false
+        Set-DoubleBuffered $pForm
+        Set-RoundedControl -Control $pForm -Radius 12
+        $pForm.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+        $pForm.Add_Paint({
+            param($s, $e)
+            $bordaPintura = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+            $e.Graphics.DrawRectangle($bordaPintura, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
+            $bordaPintura.Dispose()
+        })
+
+        $pHeader = New-Object System.Windows.Forms.Panel
+        $pHeader.Location = New-Object System.Drawing.Point(0, 0)
+        $pHeader.Size = New-Object System.Drawing.Size(400, 64)
+        $pHeader.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
+        $pHeader.Add_Paint({
+            param($s, $e)
+            $linhaHeader = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+            $e.Graphics.DrawLine($linhaHeader, 0, ($s.Height - 1), $s.Width, ($s.Height - 1))
+            $linhaHeader.Dispose()
+        })
+        [void]$pForm.Controls.Add($pHeader)
+
+        $pEyebrow = New-Object System.Windows.Forms.Label
+        $pEyebrow.Text = 'ETIQUETA / CLASSIFICACAO'
+        $pEyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+        $pEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+        $pEyebrow.Location = New-Object System.Drawing.Point(20, 9)
+        $pEyebrow.Size = New-Object System.Drawing.Size(260, 14)
+        [void]$pHeader.Controls.Add($pEyebrow)
+
+        $pHeaderTitle = New-Object System.Windows.Forms.Label
+        $pHeaderTitle.Text = 'Grade C - Pintura'
+        $pHeaderTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14, [System.Drawing.FontStyle]::Bold)
+        $pHeaderTitle.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+        $pHeaderTitle.Location = New-Object System.Drawing.Point(18, 27)
+        $pHeaderTitle.Size = New-Object System.Drawing.Size(280, 28)
+        [void]$pHeader.Controls.Add($pHeaderTitle)
+
+        $pClose = New-Object System.Windows.Forms.Button
+        $pClose.Text = 'X'
+        $pClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+        $pClose.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+        $pClose.BackColor = $pHeader.BackColor
+        $pClose.FlatStyle = 'Flat'
+        $pClose.FlatAppearance.BorderSize = 0
+        $pClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+        $pClose.Location = New-Object System.Drawing.Point(364, 8)
+        $pClose.Size = New-Object System.Drawing.Size(28, 28)
+        $pClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $pClose.Add_Click({
+            $script:pinturaSelecionadaTemp = $null
+            $pForm.Tag = 'Cancel'
+            $pForm.Close()
+        })
+        [void]$pHeader.Controls.Add($pClose)
+
+        $pDrag = @{ Active = $false; Mouse = [System.Drawing.Point]::Empty; Form = [System.Drawing.Point]::Empty }
+        $pHeader.Add_MouseDown({
+            if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+                $pDrag.Active = $true
+                $pDrag.Mouse = [System.Windows.Forms.Cursor]::Position
+                $pDrag.Form = $pForm.Location
+            }
+        })
+        $pHeader.Add_MouseMove({
+            if ($pDrag.Active) {
+                $agora = [System.Windows.Forms.Cursor]::Position
+                $pForm.Location = New-Object System.Drawing.Point(
+                    ($pDrag.Form.X + $agora.X - $pDrag.Mouse.X),
+                    ($pDrag.Form.Y + $agora.Y - $pDrag.Mouse.Y)
+                )
+            }
+        })
+        $pHeader.Add_MouseUp({ $pDrag.Active = $false })
 
         # Header: barra de destaque + titulo + hairline
         $pAccent = New-Object System.Windows.Forms.Panel
         $pAccent.BackColor = $corPintura
-        $pAccent.Location  = New-Object System.Drawing.Point(20, 18)
-        $pAccent.Size      = New-Object System.Drawing.Size(3, 22)
+        $pAccent.Location  = New-Object System.Drawing.Point(20, 80)
+        $pAccent.Size      = New-Object System.Drawing.Size(2, 16)
         $pForm.Controls.Add($pAccent)
 
         $pTitle = New-Object System.Windows.Forms.Label
-        $pTitle.Text = 'GRADE C - PINTURA'
-        $pTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 11, [System.Drawing.FontStyle]::Bold)
-        $pTitle.ForeColor = [System.Drawing.Color]::FromArgb(255, 180, 92)
-        $pTitle.Location = New-Object System.Drawing.Point(30, 16)
-        $pTitle.Size = New-Object System.Drawing.Size(190, 24)
+        $pTitle.Text = 'NIVEL DE PINTURA'
+        $pTitle.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
+        $pTitle.ForeColor = [System.Drawing.Color]::FromArgb(255, 180, 120)
+        $pTitle.Location = New-Object System.Drawing.Point(30, 79)
+        $pTitle.Size = New-Object System.Drawing.Size(190, 18)
         $pForm.Controls.Add($pTitle)
-        [void](New-SectionHairline -Parent $pForm -X 226 -Y 29 -W 138 -Cor $corPintura)
 
         $pSub = New-Object System.Windows.Forms.Label
         $pSub.Text = 'Escolha o nivel de pintura que vai aparecer na etiqueta.'
         $pSub.Font = New-Object System.Drawing.Font('Segoe UI', 8)
-        $pSub.ForeColor = $cMuted
-        $pSub.Location = New-Object System.Drawing.Point(30, 42)
-        $pSub.Size = New-Object System.Drawing.Size(334, 16)
+        $pSub.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+        $pSub.Location = New-Object System.Drawing.Point(20, 101)
+        $pSub.Size = New-Object System.Drawing.Size(360, 16)
         $pForm.Controls.Add($pSub)
 
         # Cards de opcao (estilo radio)
@@ -5057,15 +7370,15 @@ $btnImprimir.Add_Click({
                 $opcaoCard = [string]$card.Tag
                 $selecionado = ($opcaoCard -eq [string]$script:pinturaSelecionadaTemp)
                 if ($selecionado) {
-                    $card.BackColor = [System.Drawing.Color]::FromArgb(64, 30, 12)
+                    $card.BackColor = [System.Drawing.Color]::FromArgb(50, 31, 22)
                     $card.ForeColor = [System.Drawing.Color]::White
                     $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(232, 102, 34)
                     $card.FlatAppearance.BorderSize = 2
                     $card.Text = ([string][char]0x25CF + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
                 } else {
-                    $card.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
-                    $card.ForeColor = [System.Drawing.Color]::FromArgb(210, 190, 170)
-                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(52, 40, 30)
+                    $card.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+                    $card.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
                     $card.FlatAppearance.BorderSize = 1
                     $card.Text = ([string][char]0x25CB + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
                 }
@@ -5073,12 +7386,12 @@ $btnImprimir.Add_Click({
             if ($script:pinturaConfirmBtn) {
                 $temSel = [bool]$script:pinturaSelecionadaTemp
                 $script:pinturaConfirmBtn.Enabled = $temSel
-                $script:pinturaConfirmBtn.BackColor = if ($temSel) { [System.Drawing.Color]::FromArgb(0, 126, 72) } else { [System.Drawing.Color]::FromArgb(14, 34, 26) }
-                $script:pinturaConfirmBtn.ForeColor = if ($temSel) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(70, 110, 90) }
+                $script:pinturaConfirmBtn.BackColor = if ($temSel) { [System.Drawing.Color]::FromArgb(94, 106, 210) } else { [System.Drawing.Color]::FromArgb(26, 29, 43) }
+                $script:pinturaConfirmBtn.ForeColor = if ($temSel) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(98, 102, 118) }
             }
         }
 
-        $yCard = 68
+        $yCard = 126
         foreach ($opcaoPintura in @('PINTURA 1', 'PINTURA 2', 'PINTURA 3')) {
             $card = New-Object System.Windows.Forms.Button
             $card.Tag = $opcaoPintura
@@ -5089,8 +7402,8 @@ $btnImprimir.Add_Click({
             $card.Location = New-Object System.Drawing.Point(20, $yCard)
             $card.Size = New-Object System.Drawing.Size(344, 40)
             $card.Cursor = [System.Windows.Forms.Cursors]::Hand
-            $card.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(34, 26, 18)
-            $card.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(52, 28, 14)
+            $card.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 51)
+            $card.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(50, 31, 22)
             $card.Add_Click({
                 param($s, $e)
                 $script:pinturaSelecionadaTemp = [string]$s.Tag
@@ -5104,22 +7417,22 @@ $btnImprimir.Add_Click({
 
         # Rodape
         $pFooterLine = New-Object System.Windows.Forms.Panel
-        $pFooterLine.BackColor = [System.Drawing.Color]::FromArgb(24, 40, 56)
-        $pFooterLine.Location  = New-Object System.Drawing.Point(20, 216)
+        $pFooterLine.BackColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
+        $pFooterLine.Location  = New-Object System.Drawing.Point(20, 282)
         $pFooterLine.Size      = New-Object System.Drawing.Size(344, 1)
         $pForm.Controls.Add($pFooterLine)
 
         $cancel = New-Object System.Windows.Forms.Button
         $cancel.Text = 'Cancelar'
         $cancel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
-        $cancel.ForeColor = [System.Drawing.Color]::FromArgb(200, 160, 165)
-        $cancel.BackColor = [System.Drawing.Color]::FromArgb(14, 20, 30)
+        $cancel.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+        $cancel.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
         $cancel.FlatStyle = 'Flat'
         $cancel.FlatAppearance.BorderSize = 1
-        $cancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(84, 36, 46)
-        $cancel.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(52, 18, 26)
+        $cancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
+        $cancel.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 51)
         $cancel.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $cancel.Location = New-Object System.Drawing.Point(20, 230)
+        $cancel.Location = New-Object System.Drawing.Point(20, 296)
         $cancel.Size = New-Object System.Drawing.Size(112, 36)
         $cancel.Add_Click({
             $script:pinturaSelecionadaTemp = $null
@@ -5130,16 +7443,16 @@ $btnImprimir.Add_Click({
         Set-RoundedControl -Control $cancel -Radius 8
 
         $confirm = New-Object System.Windows.Forms.Button
-        $confirm.Text = 'Confirmar  >'
+        $confirm.Text = 'Confirmar'
         $confirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
         $confirm.ForeColor = [System.Drawing.Color]::White
-        $confirm.BackColor = [System.Drawing.Color]::FromArgb(0, 126, 72)
+        $confirm.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
         $confirm.FlatStyle = 'Flat'
         $confirm.FlatAppearance.BorderSize = 0
-        $confirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 148, 84)
-        $confirm.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 104, 60)
+        $confirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+        $confirm.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(78, 89, 187)
         $confirm.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $confirm.Location = New-Object System.Drawing.Point(232, 230)
+        $confirm.Location = New-Object System.Drawing.Point(232, 296)
         $confirm.Size = New-Object System.Drawing.Size(132, 36)
         $confirm.Add_Click({
             if (-not $script:pinturaSelecionadaTemp) { return }
@@ -5151,6 +7464,7 @@ $btnImprimir.Add_Click({
         $script:pinturaConfirmBtn = $confirm
 
         & $script:AtualizarPinturaCards
+        Set-CaijWindowsTypography -Root $pForm
         [void]$pForm.ShowDialog($popup)
         if ($pForm.Tag -eq 'OK' -and $script:pinturaSelecionadaTemp) {
             return [string]$script:pinturaSelecionadaTemp
@@ -5181,7 +7495,6 @@ $btnImprimir.Add_Click({
         $btnG.Cursor   = [System.Windows.Forms.Cursors]::Hand
         $btnG.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(([int]($coresGrade[$g.L].R * 0.24) + 8), ([int]($coresGrade[$g.L].G * 0.24) + 14), ([int]($coresGrade[$g.L].B * 0.24) + 22))
         $btnG.FlatAppearance.MouseDownBackColor = $gradeDownColor
-        $origPos = $btnG.Location
         $btnG.Add_Click({
             $gradeBtn = $this
             $letraSel = [string]$gradeBtn.Tag
@@ -5194,11 +7507,17 @@ $btnImprimir.Add_Click({
                 $chkRNA.Checked = $false
             }
             if ($letraSel -eq 'C') {
-                $pintura = & $script:SelecionarPintura
-                if (-not $pintura) { return }
-                $script:pinturaOpcaoAtual = $pintura
-                $script:gradeAtual = "C - $pintura"
-                Set-AppStatus -Texto "Grade C selecionada: $pintura" -Cor $cYellow
+                if ($script:tipoEtiqueta -eq 'Celular') {
+                    $script:pinturaOpcaoAtual = ''
+                    $script:gradeAtual = 'C'
+                    Set-AppStatus -Texto 'Grade C selecionada' -Cor $cYellow
+                } else {
+                    $pintura = & $script:SelecionarPintura
+                    if (-not $pintura) { return }
+                    $script:pinturaOpcaoAtual = $pintura
+                    $script:gradeAtual = "C - $pintura"
+                    Set-AppStatus -Texto "Grade C selecionada: $pintura" -Cor $cYellow
+                }
             } elseif ($letraSel -eq 'T') {
                 $script:pinturaOpcaoAtual = ''
                 $script:gradeAtual = 'T - TRIAGEM'
@@ -5214,20 +7533,18 @@ $btnImprimir.Add_Click({
         $btnG.Add_MouseEnter({
             $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'T' -and ([string]$script:gradeAtual) -match '^T\s*-\s*TRIAGEM') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
             if (-not $isSelected) {
-                $this.Location = New-Object System.Drawing.Point($origPos.X, ($origPos.Y - 1))
                 $this.FlatAppearance.BorderSize = 2
             }
         }.GetNewClosure())
         $btnG.Add_MouseLeave({
             $isSelected = (($this.Tag -eq $script:gradeAtual) -or ($this.Tag -eq 'C' -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') -or ($this.Tag -eq 'T' -and ([string]$script:gradeAtual) -match '^T\s*-\s*TRIAGEM') -or ($this.Tag -eq 'RMA' -and $script:rnaAtivo))
             if (-not $isSelected) {
-                $this.Location = $origPos
                 $this.FlatAppearance.BorderSize = 1
             }
         }.GetNewClosure())
         $script:btnGrades[$g.L] = $btnG
         $popup.Controls.Add($btnG)
-        Set-RoundedControl -Control $btnG -Radius 10
+        Set-RoundedControl -Control $btnG -Radius 6
         $gradeIndex++
     }
 
@@ -5236,7 +7553,7 @@ $btnImprimir.Add_Click({
         foreach ($key in $script:btnGrades.Keys) {
             $btn = $script:btnGrades[$key]
             if ($key -eq 'C') {
-                $btn.Text = if ($script:pinturaOpcaoAtual) { "C`r`n$($script:pinturaOpcaoAtual)" } else { "C`r`nPintura" }
+                $btn.Text = if ($script:tipoEtiqueta -eq 'Celular') { "C`r`nGrade C" } elseif ($script:pinturaOpcaoAtual) { "C`r`n$($script:pinturaOpcaoAtual)" } else { "C`r`nPintura" }
             } elseif ($key -eq 'T') {
                 $btn.Text = "T`r`nTriagem"
             } elseif ($key -eq 'RMA') {
@@ -5275,7 +7592,7 @@ $btnImprimir.Add_Click({
     $obsPanel = New-Object System.Windows.Forms.Panel
     $obsPanel.Location = New-Object System.Drawing.Point(644, 298)
     $obsPanel.Size = New-Object System.Drawing.Size(240, 110)
-    $obsPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 23, 36)
+    $obsPanel.BackColor = $previewUiRaised
     $obsPanel.BorderStyle = 'None'
     $popup.Controls.Add($obsPanel)
     Set-RoundedControl -Control $obsPanel -Radius 8
@@ -5284,21 +7601,22 @@ $btnImprimir.Add_Click({
     $obsAccent.Location = New-Object System.Drawing.Point(0, 0)
     $obsAccent.Size = New-Object System.Drawing.Size(4, 110)
     $obsAccent.BackColor = $cAccent
+    $obsAccent.Visible = $false
     $obsPanel.Controls.Add($obsAccent)
 
     $obsLabel = New-Object System.Windows.Forms.Label
     $obsLabel.Text = 'OBSERVAÇÕES'
     $obsLabel.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
-    $obsLabel.ForeColor = $cAccent
+    $obsLabel.ForeColor = $previewUiMuted
     $obsLabel.Location = New-Object System.Drawing.Point(14, 5)
     $obsLabel.Size = New-Object System.Drawing.Size(110, 16)
     $obsPanel.Controls.Add($obsLabel)
-    [void](New-SectionHairline -Parent $obsPanel -X 120 -Y 13 -W 48)
+    [void](New-SectionHairline -Parent $obsPanel -X 120 -Y 13 -W 48 -Cor $previewUiBorder)
 
     $obsCount = New-Object System.Windows.Forms.Label
     $obsCount.Text = '0/220'
     $obsCount.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
-    $obsCount.ForeColor = $cDim
+    $obsCount.ForeColor = $previewUiMuted
     $obsCount.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
     $obsCount.Location = New-Object System.Drawing.Point(174, 5)
     $obsCount.Size = New-Object System.Drawing.Size(52, 15)
@@ -5306,8 +7624,8 @@ $btnImprimir.Add_Click({
 
     $obsBox = New-Object System.Windows.Forms.TextBox
     $obsBox.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $obsBox.BackColor = [System.Drawing.Color]::FromArgb(10, 20, 32)
-    $obsBox.ForeColor = [System.Drawing.Color]::FromArgb(214, 232, 246)
+    $obsBox.BackColor = $previewUiSurface
+    $obsBox.ForeColor = $previewUiText
     $obsBox.BorderStyle = 'None'
     $obsBox.Location = New-Object System.Drawing.Point(14, 27)
     $obsBox.Size = New-Object System.Drawing.Size(212, 72)
@@ -5317,21 +7635,143 @@ $btnImprimir.Add_Click({
     $obsBox.Cursor = [System.Windows.Forms.Cursors]::IBeam
     $obsBox.Text = if ($script:obsAtual) { [string]$script:obsAtual } else { '' }
     $obsCount.Text = "$($obsBox.Text.Length)/220"
-    $obsBox.Add_Enter({ $obsAccent.BackColor = [System.Drawing.Color]::FromArgb(86, 213, 255) })
-    $obsBox.Add_Leave({ $obsAccent.BackColor = $cAccent })
+    $obsBox.Add_Enter({ $obsLabel.ForeColor = $previewUiPrimaryHover })
+    $obsBox.Add_Leave({ $obsLabel.ForeColor = $previewUiMuted })
     $obsBox.Add_TextChanged({
         $script:obsAtual = $obsBox.Text
         $obsCount.Text = "$($obsBox.Text.Length)/220"
-        $obsCount.ForeColor = if ($obsBox.Text.Length -ge 200) { $cYellow } else { $cDim }
+        $obsCount.ForeColor = if ($obsBox.Text.Length -ge 200) { $cYellow } else { $previewUiMuted }
         & $script:DesenharPrevia $script:gradeAtual (& $script:GetObsImpressao) $script:incluirOSAtual
         & $script:UpdateConfirmState
     })
     $obsPanel.Controls.Add($obsBox)
 
+    $altertagCard = New-Object System.Windows.Forms.Panel
+    $altertagCard.Location = New-Object System.Drawing.Point(628, 438)
+    $altertagCard.Size = New-Object System.Drawing.Size(272, 110)
+    $altertagCard.BackColor = $previewUiSurface
+    $altertagCard.BorderStyle = 'None'
+    $popup.Controls.Add($altertagCard)
+    Set-RoundedControl -Control $altertagCard -Radius 8
+    $altertagCard.Add_Paint({
+        $pen = New-Object System.Drawing.Pen($previewUiBorder, 1)
+        $_.Graphics.DrawRectangle($pen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $pen.Dispose()
+    })
+
+    $altertagBar = New-Object System.Windows.Forms.Panel
+    $altertagBar.Location = New-Object System.Drawing.Point(0, 0)
+    $altertagBar.Size = New-Object System.Drawing.Size(4, 110)
+    $altertagBar.BackColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
+    $altertagCard.Controls.Add($altertagBar)
+
+    $altertagTitle = New-Object System.Windows.Forms.Label
+    $altertagTitle.Text = 'CONFERENCIA ALTERTAG'
+    $altertagTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7, [System.Drawing.FontStyle]::Bold)
+    $altertagTitle.ForeColor = $previewUiMuted
+    $altertagTitle.Location = New-Object System.Drawing.Point(14, 7)
+    $altertagTitle.Size = New-Object System.Drawing.Size(145, 15)
+    $altertagCard.Controls.Add($altertagTitle)
+
+    $altertagStatus = New-Object System.Windows.Forms.Label
+    $altertagStatus.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 6.5, [System.Drawing.FontStyle]::Bold)
+    $altertagStatus.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+    $altertagStatus.Location = New-Object System.Drawing.Point(158, 6)
+    $altertagStatus.Size = New-Object System.Drawing.Size(100, 16)
+    $altertagCard.Controls.Add($altertagStatus)
+
+    $altertagOs = New-Object System.Windows.Forms.Label
+    $altertagOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
+    $altertagOs.ForeColor = $previewUiText
+    $altertagOs.Location = New-Object System.Drawing.Point(14, 27)
+    $altertagOs.Size = New-Object System.Drawing.Size(244, 17)
+    $altertagCard.Controls.Add($altertagOs)
+
+    $altertagProduto = New-Object System.Windows.Forms.Label
+    $altertagProduto.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $altertagProduto.ForeColor = $previewUiMuted
+    $altertagProduto.Location = New-Object System.Drawing.Point(14, 47)
+    $altertagProduto.Size = New-Object System.Drawing.Size(244, 17)
+    $altertagProduto.AutoEllipsis = $true
+    $altertagCard.Controls.Add($altertagProduto)
+
+    $altertagTecnico = New-Object System.Windows.Forms.Label
+    $altertagTecnico.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+    $altertagTecnico.ForeColor = $previewUiMuted
+    $altertagTecnico.Location = New-Object System.Drawing.Point(14, 67)
+    $altertagTecnico.Size = New-Object System.Drawing.Size(244, 17)
+    $altertagTecnico.AutoEllipsis = $true
+    $altertagCard.Controls.Add($altertagTecnico)
+
+    $altertagSerial = New-Object System.Windows.Forms.Label
+    $altertagSerial.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
+    $altertagSerial.Location = New-Object System.Drawing.Point(14, 87)
+    $altertagSerial.Size = New-Object System.Drawing.Size(244, 17)
+    $altertagSerial.AutoEllipsis = $true
+    $altertagCard.Controls.Add($altertagSerial)
+
+    $script:AtualizarResumoAltertagPreview = {
+        param([switch]$Reconsultar)
+        if ($Reconsultar) {
+            $altertagResumoPreview = Get-OsAltertagResumoPreview `
+                -OsNumero $printContext.OsNumero `
+                -OrdemFallback $printContext.Ordem `
+                -ConsultarOnline
+            $printContext.Ordem = $altertagResumoPreview.ordem
+        }
+        $serialOs = ([string]$altertagResumoPreview.serial).Trim()
+        $serialEtiquetaAtual = ([string]$script:serialEtiqueta).Trim()
+        $serialDivergente = (
+            $serialOs -and
+            $serialOs -ne '-' -and
+            $serialEtiquetaAtual -and
+            (($serialOs -replace '\s+', '').ToUpperInvariant() -ne ($serialEtiquetaAtual -replace '\s+', '').ToUpperInvariant())
+        )
+        $altertagOs.Text = "OS  $($altertagResumoPreview.osCodigo)"
+        $altertagProduto.Text = "PRODUTO  $($altertagResumoPreview.produto)"
+        $altertagTecnico.Text = "TECNICO  $($altertagResumoPreview.tecnico)"
+        $altertagSerial.Text = "SERIAL  $($altertagResumoPreview.serial)"
+        if ($serialDivergente) {
+            $altertagStatus.Text = 'SERIAL DIVERGENTE'
+            $altertagStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 113, 133)
+            $altertagSerial.ForeColor = [System.Drawing.Color]::FromArgb(251, 113, 133)
+            $altertagBar.BackColor = [System.Drawing.Color]::FromArgb(244, 63, 94)
+        } elseif ($altertagResumoPreview.online) {
+            $altertagStatus.Text = 'SINCRONIZADO'
+            $altertagStatus.ForeColor = [System.Drawing.Color]::FromArgb(74, 222, 128)
+            $altertagSerial.ForeColor = [System.Drawing.Color]::FromArgb(216, 205, 244)
+            $altertagBar.BackColor = [System.Drawing.Color]::FromArgb(34, 197, 94)
+        } elseif ($altertagResumoPreview.ordem) {
+            $altertagStatus.Text = 'DADOS LOCAIS'
+            $altertagStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+            $altertagSerial.ForeColor = [System.Drawing.Color]::FromArgb(216, 205, 244)
+            $altertagBar.BackColor = [System.Drawing.Color]::FromArgb(245, 158, 11)
+        } else {
+            $altertagStatus.Text = 'INDISPONIVEL'
+            $altertagStatus.ForeColor = [System.Drawing.Color]::FromArgb(148, 163, 184)
+            $altertagSerial.ForeColor = [System.Drawing.Color]::FromArgb(180, 172, 198)
+            $altertagBar.BackColor = [System.Drawing.Color]::FromArgb(100, 116, 139)
+        }
+    }.GetNewClosure()
+    & $script:AtualizarResumoAltertagPreview
+
+    $altertagPreviewTimer = New-Object System.Windows.Forms.Timer
+    $altertagPreviewTimer.Interval = 150
+    $altertagPreviewTimer.Add_Tick({
+        $this.Stop()
+        try {
+            if ($popup -and -not $popup.IsDisposed) {
+                & $script:AtualizarResumoAltertagPreview -Reconsultar
+            }
+        } catch {}
+        try { $this.Dispose() } catch {}
+    })
+    $altertagPreviewTimer.Start()
+
     $osCard = New-Object System.Windows.Forms.Panel
-    $osCard.Location = New-Object System.Drawing.Point(644, 420)
-    $osCard.Size = New-Object System.Drawing.Size(240, 52)
-    $osCard.BackColor = $cCard
+    $osCard.Location = New-Object System.Drawing.Point(20, 480)
+    $osCard.Size = New-Object System.Drawing.Size(280, 58)
+    $osCard.BackColor = $previewUiRaised
     $osCard.BorderStyle = 'None'
     $osCard.Cursor = [System.Windows.Forms.Cursors]::Hand
     $popup.Controls.Add($osCard)
@@ -5339,15 +7779,16 @@ $btnImprimir.Add_Click({
 
     $osCardBar = New-Object System.Windows.Forms.Panel
     $osCardBar.Location = New-Object System.Drawing.Point(0, 0)
-    $osCardBar.Size = New-Object System.Drawing.Size(4, 52)
+    $osCardBar.Size = New-Object System.Drawing.Size(4, 58)
     $osCardBar.BackColor = $cAccent
+    $osCardBar.Visible = $false
     $osCard.Controls.Add($osCardBar)
 
     $osCardTitle = New-Object System.Windows.Forms.Label
     $osCardTitle.Text = 'OS NA ETIQUETA'
     $osCardTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
-    $osCardTitle.ForeColor = $cAccent
-    $osCardTitle.Location = New-Object System.Drawing.Point(14, 7)
+    $osCardTitle.ForeColor = $previewUiMuted
+    $osCardTitle.Location = New-Object System.Drawing.Point(14, 8)
     $osCardTitle.Size = New-Object System.Drawing.Size(210, 16)
     $osCardTitle.Cursor = [System.Windows.Forms.Cursors]::Hand
     $osCard.Controls.Add($osCardTitle)
@@ -5362,28 +7803,35 @@ $btnImprimir.Add_Click({
     $osCard.Controls.Add($osCardDesc)
 
     $btnAlterarOsPreview = New-Object System.Windows.Forms.Button
-    $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $script:osNumero)
+    $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $printContext.OsNumero)
     $btnAlterarOsPreview.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
-    $btnAlterarOsPreview.ForeColor = [System.Drawing.Color]::FromArgb(162, 224, 255)
-    $btnAlterarOsPreview.BackColor = [System.Drawing.Color]::FromArgb(11, 38, 56)
+    $btnAlterarOsPreview.ForeColor = $previewUiText
+    $btnAlterarOsPreview.BackColor = $previewUiSurface
     $btnAlterarOsPreview.FlatStyle = 'Flat'
-    $btnAlterarOsPreview.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(38, 104, 142)
-    $btnAlterarOsPreview.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(17, 55, 78)
+    $btnAlterarOsPreview.FlatAppearance.BorderColor = $previewUiBorder
+    $btnAlterarOsPreview.FlatAppearance.MouseOverBackColor = $previewUiRaised
     $btnAlterarOsPreview.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnAlterarOsPreview.Location = New-Object System.Drawing.Point(14, 24)
-    $btnAlterarOsPreview.Size = New-Object System.Drawing.Size(86, 22)
+    $btnAlterarOsPreview.Location = New-Object System.Drawing.Point(14, 29)
+    $btnAlterarOsPreview.Size = New-Object System.Drawing.Size(100, 22)
     $btnAlterarOsPreview.Add_Click({
         $popup.TopMost = $false
-        Prompt-OsManual
+        Prompt-OsManual -Owner $popup | Out-Null
         $popup.TopMost = $true
         $popup.Activate() | Out-Null
-        $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $script:osNumero)
+        $printContext.OsNumero = [int]$script:osNumero
+        $printContext.Ordem = $script:altertagOsAtual
+        $printContext.CriadaAgora = $false
+        $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $printContext.OsNumero)
         $chkOS.Checked = $true
         & $script:UpdateOsToggle
+        & $script:AtualizarResumoAltertagPreview -Reconsultar
         & $script:DesenharPrevia $script:gradeAtual (& $script:GetObsImpressao) $script:incluirOSAtual
     })
     $osCard.Controls.Add($btnAlterarOsPreview)
     Set-RoundedControl -Control $btnAlterarOsPreview -Radius 5
+    if (-not $printContext.CriadaAgora) {
+        Register-OsNumeroControl -Control $btnAlterarOsPreview
+    }
     $osPreviewTip = New-Object System.Windows.Forms.ToolTip
     $osPreviewTip.SetToolTip($btnAlterarOsPreview, 'Alterar o numero da OS')
 
@@ -5392,20 +7840,20 @@ $btnImprimir.Add_Click({
     $chkOS.Checked = [bool]$script:incluirOSAtual
     $chkOS.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
     $chkOS.ForeColor = [System.Drawing.Color]::FromArgb(0, 220, 120)
-    $chkOS.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
+    $chkOS.BackColor = [System.Drawing.Color]::FromArgb(13, 18, 37)
     $chkOS.FlatStyle = 'Flat'
     $chkOS.Location = New-Object System.Drawing.Point(380, 15)
     $chkOS.Size = New-Object System.Drawing.Size(82, 24)
     $chkOS.Visible = $false
     $chkOS.Add_CheckedChanged({
         $script:incluirOSAtual = [bool]$chkOS.Checked
-        $osCardBar.BackColor = if ($chkOS.Checked) { [System.Drawing.Color]::FromArgb(0, 153, 255) } else { [System.Drawing.Color]::FromArgb(90, 110, 130) }
+        $osCardBar.BackColor = if ($chkOS.Checked) { [System.Drawing.Color]::FromArgb(139, 92, 246) } else { [System.Drawing.Color]::FromArgb(90, 110, 130) }
         & $script:DesenharPrevia $script:gradeAtual $script:obsAtual $script:incluirOSAtual
     })
     $osCard.Controls.Add($chkOS)
 
     $osStatusPill = New-Object System.Windows.Forms.Panel
-    $osStatusPill.Location = New-Object System.Drawing.Point(106, 24)
+    $osStatusPill.Location = New-Object System.Drawing.Point(122, 29)
     $osStatusPill.Size = New-Object System.Drawing.Size(70, 22)
     $osStatusPill.BackColor = [System.Drawing.Color]::FromArgb(9, 64, 43)
     $osStatusPill.BorderStyle = 'None'
@@ -5428,7 +7876,7 @@ $btnImprimir.Add_Click({
     $osStatusPill.Controls.Add($osToggleTxt)
 
     $osToggleWrap = New-Object System.Windows.Forms.Panel
-    $osToggleWrap.Location = New-Object System.Drawing.Point(182, 23)
+    $osToggleWrap.Location = New-Object System.Drawing.Point(214, 28)
     $osToggleWrap.Size = New-Object System.Drawing.Size(50, 24)
     $osToggleWrap.BackColor = [System.Drawing.Color]::FromArgb(12, 92, 58)
     $osToggleWrap.BorderStyle = 'None'
@@ -5623,7 +8071,7 @@ $btnImprimir.Add_Click({
                 $it.Card.BackColor = [System.Drawing.Color]::FromArgb(68, 22, 28)
                 $it.Label.ForeColor = [System.Drawing.Color]::FromArgb(255, 220, 224)
             } else {
-                $it.Card.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
+                $it.Card.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
                 $it.Label.ForeColor = [System.Drawing.Color]::FromArgb(200, 224, 245)
             }
         }
@@ -5631,7 +8079,7 @@ $btnImprimir.Add_Click({
             $rowCard = New-Object System.Windows.Forms.Panel
             $rowCard.Location = New-Object System.Drawing.Point($xOpt, $yOpt)
             $rowCard.Size = New-Object System.Drawing.Size(228, 30)
-            $rowCard.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
+            $rowCard.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
             $rowCard.BorderStyle = 'FixedSingle'
             $rnaForm.Controls.Add($rowCard)
             Set-RoundedControl -Control $rowCard -Radius 7
@@ -5735,6 +8183,7 @@ $btnImprimir.Add_Click({
         $rnaForm.Controls.Add($btnRnaSave)
         Set-RoundedControl -Control $btnRnaSave -Radius 7
 
+        Set-CaijWindowsTypography -Root $rnaForm
         return $rnaForm.ShowDialog($popup)
     }
 
@@ -5789,7 +8238,7 @@ $btnImprimir.Add_Click({
     $triCard = New-Object System.Windows.Forms.Panel
     $triCard.Location = New-Object System.Drawing.Point(16, 476)
     $triCard.Size = New-Object System.Drawing.Size(478, 134)
-    $triCard.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
+    $triCard.BackColor = [System.Drawing.Color]::FromArgb(13, 18, 37)
     $triCard.BorderStyle = 'FixedSingle'
     $popup.Controls.Add($triCard)
     $triCard.Visible = $false
@@ -5810,7 +8259,7 @@ $btnImprimir.Add_Click({
 
     $cmbTecnico = New-Object System.Windows.Forms.ComboBox
     $cmbTecnico.DropDownStyle = 'DropDownList'
-    $cmbTecnico.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
+    $cmbTecnico.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
     $cmbTecnico.ForeColor = [System.Drawing.Color]::White
     $cmbTecnico.Location = New-Object System.Drawing.Point(14, 30)
     $cmbTecnico.Size = New-Object System.Drawing.Size(120, 24)
@@ -5818,13 +8267,14 @@ $btnImprimir.Add_Click({
     [void]$cmbTecnico.Items.Add('Vitor')
     [void]$cmbTecnico.Items.Add('Lucas')
     [void]$cmbTecnico.Items.Add('Erick')
+    [void]$cmbTecnico.Items.Add('Felipe')
     $cmbTecnico.SelectedIndex = 1
     $triCard.Controls.Add($cmbTecnico)
 
     $produtoBox = New-Object System.Windows.Forms.TextBox
     $produtoBox.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $produtoBox.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
-    $produtoBox.ForeColor = [System.Drawing.Color]::FromArgb(190, 220, 238)
+    $produtoBox.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
+    $produtoBox.ForeColor = [System.Drawing.Color]::FromArgb(218, 211, 232)
     $produtoBox.BorderStyle = 'FixedSingle'
     $produtoBox.Location = New-Object System.Drawing.Point(146, 31)
     $produtoBox.Size = New-Object System.Drawing.Size(230, 23)
@@ -5837,15 +8287,15 @@ $btnImprimir.Add_Click({
     $btnBuscarProduto.ForeColor = [System.Drawing.Color]::White
     $btnBuscarProduto.BackColor = [System.Drawing.Color]::FromArgb(20, 58, 72)
     $btnBuscarProduto.FlatStyle = 'Flat'
-    $btnBuscarProduto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 153, 255)
+    $btnBuscarProduto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(139, 92, 246)
     $btnBuscarProduto.Location = New-Object System.Drawing.Point(384, 30)
     $btnBuscarProduto.Size = New-Object System.Drawing.Size(80, 25)
     $triCard.Controls.Add($btnBuscarProduto)
 
     $servicoBox = New-Object System.Windows.Forms.TextBox
     $servicoBox.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-    $servicoBox.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
-    $servicoBox.ForeColor = [System.Drawing.Color]::FromArgb(190, 220, 238)
+    $servicoBox.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
+    $servicoBox.ForeColor = [System.Drawing.Color]::FromArgb(218, 211, 232)
     $servicoBox.BorderStyle = 'FixedSingle'
     $servicoBox.Location = New-Object System.Drawing.Point(146, 62)
     $servicoBox.Size = New-Object System.Drawing.Size(230, 23)
@@ -5855,7 +8305,7 @@ $btnImprimir.Add_Click({
     $servicoLbl = New-Object System.Windows.Forms.Label
     $servicoLbl.Text = 'Servico extra'
     $servicoLbl.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-    $servicoLbl.ForeColor = [System.Drawing.Color]::FromArgb(160, 190, 215)
+    $servicoLbl.ForeColor = [System.Drawing.Color]::FromArgb(178, 171, 197)
     $servicoLbl.Location = New-Object System.Drawing.Point(14, 65)
     $servicoLbl.Size = New-Object System.Drawing.Size(120, 18)
     $triCard.Controls.Add($servicoLbl)
@@ -5878,7 +8328,7 @@ $btnImprimir.Add_Click({
         $chkSvc.Text = $svc
         $chkSvc.Font = New-Object System.Drawing.Font('Segoe UI', 7)
         $chkSvc.ForeColor = [System.Drawing.Color]::FromArgb(180, 210, 230)
-        $chkSvc.BackColor = [System.Drawing.Color]::FromArgb(12, 22, 34)
+        $chkSvc.BackColor = [System.Drawing.Color]::FromArgb(13, 18, 37)
         $chkSvc.FlatStyle = 'Flat'
         $chkSvc.Location = New-Object System.Drawing.Point($sx, 100)
         $chkSvc.Size = New-Object System.Drawing.Size(112, 20)
@@ -5972,7 +8422,7 @@ $btnImprimir.Add_Click({
                     $pick.ShowInTaskbar = $false
                     $list2 = New-Object System.Windows.Forms.ListBox
                     $list2.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-                    $list2.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
+                    $list2.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
                     $list2.ForeColor = [System.Drawing.Color]::White
                     $list2.Location = New-Object System.Drawing.Point(14, 14)
                     $list2.Size = New-Object System.Drawing.Size(516, 250)
@@ -6000,6 +8450,7 @@ $btnImprimir.Add_Click({
                     $cancelPick2.Size = New-Object System.Drawing.Size(140, 34)
                     $cancelPick2.Add_Click({ $pick.DialogResult = 'Cancel'; $pick.Close() })
                     $pick.Controls.Add($cancelPick2)
+                    Set-CaijWindowsTypography -Root $pick
                     if ($pick.ShowDialog($popup) -eq 'OK' -and $list2.SelectedItem) {
                         $selecionado = [string]$list2.SelectedItem
                         $targetBox.Tag = $selecionado
@@ -6039,7 +8490,7 @@ $btnImprimir.Add_Click({
 
             $list = New-Object System.Windows.Forms.ListBox
             $list.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-            $list.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
+            $list.BackColor = [System.Drawing.Color]::FromArgb(13, 20, 38)
             $list.ForeColor = [System.Drawing.Color]::White
             $list.Location = New-Object System.Drawing.Point(14, 14)
             $list.Size = New-Object System.Drawing.Size(516, 250)
@@ -6073,6 +8524,7 @@ $btnImprimir.Add_Click({
             $cancelPick.Add_Click({ $pick.DialogResult = 'Cancel'; $pick.Close() })
             $pick.Controls.Add($cancelPick)
 
+            Set-CaijWindowsTypography -Root $pick
             if ($pick.ShowDialog($popup) -eq 'OK' -and $list.SelectedItem) {
                 $selecionado = [string]$list.SelectedItem
                 $targetBox.Tag = $selecionado
@@ -6222,58 +8674,125 @@ $btnImprimir.Add_Click({
     $btnCancelar = New-Object System.Windows.Forms.Button
     $btnCancelar.Text = 'Cancelar'
     $btnCancelar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
-    $btnCancelar.ForeColor = [System.Drawing.Color]::FromArgb(222, 118, 126)
-    $btnCancelar.BackColor = [System.Drawing.Color]::FromArgb(28, 10, 16)
+    $btnCancelar.ForeColor = $previewUiText
+    $btnCancelar.BackColor = $previewUiSurface
     $btnCancelar.FlatStyle = 'Flat'
-    $btnCancelar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(92, 28, 38)
-    $btnCancelar.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(42, 14, 22)
+    $btnCancelar.FlatAppearance.BorderColor = $previewUiBorder
+    $btnCancelar.FlatAppearance.MouseOverBackColor = $previewUiRaised
     $btnCancelar.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnCancelar.Location = New-Object System.Drawing.Point(20, 608)
+    $btnCancelar.Location = New-Object System.Drawing.Point(20, 576)
     $btnCancelar.Size = New-Object System.Drawing.Size(132, 36)
     $btnCancelar.Add_Click({ $popup.DialogResult = 'Cancel'; $popup.Close() })
     $popup.Controls.Add($btnCancelar)
     Set-RoundedControl -Control $btnCancelar -Radius 8
 
+    $btnReimprimir = New-Object System.Windows.Forms.Button
+    $btnReimprimir.Text = 'Reimprimir ultima'
+    $btnReimprimir.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
+    $btnReimprimir.ForeColor = $previewUiText
+    $btnReimprimir.BackColor = $previewUiSurface
+    $btnReimprimir.FlatStyle = 'Flat'
+    $btnReimprimir.FlatAppearance.BorderColor = $previewUiBorder
+    $btnReimprimir.FlatAppearance.MouseOverBackColor = $previewUiRaised
+    $btnReimprimir.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnReimprimir.Location = New-Object System.Drawing.Point(164, 576)
+    $btnReimprimir.Size = New-Object System.Drawing.Size(150, 36)
+    $btnReimprimir.Enabled = -not [string]::IsNullOrWhiteSpace([string]$script:ultimaEtiquetaPayload)
+    $btnReimprimir.Add_Click({
+        if ([string]::IsNullOrWhiteSpace([string]$script:ultimaEtiquetaPayload)) { return }
+        $btnReimprimir.Enabled = $false
+        $textoOriginalReimpressao = $btnReimprimir.Text
+        $btnReimprimir.Text = 'Reenviando...'
+        [System.Windows.Forms.Application]::DoEvents()
+        try {
+            Invoke-CaijServer -Path '/imprimir' -Method POST -Body ([string]$script:ultimaEtiquetaPayload) -TimeoutSec 20 -Retries 2 | Out-Null
+            $resumoAnterior = $script:ultimaEtiquetaResumo
+            if ($resumoAnterior) {
+                Add-HistoricoNotebook `
+                    -Acao 'reimpressao' `
+                    -Status 'ok' `
+                    -Mensagem 'Ultima etiqueta reenviada sem alterar a OS' `
+                    -Grade ([string]$resumoAnterior.grade) `
+                    -Obs ([string]$resumoAnterior.obs) `
+                    -OsNumero ([int]$resumoAnterior.osNumero) `
+                    -Serial ([string]$resumoAnterior.serial) `
+                    -Modelo ([string]$resumoAnterior.modelo) `
+                    -Cpu ([string]$resumoAnterior.cpu) `
+                    -Ram ([string]$resumoAnterior.ram) `
+                    -Disco ([string]$resumoAnterior.disco) `
+                    -Gpu ([string]$resumoAnterior.gpu) `
+                    -Bateria ([string]$resumoAnterior.bateria)
+            }
+            $btnReimprimir.Text = 'Etiqueta reenviada'
+            Set-AppStatus -Texto 'Ultima etiqueta reenviada sem alterar a OS' -Cor $cGreen
+        } catch {
+            $btnReimprimir.Text = 'Falha ao reenviar'
+            Set-AppStatus -Texto 'Falha ao reimprimir a ultima etiqueta' -Cor $cRed
+            [System.Windows.Forms.MessageBox]::Show(
+                "Nao foi possivel reimprimir a ultima etiqueta:`n$($_.Exception.Message)",
+                'Falha na reimpressao',
+                'OK',
+                'Error'
+            ) | Out-Null
+        } finally {
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 500
+            $btnReimprimir.Text = $textoOriginalReimpressao
+            $btnReimprimir.Enabled = $true
+        }
+    })
+    $popup.Controls.Add($btnReimprimir)
+    Set-RoundedControl -Control $btnReimprimir -Radius 8
+
     $btnManual = New-Object System.Windows.Forms.Button
     $btnManual.Text = ([string][char]0x270E + '  Manual')
     $btnManual.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
-    $btnManual.ForeColor = [System.Drawing.Color]::FromArgb(150, 176, 198)
-    $btnManual.BackColor = [System.Drawing.Color]::FromArgb(11, 22, 34)
+    $btnManual.ForeColor = $previewUiText
+    $btnManual.BackColor = $previewUiRaised
     $btnManual.FlatStyle = 'Flat'
-    $btnManual.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(34, 58, 82)
-    $btnManual.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(20, 38, 56)
+    $btnManual.FlatAppearance.BorderColor = $previewUiBorder
+    $btnManual.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 52)
     $btnManual.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnManual.Location = New-Object System.Drawing.Point(796, 514)
-    $btnManual.Size = New-Object System.Drawing.Size(88, 30)
+    $btnManual.Location = New-Object System.Drawing.Point(502, 508)
+    $btnManual.Size = New-Object System.Drawing.Size(110, 30)
     $btnManual.Add_Click({
         $manualForm = New-Object System.Windows.Forms.Form
         $manualForm.Text = 'Preencher dados manualmente'
-        $manualForm.Size = New-Object System.Drawing.Size(440, 450)
+        $manualForm.ClientSize = New-Object System.Drawing.Size(440, 570)
         $manualForm.StartPosition = 'CenterParent'
-        $manualForm.BackColor = $cBg
-        $manualForm.FormBorderStyle = 'FixedDialog'
+        $manualForm.BackColor = $previewUiBg
+        $manualForm.FormBorderStyle = 'None'
         $manualForm.MaximizeBox = $false
         $manualForm.MinimizeBox = $false
         $manualForm.TopMost = $true
+        $manualForm.KeyPreview = $true
+        Set-RoundedControl -Control $manualForm -Radius 12
+        $manualForm.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
+        $manualForm.Add_Paint({
+            $manualBorderPen = New-Object System.Drawing.Pen($previewUiBorder, 1)
+            $_.Graphics.DrawRectangle($manualBorderPen, 0, 0, ($this.ClientSize.Width - 1), ($this.ClientSize.Height - 1))
+            $manualBorderPen.Dispose()
+        })
 
         function New-ManualField {
             param([string]$titulo, [int]$y, [string]$valor)
             $lbl = New-Object System.Windows.Forms.Label
             $lbl.Text = $titulo
             $lbl.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-            $lbl.ForeColor = $cAccent
+            $lbl.ForeColor = $previewUiMuted
             $lbl.Location = New-Object System.Drawing.Point(16, $y)
             $lbl.Size = New-Object System.Drawing.Size(160, 18)
             $manualForm.Controls.Add($lbl)
 
             $txt = New-Object System.Windows.Forms.TextBox
             $txt.Font = New-Object System.Drawing.Font('Segoe UI', 9)
-            $txt.BackColor = [System.Drawing.Color]::FromArgb(14, 24, 36)
-            $txt.ForeColor = [System.Drawing.Color]::FromArgb(190, 220, 238)
+            $txt.BackColor = $previewUiRaised
+            $txt.ForeColor = $previewUiText
             $txt.BorderStyle = 'FixedSingle'
             $txt.Location = New-Object System.Drawing.Point(16, ($y + 18))
             $txt.Size = New-Object System.Drawing.Size(282, 24)
             $txt.Text = $valor
+            $txt.Tag = $lbl
             $manualForm.Controls.Add($txt)
             return $txt
         }
@@ -6288,68 +8807,504 @@ $btnImprimir.Add_Click({
             $btn = New-Object System.Windows.Forms.Button
             $btn.Text = $texto
             $btn.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5, [System.Drawing.FontStyle]::Bold)
-            $btn.ForeColor = [System.Drawing.Color]::FromArgb(210, 224, 238)
-            $btn.BackColor = [System.Drawing.Color]::FromArgb(24, 38, 54)
+            $btn.ForeColor = $previewUiText
+            $btn.BackColor = $previewUiRaised
             $btn.FlatStyle = 'Flat'
-            $btn.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(70, 105, 135)
+            $btn.FlatAppearance.BorderColor = $previewUiBorder
+            $btn.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 52)
             $btn.Location = New-Object System.Drawing.Point(306, ($y + 18))
             $btn.Size = New-Object System.Drawing.Size(102, 24)
             $btn.Tag = [pscustomobject]@{ Target = $target; Valor = $valor }
             $btn.Add_Click({ $this.Tag.Target.Text = $this.Tag.Valor })
+            $btn.TabStop = $false
             $manualForm.Controls.Add($btn)
             return $btn
         }
 
-        $txtModelo = New-ManualField 'Nome do modelo' 12  $script:modeloEtiqueta
-        $modeloAutoComplete = New-Object System.Windows.Forms.AutoCompleteStringCollection
-        foreach ($modeloSalvo in @($script:modelosManuaisHistorico)) {
-            if (-not [string]::IsNullOrWhiteSpace([string]$modeloSalvo)) {
-                [void]$modeloAutoComplete.Add([string]$modeloSalvo)
-            }
-        }
-        $txtModelo.AutoCompleteMode = [System.Windows.Forms.AutoCompleteMode]::SuggestAppend
-        $txtModelo.AutoCompleteSource = [System.Windows.Forms.AutoCompleteSource]::CustomSource
-        $txtModelo.AutoCompleteCustomSource = $modeloAutoComplete
-        $txtSerial = New-ManualField 'Serial'         62  $script:serialEtiqueta
-        $txtCpu    = New-ManualField 'Processador'    112 $script:cpuEtiqueta
-        $txtMem    = New-ManualField 'Memoria'        162 $script:memEtiqueta
-        $txtRam    = New-ManualField 'RAM'            212 $script:ramEtiqueta
-        $txtGpu    = New-ManualField 'GPU'            262 $script:gpuEtiqueta
-        $txtBat    = $null
-        if ($info.MostrarBateria) {
-            $txtBat = New-ManualField 'Bateria'        312 $script:bateriaEtiqueta
+        $tipoManualLabel = New-Object System.Windows.Forms.Label
+        $tipoManualLabel.Text = 'TIPO DE EQUIPAMENTO'
+        $tipoManualLabel.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+        $tipoManualLabel.ForeColor = $previewUiPrimaryHover
+        $tipoManualLabel.Location = New-Object System.Drawing.Point(16, 8)
+        $tipoManualLabel.Size = New-Object System.Drawing.Size(180, 16)
+        [void]$manualForm.Controls.Add($tipoManualLabel)
+
+        $btnTipoNotebook = New-Object System.Windows.Forms.Button
+        $btnTipoNotebook.Text = 'Notebook'
+        $btnTipoNotebook.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnTipoNotebook.FlatStyle = 'Flat'
+        $btnTipoNotebook.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnTipoNotebook.Location = New-Object System.Drawing.Point(16, 25)
+        $btnTipoNotebook.Size = New-Object System.Drawing.Size(92, 29)
+        [void]$manualForm.Controls.Add($btnTipoNotebook)
+        Set-RoundedControl -Control $btnTipoNotebook -Radius 6
+
+        $btnTipoDesktop = New-Object System.Windows.Forms.Button
+        $btnTipoDesktop.Text = 'Desktop'
+        $btnTipoDesktop.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnTipoDesktop.FlatStyle = 'Flat'
+        $btnTipoDesktop.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnTipoDesktop.Location = New-Object System.Drawing.Point(114, 25)
+        $btnTipoDesktop.Size = New-Object System.Drawing.Size(92, 29)
+        [void]$manualForm.Controls.Add($btnTipoDesktop)
+        Set-RoundedControl -Control $btnTipoDesktop -Radius 6
+
+        $btnTipoMonitor = New-Object System.Windows.Forms.Button
+        $btnTipoMonitor.Text = 'Monitor'
+        $btnTipoMonitor.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnTipoMonitor.FlatStyle = 'Flat'
+        $btnTipoMonitor.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnTipoMonitor.Location = New-Object System.Drawing.Point(212, 25)
+        $btnTipoMonitor.Size = New-Object System.Drawing.Size(92, 29)
+        [void]$manualForm.Controls.Add($btnTipoMonitor)
+        Set-RoundedControl -Control $btnTipoMonitor -Radius 6
+
+        $btnTipoCelular = New-Object System.Windows.Forms.Button
+        $btnTipoCelular.Text = 'Celular'
+        $btnTipoCelular.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnTipoCelular.FlatStyle = 'Flat'
+        $btnTipoCelular.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnTipoCelular.Location = New-Object System.Drawing.Point(310, 25)
+        $btnTipoCelular.Size = New-Object System.Drawing.Size(98, 29)
+        [void]$manualForm.Controls.Add($btnTipoCelular)
+        Set-RoundedControl -Control $btnTipoCelular -Radius 6
+
+        $manualForm.Tag = switch ([string]$script:tipoEtiqueta) {
+            'Desktop' { 'Desktop' }
+            'Monitor' { 'Monitor' }
+            'Celular' { 'Celular' }
+            default { 'Notebook' }
         }
 
-        New-ManualQuickButton 'Sem modelo' 12  $txtModelo 'N/A' | Out-Null
-        New-ManualQuickButton 'Sem serial' 62  $txtSerial 'XXXXXX' | Out-Null
-        New-ManualQuickButton 'Sem CPU'    112 $txtCpu    'N/A' | Out-Null
-        New-ManualQuickButton 'Sem disco'  162 $txtMem    'N/A' | Out-Null
-        New-ManualQuickButton 'Sem RAM'    212 $txtRam    'N/A' | Out-Null
-        New-ManualQuickButton 'Sem GPU'    262 $txtGpu    '' | Out-Null
-        if ($info.MostrarBateria) {
-            New-ManualQuickButton 'Sem bateria' 312 $txtBat 'NA' | Out-Null
+        $modeloManualSalvo = Get-ModeloManualUltimo -Tipo ([string]$manualForm.Tag)
+        $modeloManualInicial = if ($script:modoManualEtiqueta -and -not [string]::IsNullOrWhiteSpace([string]$script:modeloEtiqueta)) {
+            [string]$script:modeloEtiqueta
+        } elseif (-not [string]::IsNullOrWhiteSpace($modeloManualSalvo)) {
+            $modeloManualSalvo
+        } else {
+            [string]$script:modeloEtiqueta
         }
+        $txtModelo = New-ManualField 'Nome do modelo' 62 $modeloManualInicial
+
+        $modeloSugPanel = New-Object System.Windows.Forms.Panel
+        $modeloSugPanel.Location = New-Object System.Drawing.Point(16, 107)
+        $modeloSugPanel.Size = New-Object System.Drawing.Size(282, 124)
+        $modeloSugPanel.BackColor = $previewUiBorder
+        $modeloSugPanel.Visible = $false
+        [void]$manualForm.Controls.Add($modeloSugPanel)
+        Set-RoundedControl -Control $modeloSugPanel -Radius 7
+        $modeloSugPanel.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 7 })
+
+        $modeloSugHeader = New-Object System.Windows.Forms.Panel
+        $modeloSugHeader.Location = New-Object System.Drawing.Point(1, 1)
+        $modeloSugHeader.Size = New-Object System.Drawing.Size(280, 25)
+        $modeloSugHeader.BackColor = $previewUiSurface
+        [void]$modeloSugPanel.Controls.Add($modeloSugHeader)
+
+        $modeloSugDot = New-Object System.Windows.Forms.Panel
+        $modeloSugDot.Location = New-Object System.Drawing.Point(10, 9)
+        $modeloSugDot.Size = New-Object System.Drawing.Size(6, 6)
+        $modeloSugDot.BackColor = $previewUiPrimary
+        [void]$modeloSugHeader.Controls.Add($modeloSugDot)
+        Set-RoundedControl -Control $modeloSugDot -Radius 3
+
+        $modeloSugTitle = New-Object System.Windows.Forms.Label
+        $modeloSugTitle.Text = 'MODELOS RECENTES'
+        $modeloSugTitle.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+        $modeloSugTitle.ForeColor = $previewUiPrimaryHover
+        $modeloSugTitle.Location = New-Object System.Drawing.Point(23, 5)
+        $modeloSugTitle.Size = New-Object System.Drawing.Size(150, 15)
+        [void]$modeloSugHeader.Controls.Add($modeloSugTitle)
+
+        $modeloSugCount = New-Object System.Windows.Forms.Label
+        $modeloSugCount.Text = ''
+        $modeloSugCount.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+        $modeloSugCount.ForeColor = $previewUiMuted
+        $modeloSugCount.TextAlign = [System.Drawing.ContentAlignment]::MiddleRight
+        $modeloSugCount.Location = New-Object System.Drawing.Point(205, 5)
+        $modeloSugCount.Size = New-Object System.Drawing.Size(62, 15)
+        [void]$modeloSugHeader.Controls.Add($modeloSugCount)
+
+        $modeloSugList = New-Object System.Windows.Forms.ListBox
+        $modeloSugList.Location = New-Object System.Drawing.Point(1, 26)
+        $modeloSugList.Size = New-Object System.Drawing.Size(280, 96)
+        $modeloSugList.BackColor = $previewUiSurface
+        $modeloSugList.ForeColor = $previewUiText
+        $modeloSugList.BorderStyle = 'None'
+        $modeloSugList.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5)
+        $modeloSugList.DrawMode = [System.Windows.Forms.DrawMode]::OwnerDrawFixed
+        $modeloSugList.ItemHeight = 34
+        $modeloSugList.IntegralHeight = $false
+        $modeloSugList.Cursor = [System.Windows.Forms.Cursors]::Hand
+        [void]$modeloSugPanel.Controls.Add($modeloSugList)
+        $modeloSugList.Add_DrawItem({
+            param($sender, $e)
+            if ($e.Index -lt 0) { return }
+            $selecionado = (($e.State -band [System.Windows.Forms.DrawItemState]::Selected) -eq [System.Windows.Forms.DrawItemState]::Selected)
+            $fundo = if ($selecionado) {
+                [System.Drawing.Color]::FromArgb(31, 35, 52)
+            } else {
+                $previewUiSurface
+            }
+            $texto = if ($selecionado) {
+                $previewUiText
+            } else {
+                $previewUiMuted
+            }
+            $bgBrush = New-Object System.Drawing.SolidBrush($fundo)
+            $e.Graphics.FillRectangle($bgBrush, $e.Bounds)
+            $bgBrush.Dispose()
+            if ($selecionado) {
+                $railBrush = New-Object System.Drawing.SolidBrush($previewUiPrimary)
+                $e.Graphics.FillRectangle($railBrush, $e.Bounds.X, $e.Bounds.Y, 3, $e.Bounds.Height)
+                $railBrush.Dispose()
+            }
+            $textBrush = New-Object System.Drawing.SolidBrush($texto)
+            $textRect = New-Object System.Drawing.RectangleF(
+                ($e.Bounds.X + 12),
+                ($e.Bounds.Y + 6),
+                ($e.Bounds.Width - 20),
+                ($e.Bounds.Height - 8)
+            )
+            $textFormat = New-Object System.Drawing.StringFormat
+            $textFormat.FormatFlags = [System.Drawing.StringFormatFlags]::NoWrap
+            $textFormat.Trimming = [System.Drawing.StringTrimming]::EllipsisCharacter
+            $textFormat.LineAlignment = [System.Drawing.StringAlignment]::Center
+            $e.Graphics.DrawString([string]$sender.Items[$e.Index], $sender.Font, $textBrush, $textRect, $textFormat)
+            $textFormat.Dispose()
+            $textBrush.Dispose()
+        })
+        $modeloSugTip = New-Object System.Windows.Forms.ToolTip
+        $modeloSugTip.AutoPopDelay = 6000
+        $modeloSugTip.InitialDelay = 350
+        $modeloSugTip.ReshowDelay = 100
+        $modeloSugList.Add_MouseMove({
+            $indiceHover = $modeloSugList.IndexFromPoint($_.Location)
+            $textoHover = if ($indiceHover -ge 0) { [string]$modeloSugList.Items[$indiceHover] } else { '' }
+            if ([string]$modeloSugList.Tag -ne $textoHover) {
+                $modeloSugList.Tag = $textoHover
+                $modeloSugTip.SetToolTip($modeloSugList, $textoHover)
+            }
+        })
+
+        $atualizarModeloSugestoes = {
+            $buscaModelo = $txtModelo.Text.Trim()
+            $resultadosModelo = New-Object System.Collections.Generic.List[string]
+            foreach ($modeloSalvo in @($script:modelosManuaisHistorico)) {
+                $modeloTexto = ([string]$modeloSalvo).Trim()
+                if (-not $modeloTexto) { continue }
+                if ($buscaModelo -and $modeloTexto.IndexOf($buscaModelo, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+                    continue
+                }
+                if (-not $resultadosModelo.Contains($modeloTexto)) {
+                    [void]$resultadosModelo.Add($modeloTexto)
+                }
+                if ($resultadosModelo.Count -ge 5) { break }
+            }
+
+            $modeloSugList.Items.Clear()
+            foreach ($modeloResultado in $resultadosModelo) {
+                [void]$modeloSugList.Items.Add($modeloResultado)
+            }
+            $quantidadeModelo = $modeloSugList.Items.Count
+            if ($quantidadeModelo -gt 0 -and $txtModelo.Focused) {
+                $alturaLista = [Math]::Min(170, [Math]::Max(68, ($quantidadeModelo * 34)))
+                $modeloSugList.Height = $alturaLista
+                $modeloSugPanel.Height = 31 + $alturaLista
+                $modeloSugCount.Text = "$quantidadeModelo encontrado$(if ($quantidadeModelo -eq 1) { '' } else { 's' })"
+                $modeloSugPanel.Visible = $true
+                $modeloSugPanel.BringToFront()
+                $modeloSugList.BringToFront()
+            } else {
+                $modeloSugPanel.Visible = $false
+            }
+        }
+
+        $aplicarModeloSugestao = {
+            if ($modeloSugList.SelectedIndex -lt 0) { return }
+            $txtModelo.Text = [string]$modeloSugList.SelectedItem
+            $txtModelo.SelectionStart = $txtModelo.Text.Length
+            $modeloSugPanel.Visible = $false
+            $txtModelo.Focus() | Out-Null
+        }
+
+        $txtModelo.Add_Enter({ & $atualizarModeloSugestoes })
+        $txtModelo.Add_TextChanged({ & $atualizarModeloSugestoes })
+        $txtModelo.Add_KeyDown({
+            if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Down -and $modeloSugPanel.Visible -and $modeloSugList.Items.Count -gt 0) {
+                $modeloSugList.SelectedIndex = 0
+                $modeloSugList.Focus() | Out-Null
+                $_.SuppressKeyPress = $true
+            } elseif ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+                $modeloSugPanel.Visible = $false
+                $_.SuppressKeyPress = $true
+            }
+        })
+        $modeloSugList.Add_MouseClick({ & $aplicarModeloSugestao })
+        $modeloSugList.Add_KeyDown({
+            if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
+                & $aplicarModeloSugestao
+                $_.SuppressKeyPress = $true
+            } elseif ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) {
+                $modeloSugPanel.Visible = $false
+                $txtModelo.Focus() | Out-Null
+                $_.SuppressKeyPress = $true
+            }
+        })
+
+        $txtSerial = New-ManualField 'Serial'         112 $script:serialEtiqueta
+        $txtCpu    = New-ManualField 'Processador'    162 $script:cpuEtiqueta
+        $txtMem    = New-ManualField 'Memoria'        212 $script:memEtiqueta
+        $txtRam    = New-ManualField 'RAM'            262 $script:ramEtiqueta
+        $txtGpu    = New-ManualField 'GPU'            312 $script:gpuEtiqueta
+        $txtBat    = $null
+        if ($info.MostrarBateria) {
+            $txtBat = New-ManualField 'Bateria'        362 $script:bateriaEtiqueta
+        }
+
+        $txtCelularImei = New-ManualField 'IMEI' 162 $script:celularImeiEtiqueta
+        $txtCelularImei.MaxLength = 15
+        $bateriaCelularInicial = if ([string]$script:tipoEtiqueta -eq 'Celular') { [string]$script:bateriaEtiqueta } else { '' }
+        $txtCelularBateria = New-ManualField 'Bateria' 212 $bateriaCelularInicial
+        $armazenamentoCelularInicial = if ([string]$script:tipoEtiqueta -eq 'Celular') { [string]$script:memEtiqueta } else { '' }
+        $txtCelularArmazenamento = New-ManualField 'Armazenamento' 262 $armazenamentoCelularInicial
+
+        $btnLer3uTools = New-Object System.Windows.Forms.Button
+        $btnLer3uTools.Text = 'Ler do 3uTools'
+        $btnLer3uTools.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
+        $btnLer3uTools.ForeColor = [System.Drawing.Color]::FromArgb(245, 240, 255)
+        $btnLer3uTools.BackColor = [System.Drawing.Color]::FromArgb(88, 33, 182)
+        $btnLer3uTools.FlatStyle = 'Flat'
+        $btnLer3uTools.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(167, 139, 250)
+        $btnLer3uTools.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(109, 40, 217)
+        $btnLer3uTools.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $btnLer3uTools.Location = New-Object System.Drawing.Point(16, 325)
+        $btnLer3uTools.Size = New-Object System.Drawing.Size(392, 34)
+        [void]$manualForm.Controls.Add($btnLer3uTools)
+        Set-RoundedControl -Control $btnLer3uTools -Radius 6
+
+        $lbl3uToolsStatus = New-Object System.Windows.Forms.Label
+        $lbl3uToolsStatus.Text = 'Conecte o iPhone e abra a tela Informacoes no 3uTools.'
+        $lbl3uToolsStatus.Font = New-Object System.Drawing.Font('Segoe UI', 7.5)
+        $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(174, 165, 194)
+        $lbl3uToolsStatus.Location = New-Object System.Drawing.Point(16, 365)
+        $lbl3uToolsStatus.Size = New-Object System.Drawing.Size(392, 38)
+        [void]$manualForm.Controls.Add($lbl3uToolsStatus)
+
+        $btnLer3uTools.Add_Click({
+            $btnLer3uTools.Enabled = $false
+            $btnLer3uTools.Text = 'Lendo...'
+            $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(196, 181, 253)
+            $lbl3uToolsStatus.Text = 'Consultando o aparelho mais recente...'
+            [System.Windows.Forms.Application]::DoEvents()
+            try {
+                $device3u = Get-3uToolsDeviceInfo
+                $txtModelo.Text = [string]$device3u.Modelo
+                $txtSerial.Text = [string]$device3u.Serial
+                $txtCelularImei.Text = [string]$device3u.Imei
+                $txtCelularArmazenamento.Text = [string]$device3u.Armazenamento
+                $armazenamentoTexto = if ($device3u.Armazenamento) { " | $($device3u.Armazenamento)" } else { '' }
+                if ($device3u.Bateria) {
+                    $txtCelularBateria.Text = [string]$device3u.Bateria
+                    $ciclosTexto = if ([int]$device3u.Ciclos -gt 0) { " | $($device3u.Ciclos) ciclos" } else { '' }
+                    $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(74, 222, 128)
+                    $lbl3uToolsStatus.Text = "Dados lidos: $($device3u.Bateria)$ciclosTexto$armazenamentoTexto."
+                } else {
+                    $txtCelularBateria.Text = ''
+                    $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
+                    $lbl3uToolsStatus.Text = "Dados lidos. Bateria indisponivel: $($device3u.BateriaErro)"
+                }
+            } catch {
+                $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 113, 133)
+                $lbl3uToolsStatus.Text = $_.Exception.Message
+            } finally {
+                $btnLer3uTools.Enabled = $true
+                $btnLer3uTools.Text = 'Ler do 3uTools'
+            }
+        })
+
+        $txtMonitorTamanho = New-ManualField 'Tamanho da tela' 162 (Get-MonitorTamanhoNumero -Valor ([string]$script:monitorTamanhoEtiqueta))
+        $txtMonitorTamanho.Size = New-Object System.Drawing.Size(198, 24)
+        $txtMonitorTamanho.MaxLength = 5
+        $txtMonitorTamanho.Add_KeyPress({
+            if (
+                -not [char]::IsControl($_.KeyChar) -and
+                -not [char]::IsDigit($_.KeyChar) -and
+                $_.KeyChar -notin @(',', '.')
+            ) {
+                $_.Handled = $true
+            }
+        })
+
+        $monitorPolegadas = New-Object System.Windows.Forms.Label
+        $monitorPolegadas.Text = 'polegadas'
+        $monitorPolegadas.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
+        $monitorPolegadas.ForeColor = [System.Drawing.Color]::FromArgb(196, 181, 253)
+        $monitorPolegadas.BackColor = [System.Drawing.Color]::FromArgb(20, 17, 42)
+        $monitorPolegadas.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+        $monitorPolegadas.Location = New-Object System.Drawing.Point(216, 180)
+        $monitorPolegadas.Size = New-Object System.Drawing.Size(82, 24)
+        [void]$manualForm.Controls.Add($monitorPolegadas)
+        Set-RoundedControl -Control $monitorPolegadas -Radius 4
+
+        $entradasLabel = New-Object System.Windows.Forms.Label
+        $entradasLabel.Text = 'Entradas'
+        $entradasLabel.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+        $entradasLabel.ForeColor = $cAccent
+        $entradasLabel.Location = New-Object System.Drawing.Point(16, 212)
+        $entradasLabel.Size = New-Object System.Drawing.Size(160, 18)
+        [void]$manualForm.Controls.Add($entradasLabel)
+
+        $entradasPanel = New-Object System.Windows.Forms.Panel
+        $entradasPanel.Location = New-Object System.Drawing.Point(16, 230)
+        $entradasPanel.Size = New-Object System.Drawing.Size(392, 42)
+        $entradasPanel.BackColor = [System.Drawing.Color]::FromArgb(10, 22, 34)
+        [void]$manualForm.Controls.Add($entradasPanel)
+        Set-RoundedControl -Control $entradasPanel -Radius 6
+
+        $monitorEntradasSalvas = ([string]$script:monitorEntradasEtiqueta).ToUpper()
+        $entradaChecks = @()
+        $entradaX = 10
+        foreach ($entradaNome in @('VGA', 'HDMI', 'DISPLAYPORT')) {
+            $entradaCheck = New-Object System.Windows.Forms.CheckBox
+            $entradaCheck.Text = $entradaNome
+            $entradaCheck.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
+            $entradaCheck.ForeColor = [System.Drawing.Color]::FromArgb(218, 211, 232)
+            $entradaCheck.BackColor = $entradasPanel.BackColor
+            $entradaCheck.FlatStyle = 'Flat'
+            $entradaCheck.Cursor = [System.Windows.Forms.Cursors]::Hand
+            $entradaCheck.Location = New-Object System.Drawing.Point($entradaX, 9)
+            $entradaCheck.Size = if ($entradaNome -eq 'DISPLAYPORT') {
+                New-Object System.Drawing.Size(132, 24)
+            } else {
+                New-Object System.Drawing.Size(82, 24)
+            }
+            $entradaCheck.Checked = ($monitorEntradasSalvas -match "(^|[/,\s])$entradaNome($|[/,\s])")
+            [void]$entradasPanel.Controls.Add($entradaCheck)
+            $entradaChecks += $entradaCheck
+            $entradaX += if ($entradaNome -eq 'DISPLAYPORT') { 132 } else { 86 }
+        }
+
+        foreach ($campoManual in @($txtSerial, $txtCpu, $txtMem, $txtRam, $txtGpu, $txtBat, $txtMonitorTamanho, $txtCelularImei, $txtCelularBateria)) {
+            if ($campoManual) {
+                $campoManual.Add_Enter({ $modeloSugPanel.Visible = $false })
+            }
+        }
+
+        $tabIndexManual = 10
+        foreach ($campoManual in @($txtModelo, $txtSerial, $txtCpu, $txtMem, $txtRam, $txtGpu, $txtBat, $txtMonitorTamanho, $txtCelularImei, $txtCelularBateria)) {
+            if (-not $campoManual) { continue }
+            $campoManual.TabIndex = $tabIndexManual
+            $tabIndexManual += 10
+            $campoManual.Add_KeyDown({
+                if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and -not $modeloSugList.Focused) {
+                    $modeloSugPanel.Visible = $false
+                    [void]$manualForm.SelectNextControl($this, $true, $true, $true, $true)
+                    $_.SuppressKeyPress = $true
+                }
+            })
+        }
+
+        $btnSemModelo = New-ManualQuickButton 'Sem modelo' 62  $txtModelo 'N/A'
+        $btnSemSerial = New-ManualQuickButton 'Sem serial' 112 $txtSerial 'XXXXXX'
+        $btnSemCpu = New-ManualQuickButton 'Sem CPU'    162 $txtCpu    'N/A'
+        $btnSemDisco = New-ManualQuickButton 'Sem disco'  212 $txtMem    'N/A'
+        $btnSemRam = New-ManualQuickButton 'Sem RAM'    262 $txtRam    'N/A'
+        $btnSemGpu = New-ManualQuickButton 'Sem GPU'    312 $txtGpu    ''
+        $btnSemBat = $null
+        if ($info.MostrarBateria) {
+            $btnSemBat = New-ManualQuickButton 'Sem bateria' 362 $txtBat 'NA'
+        }
+
+        $atualizarTipoManual = {
+            $isMonitorManual = ([string]$manualForm.Tag -eq 'Monitor')
+            $isCelularManual = ([string]$manualForm.Tag -eq 'Celular')
+            $isDesktopManual = ([string]$manualForm.Tag -eq 'Desktop')
+            $isNotebookManual = ([string]$manualForm.Tag -eq 'Notebook')
+            $isComputadorManual = ($isNotebookManual -or $isDesktopManual)
+            foreach ($tipoVisual in @(
+                @{ Botao=$btnTipoNotebook; Ativo=$isNotebookManual },
+                @{ Botao=$btnTipoDesktop; Ativo=$isDesktopManual },
+                @{ Botao=$btnTipoMonitor; Ativo=$isMonitorManual },
+                @{ Botao=$btnTipoCelular; Ativo=$isCelularManual }
+            )) {
+                $tipoVisual.Botao.BackColor = if ($tipoVisual.Ativo) { $previewUiPrimary } else { $previewUiRaised }
+                $tipoVisual.Botao.ForeColor = if ($tipoVisual.Ativo) { [System.Drawing.Color]::White } else { $previewUiMuted }
+                $tipoVisual.Botao.FlatAppearance.BorderColor = if ($tipoVisual.Ativo) { $previewUiPrimary } else { $previewUiBorder }
+                $tipoVisual.Botao.FlatAppearance.MouseOverBackColor = if ($tipoVisual.Ativo) { $previewUiPrimaryHover } else { [System.Drawing.Color]::FromArgb(31, 35, 52) }
+            }
+
+            $txtModelo.Tag.Text = if ($isCelularManual) { 'Nome' } else { 'Nome do modelo' }
+            $txtSerial.Tag.Text = if ($isCelularManual) { 'Serial Number' } else { 'Serial' }
+
+            foreach ($campoComputador in @($txtCpu, $txtMem, $txtRam, $txtGpu)) {
+                if ($campoComputador) {
+                    $campoComputador.Visible = $isComputadorManual
+                    if ($campoComputador.Tag) { $campoComputador.Tag.Visible = $isComputadorManual }
+                }
+            }
+            if ($txtBat) {
+                $txtBat.Visible = $isNotebookManual
+                if ($txtBat.Tag) { $txtBat.Tag.Visible = $isNotebookManual }
+            }
+            foreach ($botaoComputador in @($btnSemCpu, $btnSemDisco, $btnSemRam, $btnSemGpu)) {
+                if ($botaoComputador) { $botaoComputador.Visible = $isComputadorManual }
+            }
+            if ($btnSemBat) { $btnSemBat.Visible = $isNotebookManual }
+            foreach ($campoMonitor in @($txtMonitorTamanho)) {
+                $campoMonitor.Visible = $isMonitorManual
+                if ($campoMonitor.Tag) { $campoMonitor.Tag.Visible = $isMonitorManual }
+            }
+            $monitorPolegadas.Visible = $isMonitorManual
+            $entradasLabel.Visible = $isMonitorManual
+            $entradasPanel.Visible = $isMonitorManual
+            foreach ($campoCelular in @($txtCelularImei, $txtCelularBateria, $txtCelularArmazenamento)) {
+                $campoCelular.Visible = $isCelularManual
+                if ($campoCelular.Tag) { $campoCelular.Tag.Visible = $isCelularManual }
+            }
+            $btnLer3uTools.Visible = $isCelularManual
+            $lbl3uToolsStatus.Visible = $isCelularManual
+            $modeloSugPanel.Visible = $false
+        }
+        $selecionarTipoManual = {
+            param([string]$Tipo)
+            $manualForm.Tag = $Tipo
+            $modeloSalvoTipo = Get-ModeloManualUltimo -Tipo $Tipo
+            if (-not [string]::IsNullOrWhiteSpace($modeloSalvoTipo)) {
+                $txtModelo.Text = $modeloSalvoTipo
+                $txtModelo.SelectionStart = $txtModelo.Text.Length
+            }
+            & $atualizarTipoManual
+        }.GetNewClosure()
+        $btnTipoNotebook.Add_Click({ & $selecionarTipoManual 'Notebook' })
+        $btnTipoDesktop.Add_Click({ & $selecionarTipoManual 'Desktop' })
+        $btnTipoMonitor.Add_Click({ & $selecionarTipoManual 'Monitor' })
+        $btnTipoCelular.Add_Click({ & $selecionarTipoManual 'Celular' })
+        & $atualizarTipoManual
 
         $btnManualCancelar = New-Object System.Windows.Forms.Button
         $btnManualCancelar.Text = 'Cancelar'
-        $btnManualCancelar.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
-        $btnManualCancelar.ForeColor = [System.Drawing.Color]::FromArgb(180, 60, 60)
-        $btnManualCancelar.BackColor = [System.Drawing.Color]::FromArgb(20, 10, 12)
+        $btnManualCancelar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9)
+        $btnManualCancelar.ForeColor = $previewUiText
+        $btnManualCancelar.BackColor = $previewUiSurface
         $btnManualCancelar.FlatStyle = 'Flat'
-        $btnManualCancelar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(80, 30, 30)
-        $btnManualCancelar.Location = New-Object System.Drawing.Point(16, 370)
+        $btnManualCancelar.FlatAppearance.BorderColor = $previewUiBorder
+        $btnManualCancelar.FlatAppearance.MouseOverBackColor = $previewUiRaised
+        $btnManualCancelar.Location = New-Object System.Drawing.Point(16, 456)
         $btnManualCancelar.Size = New-Object System.Drawing.Size(120, 34)
         $btnManualCancelar.Add_Click({ $manualForm.DialogResult = 'Cancel'; $manualForm.Close() })
         $manualForm.Controls.Add($btnManualCancelar)
+        Set-RoundedControl -Control $btnManualCancelar -Radius 8
 
         $btnManualSalvar = New-Object System.Windows.Forms.Button
         $btnManualSalvar.Text = 'Salvar dados'
-        $btnManualSalvar.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+        $btnManualSalvar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
         $btnManualSalvar.ForeColor = [System.Drawing.Color]::White
-        $btnManualSalvar.BackColor = [System.Drawing.Color]::FromArgb(0, 112, 64)
+        $btnManualSalvar.BackColor = $previewUiPrimary
         $btnManualSalvar.FlatStyle = 'Flat'
-        $btnManualSalvar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 180, 95)
-        $btnManualSalvar.Location = New-Object System.Drawing.Point(286, 370)
+        $btnManualSalvar.FlatAppearance.BorderColor = $previewUiPrimary
+        $btnManualSalvar.FlatAppearance.MouseOverBackColor = $previewUiPrimaryHover
+        $btnManualSalvar.Location = New-Object System.Drawing.Point(286, 456)
         $btnManualSalvar.Size = New-Object System.Drawing.Size(122, 34)
         $btnManualSalvar.Add_Click({
             $modelo = $txtModelo.Text.Trim()
@@ -6359,53 +9314,219 @@ $btnImprimir.Add_Click({
             $ram    = $txtRam.Text.Trim()
             $gpu    = $txtGpu.Text.Trim()
             $bat    = if ($info.MostrarBateria) { $txtBat.Text.Trim() } else { $null }
-            if ([string]::IsNullOrWhiteSpace($modelo) -or
-                [string]::IsNullOrWhiteSpace($serial) -or
-                [string]::IsNullOrWhiteSpace($cpu) -or
-                [string]::IsNullOrWhiteSpace($mem) -or
-                [string]::IsNullOrWhiteSpace($ram) -or
-                ($info.MostrarBateria -and [string]::IsNullOrWhiteSpace($bat))) {
+            $monitorTamanho = Get-MonitorTamanhoNumero -Valor $txtMonitorTamanho.Text
+            $monitorEntradas = @($entradaChecks | Where-Object { $_.Checked } | ForEach-Object { [string]$_.Text })
+            $isMonitorManual = ([string]$manualForm.Tag -eq 'Monitor')
+            $isCelularManual = ([string]$manualForm.Tag -eq 'Celular')
+            $isDesktopManual = ([string]$manualForm.Tag -eq 'Desktop')
+            $isNotebookManual = ([string]$manualForm.Tag -eq 'Notebook')
+            $celularImei = ($txtCelularImei.Text -replace '[^0-9]', '')
+            $celularBateria = $txtCelularBateria.Text.Trim()
+            $celularArmazenamento = $txtCelularArmazenamento.Text.Trim()
+            $faltamDadosBase = (
+                [string]::IsNullOrWhiteSpace($modelo) -or
+                [string]::IsNullOrWhiteSpace($serial)
+            )
+            $faltamDadosMonitor = (
+                $isMonitorManual -and (
+                    [string]::IsNullOrWhiteSpace($monitorTamanho) -or
+                    $monitorEntradas.Count -eq 0
+                )
+            )
+            $faltamDadosCelular = $false
+            $faltamDadosNotebook = (
+                $isNotebookManual -and (
+                    [string]::IsNullOrWhiteSpace($cpu) -or
+                    [string]::IsNullOrWhiteSpace($mem) -or
+                    [string]::IsNullOrWhiteSpace($ram) -or
+                    ($info.MostrarBateria -and [string]::IsNullOrWhiteSpace($bat))
+                )
+            )
+            if ($faltamDadosBase -or $faltamDadosMonitor -or $faltamDadosCelular -or $faltamDadosNotebook) {
+                $mensagemObrigatoria = if ($isMonitorManual) {
+                    'Informe modelo, serial, tamanho e ao menos uma entrada do monitor.'
+                } elseif ($isCelularManual) {
+                    'Informe nome e Serial Number do celular. IMEI e bateria sao opcionais.'
+                } else {
+                    'Preencha todos os campos para salvar os dados manuais.'
+                }
                 [System.Windows.Forms.MessageBox]::Show(
-                    'Preencha todos os campos para salvar os dados manuais.',
+                    $mensagemObrigatoria,
                     'Campos obrigatorios',
                     'OK',
                     'Warning'
                 ) | Out-Null
                 return
             }
+            if ($isCelularManual -and $celularImei -and $celularImei.Length -ne 15) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    'O IMEI deve conter exatamente 15 numeros.',
+                    'IMEI invalido',
+                    'OK',
+                    'Warning'
+                ) | Out-Null
+                $txtCelularImei.Focus() | Out-Null
+                $txtCelularImei.SelectAll()
+                return
+            }
+            $serialAnterior = Find-SerialManualNoHistorico -Serial $serial
+            if ($serialAnterior) {
+                $osAnterior = if ($serialAnterior.os) { [string]$serialAnterior.os } else { 'OS nao informada' }
+                $dataAnterior = if ($serialAnterior.dataHora) { [string]$serialAnterior.dataHora } else { 'data nao informada' }
+                $continuarSerial = [System.Windows.Forms.MessageBox]::Show(
+                    "A serial $serial ja aparece no historico.`n`nRegistro: $osAnterior em $dataAnterior.`n`nDeseja continuar mesmo assim?",
+                    'Serial ja utilizada',
+                    [System.Windows.Forms.MessageBoxButtons]::YesNo,
+                    [System.Windows.Forms.MessageBoxIcon]::Warning
+                )
+                if ($continuarSerial -ne [System.Windows.Forms.DialogResult]::Yes) {
+                    $txtSerial.Focus() | Out-Null
+                    $txtSerial.SelectAll()
+                    return
+                }
+            }
             $script:modeloEtiqueta = $modelo
             $script:serialEtiqueta = $serial
-            $script:cpuEtiqueta    = $cpu
-            $script:memEtiqueta    = $mem
-            $script:ramEtiqueta    = $ram
-            $script:gpuEtiqueta    = $gpu
-            $script:bateriaEtiqueta = $bat
+            $script:tipoEtiqueta = if ($isMonitorManual) { 'Monitor' } elseif ($isCelularManual) { 'Celular' } elseif ($isDesktopManual) { 'Desktop' } else { 'Notebook' }
+            if ($isCelularManual -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') {
+                $script:gradeAtual = 'C'
+                $script:pinturaOpcaoAtual = ''
+            }
+            if ($isMonitorManual) {
+                $script:monitorTamanhoEtiqueta = Format-MonitorTamanhoEtiqueta -Valor $monitorTamanho
+                $script:monitorEntradasEtiqueta = ($monitorEntradas -join ' / ')
+                $script:celularImeiEtiqueta = ''
+                $script:cpuEtiqueta = ''
+                $script:memEtiqueta = ''
+                $script:ramEtiqueta = ''
+                $script:gpuEtiqueta = ''
+                $script:bateriaEtiqueta = $null
+            } elseif ($isCelularManual) {
+                $script:monitorTamanhoEtiqueta = ''
+                $script:monitorEntradasEtiqueta = ''
+                $script:celularImeiEtiqueta = $celularImei
+                $script:cpuEtiqueta = ''
+                $script:memEtiqueta = $celularArmazenamento
+                $script:ramEtiqueta = ''
+                $script:gpuEtiqueta = ''
+                $script:bateriaEtiqueta = $celularBateria
+            } else {
+                $script:monitorTamanhoEtiqueta = ''
+                $script:monitorEntradasEtiqueta = ''
+                $script:celularImeiEtiqueta = ''
+                $script:cpuEtiqueta    = $cpu
+                $script:memEtiqueta    = $mem
+                $script:ramEtiqueta    = $ram
+                $script:gpuEtiqueta    = $gpu
+                $script:bateriaEtiqueta = if ($isDesktopManual) { $null } else { $bat }
+            }
             $script:modoManualEtiqueta = $true
             Add-ModeloManualHistorico -Modelo $modelo
+            $modeloPersistido = Save-ModeloManualUltimo -Tipo ([string]$script:tipoEtiqueta) -Modelo $modelo
+            if (-not $modeloPersistido) {
+                [System.Windows.Forms.MessageBox]::Show(
+                    'Os dados foram aplicados, mas nao foi possivel salvar o modelo para a proxima abertura.',
+                    'Modelo nao persistido',
+                    'OK',
+                    'Warning'
+                ) | Out-Null
+            }
             $manualForm.DialogResult = 'OK'
             $manualForm.Close()
         })
         $manualForm.Controls.Add($btnManualSalvar)
+        Set-RoundedControl -Control $btnManualSalvar -Radius 8
+        $manualForm.AcceptButton = $btnManualSalvar
+        $manualForm.CancelButton = $btnManualCancelar
 
+        foreach ($controleManualExistente in @($manualForm.Controls)) {
+            $controleManualExistente.Top += 64
+        }
+
+        $manualHeader = New-Object System.Windows.Forms.Panel
+        $manualHeader.Location = New-Object System.Drawing.Point(0, 0)
+        $manualHeader.Size = New-Object System.Drawing.Size(440, 64)
+        $manualHeader.BackColor = $previewUiSurface
+        [void]$manualForm.Controls.Add($manualHeader)
+
+        $manualHeaderLine = New-Object System.Windows.Forms.Panel
+        $manualHeaderLine.Location = New-Object System.Drawing.Point(0, 63)
+        $manualHeaderLine.Size = New-Object System.Drawing.Size(440, 1)
+        $manualHeaderLine.BackColor = $previewUiBorder
+        [void]$manualHeader.Controls.Add($manualHeaderLine)
+
+        $manualEyebrow = New-Object System.Windows.Forms.Label
+        $manualEyebrow.Text = 'ETIQUETA  /  DADOS MANUAIS'
+        $manualEyebrow.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 6.8, [System.Drawing.FontStyle]::Bold)
+        $manualEyebrow.ForeColor = $previewUiPrimaryHover
+        $manualEyebrow.Location = New-Object System.Drawing.Point(20, 10)
+        $manualEyebrow.Size = New-Object System.Drawing.Size(280, 14)
+        [void]$manualHeader.Controls.Add($manualEyebrow)
+
+        $manualTitle = New-Object System.Windows.Forms.Label
+        $manualTitle.Text = 'Preencher dados manualmente'
+        $manualTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 13, [System.Drawing.FontStyle]::Bold)
+        $manualTitle.ForeColor = $previewUiText
+        $manualTitle.Location = New-Object System.Drawing.Point(18, 27)
+        $manualTitle.Size = New-Object System.Drawing.Size(340, 25)
+        [void]$manualHeader.Controls.Add($manualTitle)
+
+        $manualClose = New-Object System.Windows.Forms.Button
+        $manualClose.Text = [string][char]0x00D7
+        $manualClose.Font = New-Object System.Drawing.Font('Segoe UI', 15)
+        $manualClose.ForeColor = $previewUiMuted
+        $manualClose.BackColor = $previewUiSurface
+        $manualClose.FlatStyle = 'Flat'
+        $manualClose.FlatAppearance.BorderSize = 0
+        $manualClose.FlatAppearance.MouseOverBackColor = $previewUiRaised
+        $manualClose.Location = New-Object System.Drawing.Point(396, 10)
+        $manualClose.Size = New-Object System.Drawing.Size(32, 32)
+        $manualClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+        $manualClose.Add_Click({ $manualForm.DialogResult = 'Cancel'; $manualForm.Close() })
+        [void]$manualHeader.Controls.Add($manualClose)
+
+        $manualDrag = [pscustomobject]@{ Ativo=$false; Origem=[System.Drawing.Point]::Empty }
+        $manualHeader.Add_MouseDown({
+            if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) { $manualDrag.Ativo=$true; $manualDrag.Origem=$_.Location }
+        })
+        $manualHeader.Add_MouseMove({
+            if ($manualDrag.Ativo) { $manualForm.Location = New-Object System.Drawing.Point(($manualForm.Left + $_.X - $manualDrag.Origem.X), ($manualForm.Top + $_.Y - $manualDrag.Origem.Y)) }
+        })
+        $manualHeader.Add_MouseUp({ $manualDrag.Ativo=$false })
+
+        $manualFooterLine = New-Object System.Windows.Forms.Panel
+        $manualFooterLine.Location = New-Object System.Drawing.Point(16, 510)
+        $manualFooterLine.Size = New-Object System.Drawing.Size(392, 1)
+        $manualFooterLine.BackColor = $previewUiBorder
+        [void]$manualForm.Controls.Add($manualFooterLine)
+        $manualHeader.BringToFront()
+        $manualForm.Add_Shown({
+            $txtModelo.Focus() | Out-Null
+            $txtModelo.SelectAll()
+        })
+
+        Set-CaijWindowsTypography -Root $manualForm
         $resManual = $manualForm.ShowDialog($popup)
         if ($resManual -eq 'OK') {
+            & $script:AtualizarGradeState
+            & $script:AtualizarResumoAltertagPreview
             & $script:DesenharPrevia $script:gradeAtual $script:obsAtual $script:incluirOSAtual
         }
     })
     $popup.Controls.Add($btnManual)
-    Set-RoundedControl -Control $btnManual -Radius 14
+    Set-RoundedControl -Control $btnManual -Radius 8
 
     $btnAuto = New-Object System.Windows.Forms.Button
     $btnAuto.Text = ([string][char]0x21BB + '  Leitura automatica')
     $btnAuto.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8, [System.Drawing.FontStyle]::Bold)
-    $btnAuto.ForeColor = [System.Drawing.Color]::FromArgb(190, 222, 246)
-    $btnAuto.BackColor = [System.Drawing.Color]::FromArgb(13, 28, 44)
+    $btnAuto.ForeColor = $previewUiText
+    $btnAuto.BackColor = $previewUiRaised
     $btnAuto.FlatStyle = 'Flat'
-    $btnAuto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(54, 96, 130)
-    $btnAuto.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(18, 42, 64)
+    $btnAuto.FlatAppearance.BorderColor = $previewUiBorder
+    $btnAuto.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 52)
     $btnAuto.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnAuto.Location = New-Object System.Drawing.Point(644, 514)
-    $btnAuto.Size = New-Object System.Drawing.Size(146, 30)
+    $btnAuto.Location = New-Object System.Drawing.Point(320, 508)
+    $btnAuto.Size = New-Object System.Drawing.Size(174, 30)
     $btnAuto.Add_Click({
         $script:modeloEtiqueta = $info.Modelo
         $script:serialEtiqueta = $info.Serial
@@ -6414,45 +9535,49 @@ $btnImprimir.Add_Click({
         $script:ramEtiqueta    = $ramCurto
         $script:gpuEtiqueta    = $gpuCurta
         $script:bateriaEtiqueta = if ($info.MostrarBateria) { $info.BatSaude } else { $null }
+        $script:tipoEtiqueta = [string]$info.TipoEquipamento
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
         $script:modoManualEtiqueta = $false
         & $script:DesenharPrevia $script:gradeAtual (& $script:GetObsImpressao) $script:incluirOSAtual
     })
     $popup.Controls.Add($btnAuto)
-    Set-RoundedControl -Control $btnAuto -Radius 14
+    Set-RoundedControl -Control $btnAuto -Radius 8
 
     # Caption da linha de fonte de dados
     $lblFonteDados = New-Object System.Windows.Forms.Label
     $lblFonteDados.Text      = 'FONTE DOS DADOS'
     $lblFonteDados.Font      = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
-    $lblFonteDados.ForeColor = [System.Drawing.Color]::FromArgb(70, 105, 138)
+    $lblFonteDados.ForeColor = $previewUiMuted
     $lblFonteDados.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-    $lblFonteDados.Location  = New-Object System.Drawing.Point(644, 486)
-    $lblFonteDados.Size      = New-Object System.Drawing.Size(240, 22)
+    $lblFonteDados.Location  = New-Object System.Drawing.Point(320, 480)
+    $lblFonteDados.Size      = New-Object System.Drawing.Size(292, 22)
     $popup.Controls.Add($lblFonteDados)
 
     # Divisor acima do rodape
     $footerDivider = New-Object System.Windows.Forms.Panel
-    $footerDivider.BackColor = [System.Drawing.Color]::FromArgb(20, 42, 62)
-    $footerDivider.Location  = New-Object System.Drawing.Point(20, 590)
+    $footerDivider.BackColor = $previewUiBorder
+    $footerDivider.Location  = New-Object System.Drawing.Point(20, 558)
     $footerDivider.Size      = New-Object System.Drawing.Size(880, 1)
     $popup.Controls.Add($footerDivider)
 
     # Estado visual do seletor de fonte (chip ativo acende)
     $script:UpdateFonteDados = {
         if ($script:modoManualEtiqueta) {
-            $btnManual.ForeColor = [System.Drawing.Color]::FromArgb(255, 230, 170)
-            $btnManual.BackColor = [System.Drawing.Color]::FromArgb(44, 32, 12)
-            $btnManual.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(176, 122, 28)
-            $btnAuto.ForeColor = [System.Drawing.Color]::FromArgb(150, 176, 198)
-            $btnAuto.BackColor = [System.Drawing.Color]::FromArgb(11, 22, 34)
-            $btnAuto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(34, 58, 82)
+            $btnManual.ForeColor = [System.Drawing.Color]::White
+            $btnManual.BackColor = $previewUiPrimary
+            $btnManual.FlatAppearance.BorderColor = $previewUiPrimary
+            $btnAuto.ForeColor = $previewUiMuted
+            $btnAuto.BackColor = $previewUiRaised
+            $btnAuto.FlatAppearance.BorderColor = $previewUiBorder
         } else {
-            $btnAuto.ForeColor = [System.Drawing.Color]::FromArgb(190, 222, 246)
-            $btnAuto.BackColor = [System.Drawing.Color]::FromArgb(13, 38, 58)
-            $btnAuto.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(0, 130, 190)
-            $btnManual.ForeColor = [System.Drawing.Color]::FromArgb(150, 176, 198)
-            $btnManual.BackColor = [System.Drawing.Color]::FromArgb(11, 22, 34)
-            $btnManual.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(34, 58, 82)
+            $btnAuto.ForeColor = [System.Drawing.Color]::White
+            $btnAuto.BackColor = $previewUiPrimary
+            $btnAuto.FlatAppearance.BorderColor = $previewUiPrimary
+            $btnManual.ForeColor = $previewUiMuted
+            $btnManual.BackColor = $previewUiRaised
+            $btnManual.FlatAppearance.BorderColor = $previewUiBorder
         }
     }
     $btnAuto.Add_Click({ & $script:UpdateFonteDados })
@@ -6463,13 +9588,13 @@ $btnImprimir.Add_Click({
     $btnConfirmar.Text = 'Confirmar e Imprimir'
     $btnConfirmar.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8.5, [System.Drawing.FontStyle]::Bold)
     $btnConfirmar.ForeColor = [System.Drawing.Color]::White
-    $btnConfirmar.BackColor = [System.Drawing.Color]::FromArgb(0, 126, 72)
+    $btnConfirmar.BackColor = $previewUiPrimary
     $btnConfirmar.FlatStyle = 'Flat'
-    $btnConfirmar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(24, 206, 126)
-    $btnConfirmar.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(0, 148, 84)
-    $btnConfirmar.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(0, 104, 60)
+    $btnConfirmar.FlatAppearance.BorderColor = $previewUiPrimary
+    $btnConfirmar.FlatAppearance.MouseOverBackColor = $previewUiPrimaryHover
+    $btnConfirmar.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(78, 89, 184)
     $btnConfirmar.Cursor = [System.Windows.Forms.Cursors]::Hand
-    $btnConfirmar.Location = New-Object System.Drawing.Point(738, 608)
+    $btnConfirmar.Location = New-Object System.Drawing.Point(738, 576)
     $btnConfirmar.Size = New-Object System.Drawing.Size(162, 36)
     $script:UpdateConfirmState = {
         $obsTextoSt = if ($script:obsAtual) { $script:obsAtual.Trim() } else { '' }
@@ -6480,8 +9605,8 @@ $btnImprimir.Add_Click({
             $btnConfirmar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(170, 128, 26)
         } else {
             $btnConfirmar.Text = 'Imprimir'
-            $btnConfirmar.BackColor = [System.Drawing.Color]::FromArgb(0, 126, 72)
-            $btnConfirmar.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(24, 206, 126)
+            $btnConfirmar.BackColor = $previewUiPrimary
+            $btnConfirmar.FlatAppearance.BorderColor = $previewUiPrimary
         }
     }
     & $script:UpdateConfirmState
@@ -6529,6 +9654,7 @@ $btnImprimir.Add_Click({
         $gradeLabel,
         $gradeHairline,
         $obsPanel,
+        $altertagCard,
         $osCard,
         $lblFonteDados,
         $btnAuto,
@@ -6540,11 +9666,36 @@ $btnImprimir.Add_Click({
         if ($gradeControl) { $gradeControl.BringToFront() }
     }
 
+    $script:osPreviewRefreshAction = {
+        if ($popup -and -not $popup.IsDisposed) {
+            if (-not $printContext.CriadaAgora) {
+                $printContext.OsNumero = [int]$script:osNumero
+            }
+            $btnAlterarOsPreview.Text = (Format-OsCodigo -Numero $printContext.OsNumero)
+            & $script:DesenharPrevia $script:gradeAtual (& $script:GetObsImpressao) $script:incluirOSAtual
+        }
+    }.GetNewClosure()
+    $abrirManualAutomaticamente = (
+        ($reusarPreviaManual -and $script:abrirManualNaProximaPrevia) -or
+        $script:abrirManualPorOsSelecionada
+    )
+    if ($abrirManualAutomaticamente) {
+        $script:abrirManualNaProximaPrevia = $false
+        $script:abrirManualPorOsSelecionada = $false
+        $popup.Add_Shown({
+            [void]$popup.BeginInvoke([System.Action]{
+                if ($btnManual.Enabled) { $btnManual.PerformClick() }
+            })
+        })
+    }
+    Set-CaijWindowsTypography -Root $popup
     $resultado = $popup.ShowDialog()
+    $script:osPreviewRefreshAction = $null
+    $script:AtualizarResumoAltertagPreview = $null
 
     if ($resultado -ne 'OK') {
         $btnImprimir.Enabled = $true
-        $btnImprimir.Text    = ([string][char]0x2399 + '  Imprimir Etiqueta via Rede')
+        $btnImprimir.Text    = ([string][char]0x2399 + '  Imprimir etiqueta')
         return
     }
 
@@ -6553,7 +9704,7 @@ $btnImprimir.Add_Click({
     [System.Windows.Forms.Application]::DoEvents()
 
     # Monta JSON com dados + grade + obs
-    if ($script:incluirOSAtual -and -not $script:osDefinidaPorTriagem -and -not $script:osDefinidaPorAltertag -and -not $script:osDefinidaManual) {
+    if ($script:incluirOSAtual -and -not $printContext.CriadaAgora -and -not $script:osDefinidaPorTriagem -and -not $script:osDefinidaPorAltertag -and -not $script:osDefinidaManual) {
         try {
             $respReserva = Invoke-CaijServer -Path '/proxima-os' -Method POST -Body '{}' -TimeoutSec 12 -Retries 3
             if ($respReserva -and [string]$respReserva.status -eq 'ok' -and $respReserva.osNumero) {
@@ -6564,17 +9715,26 @@ $btnImprimir.Add_Click({
             Set-AppStatus -Texto 'Falha ao reservar OS no servidor | usando OS local' -Cor $cYellow
         }
     } elseif ($script:incluirOSAtual -and $script:osDefinidaPorTriagem) {
-        Set-AppStatus -Texto "OS da triagem aplicada: $(Format-OsCodigo -Numero $script:osNumero)" -Cor $cGreen
-    } elseif ($script:incluirOSAtual -and $script:osDefinidaPorAltertag) {
-        Set-AppStatus -Texto "OS Altertag confirmada para impressao: $(Format-OsCodigo -Numero $script:osNumero)" -Cor $cGreen
+        Set-AppStatus -Texto "OS da triagem aplicada: $(Format-OsCodigo -Numero $printContext.OsNumero)" -Cor $cGreen
+    } elseif ($script:incluirOSAtual -and ($script:osDefinidaPorAltertag -or $printContext.CriadaAgora)) {
+        Set-AppStatus -Texto "OS Altertag confirmada para impressao: $(Format-OsCodigo -Numero $printContext.OsNumero)" -Cor $cGreen
     }
 
+    $gpuPayload = if ($script:modoManualEtiqueta) {
+        [string]$script:gpuEtiqueta
+    } else {
+        [string]$info.GPU
+    }
     $dadosJson = @{
-        os      = if ($script:incluirOSAtual) { $script:osNumero } else { $null }
+        os      = if ($script:incluirOSAtual) { $printContext.OsNumero } else { $null }
         modelo  = $script:modeloEtiqueta
         serial  = $script:serialEtiqueta
+        tipoEquipamento = if ($script:tipoEtiqueta) { [string]$script:tipoEtiqueta } else { 'Notebook' }
+        monitorTamanho = [string]$script:monitorTamanhoEtiqueta
+        monitorEntradas = [string]$script:monitorEntradasEtiqueta
+        celularImei = [string]$script:celularImeiEtiqueta
         cpu     = $script:cpuEtiqueta
-        gpu     = if (& $script:IsGpuEtiquetaVisivel $script:gpuEtiqueta) { $script:gpuEtiqueta } else { $null }
+        gpu     = if (& $script:IsGpuEtiquetaVisivel $gpuPayload) { $gpuPayload } else { $null }
         ram     = $script:ramEtiqueta
         ramMods = $script:ramEtiqueta
         disco   = $script:memEtiqueta
@@ -6607,13 +9767,45 @@ $btnImprimir.Add_Click({
         $impressaoConcluida = $true
         $btnImprimir.Text      = 'Etiqueta Enviada!'
         $btnImprimir.BackColor = [System.Drawing.Color]::FromArgb(0, 110, 50)
-        Add-HistoricoNotebook -Acao 'impressao' -Status 'ok' -Mensagem 'Etiqueta enviada com sucesso' -Grade $script:gradeAtual -Obs $script:obsAtual
-        $statusOsRegistrado = Register-OsAltertagStatusImpressao -Grade $script:gradeAtual -Obs $script:obsAtual
+        $gradeImpressa = if ($script:rnaAtivo) { 'RMA' } elseif ($script:gradeAtual) { [string]$script:gradeAtual } else { 'A' }
+        $script:ultimaEtiquetaPayload = [string]$dadosJson
+        $script:ultimaEtiquetaResumo = [pscustomobject]@{
+            osNumero = [int]$printContext.OsNumero
+            serial = [string]$script:serialEtiqueta
+            modelo = [string]$script:modeloEtiqueta
+            cpu = [string]$script:cpuEtiqueta
+            ram = [string]$script:ramEtiqueta
+            disco = [string]$script:memEtiqueta
+            gpu = [string]$script:gpuEtiqueta
+            bateria = [string]$script:bateriaEtiqueta
+            grade = $gradeImpressa
+            obs = [string]$script:obsAtual
+        }
+        Add-HistoricoNotebook `
+            -Acao 'impressao' `
+            -Status 'ok' `
+            -Mensagem 'Etiqueta enviada com sucesso' `
+            -Grade $gradeImpressa `
+            -Obs $script:obsAtual `
+            -OsNumero $printContext.OsNumero `
+            -Serial $script:serialEtiqueta `
+            -Modelo $script:modeloEtiqueta `
+            -Cpu $script:cpuEtiqueta `
+            -Ram $script:ramEtiqueta `
+            -Disco $script:memEtiqueta `
+            -Gpu $script:gpuEtiqueta `
+            -Bateria ([string]$script:bateriaEtiqueta)
+        $statusOsRegistrado = Register-OsAltertagStatusImpressao `
+            -Grade $script:gradeAtual `
+            -Obs $script:obsAtual `
+            -OsNumero $printContext.OsNumero `
+            -Ordem $printContext.Ordem `
+            -ForcarAltertag:$printContext.CriadaAgora
         if ($script:incluirOSAtual) { Sync-OsFromAltertag -Silent }
         if ($statusOsRegistrado) {
-            Set-AppStatus -Texto "Impresso | status registrado na OS $(Format-OsCodigo -Numero $script:osNumero)" -Cor $cGreen
+            Set-AppStatus -Texto "Impresso | status registrado na OS $(Format-OsCodigo -Numero $printContext.OsNumero)" -Cor $cGreen
         } else {
-            Set-AppStatus -Texto "Impresso | historico salvo | OS $(Format-OsCodigo -Numero $script:osNumero)" -Cor $cGreen
+            Set-AppStatus -Texto "Impresso | historico salvo | OS $(Format-OsCodigo -Numero $printContext.OsNumero)" -Cor $cGreen
         }
     } catch {
         $erro = $_.Exception.Message
@@ -6641,7 +9833,20 @@ $btnImprimir.Add_Click({
         } else {
             [System.Windows.Forms.MessageBox]::Show("Erro: $erro", "Erro de impressao", "OK", "Error") | Out-Null
         }
-        Add-HistoricoNotebook -Acao 'impressao' -Status 'erro' -Mensagem $erro -Grade $script:gradeAtual -Obs $script:obsAtual
+        Add-HistoricoNotebook `
+            -Acao 'impressao' `
+            -Status 'erro' `
+            -Mensagem $erro `
+            -Grade $script:gradeAtual `
+            -Obs $script:obsAtual `
+            -OsNumero $printContext.OsNumero `
+            -Serial $script:serialEtiqueta `
+            -Modelo $script:modeloEtiqueta `
+            -Cpu $script:cpuEtiqueta `
+            -Ram $script:ramEtiqueta `
+            -Disco $script:memEtiqueta `
+            -Gpu $script:gpuEtiqueta `
+            -Bateria ([string]$script:bateriaEtiqueta)
         Set-AppStatus -Texto 'Falha ao imprimir | historico salvo' -Cor $cRed
         $btnImprimir.Text      = 'Erro ao enviar!'
         $btnImprimir.BackColor = [System.Drawing.Color]::FromArgb(130, 30, 30)
@@ -6651,60 +9856,52 @@ $btnImprimir.Add_Click({
     $resetImpTimer = New-Object System.Windows.Forms.Timer
     $resetImpTimer.Interval = 1500
     $resetImpTimer.Add_Tick({
-        $btnImprimir.Text      = ([string][char]0x2399 + '  Imprimir Etiqueta via Rede')
-        $btnImprimir.BackColor = [System.Drawing.Color]::FromArgb(8, 44, 70)
+        $btnImprimir.Text      = ([string][char]0x2399 + '  Imprimir etiqueta')
+        $btnImprimir.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
         $this.Stop()
         $this.Dispose()
     })
     $resetImpTimer.Start()
 
     if ($impressaoConcluida -and $script:modoManualEtiqueta) {
-        $script:reabrindoPreviaManual = $true
+        $script:modeloEtiqueta = ''
+        $script:serialEtiqueta = ''
+        $script:cpuEtiqueta = ''
+        $script:memEtiqueta = ''
+        $script:ramEtiqueta = ''
+        $script:gpuEtiqueta = ''
+        $script:bateriaEtiqueta = $null
+        $script:monitorTamanhoEtiqueta = ''
+        $script:monitorEntradasEtiqueta = ''
+        $script:celularImeiEtiqueta = ''
+        $script:obsAtual = ''
+        $script:rnaAtivo = $false
+        $script:rnaItensOk = @()
+        $script:modoManualEtiqueta = $false
+        $script:abrirManualNaProximaPrevia = $false
+        $script:reabrindoPreviaManual = $false
         if ($script:reabrirPreviaTimer) {
             try { $script:reabrirPreviaTimer.Stop(); $script:reabrirPreviaTimer.Dispose() } catch {}
-        }
-        $script:reabrirPreviaTimer = New-Object System.Windows.Forms.Timer
-        $script:reabrirPreviaTimer.Interval = 250
-        $script:reabrirPreviaTimer.Add_Tick({
-            $this.Stop()
-            $this.Dispose()
             $script:reabrirPreviaTimer = $null
-            $btnImprimir.PerformClick()
-        })
-        $script:reabrirPreviaTimer.Start()
+        }
     }
 })
 # ================================================
 # BARRA INFERIOR
 # ================================================
-$botY = $actY + 82
+$botY = $actY + $actBarH
 
 $botBar = New-Object System.Windows.Forms.Panel
-$botBar.BackColor = [System.Drawing.Color]::FromArgb(4, 9, 16)
+$botBar.BackColor = $cSurface
 $botBar.Location  = New-Object System.Drawing.Point(0, $botY)
 $botBar.Size      = New-Object System.Drawing.Size($W, 32)
 $form.Controls.Add($botBar)
 
 $botBar.Add_Paint({
     param($s, $e)
-    # Linha superior com gradiente cyan que desvanece nas pontas
-    $gradRect = New-Object System.Drawing.Rectangle(0, 0, $s.Width, 1)
-    $gradBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        $gradRect,
-        [System.Drawing.Color]::FromArgb(0, 0, 168, 232),
-        [System.Drawing.Color]::FromArgb(0, 0, 168, 232),
-        [System.Drawing.Drawing2D.LinearGradientMode]::Horizontal
-    )
-    $blend = New-Object System.Drawing.Drawing2D.ColorBlend(3)
-    $blend.Colors = @(
-        [System.Drawing.Color]::FromArgb(16, 38, 58),
-        [System.Drawing.Color]::FromArgb(0, 140, 200),
-        [System.Drawing.Color]::FromArgb(16, 38, 58)
-    )
-    $blend.Positions = @([single]0.0, [single]0.5, [single]1.0)
-    $gradBrush.InterpolationColors = $blend
-    $e.Graphics.FillRectangle($gradBrush, $gradRect)
-    $gradBrush.Dispose()
+    $footerPen = New-Object System.Drawing.Pen($cBorder, 1)
+    $e.Graphics.DrawLine($footerPen, 0, 0, $s.Width, 0)
+    $footerPen.Dispose()
 })
 
 # Dot de status (circulo renderizado via Paint)
@@ -6725,14 +9922,14 @@ $botBar.Controls.Add($script:botDot)
 $script:botTxt = New-Object System.Windows.Forms.Label
 $script:botTxt.Text      = 'VERIFICANDO SERVIDOR E OS...'
 $script:botTxt.Font      = New-Object System.Drawing.Font('Segoe UI', 7.5)
-$script:botTxt.ForeColor = [System.Drawing.Color]::FromArgb(110, 152, 188)
+$script:botTxt.ForeColor = $cMuted
 $script:botTxt.Location  = New-Object System.Drawing.Point(28, 9)
 $script:botTxt.Size      = New-Object System.Drawing.Size(546, 14)
 $botBar.Controls.Add($script:botTxt)
 
 # Badge versao (direita)
 $botVerBadge = New-Object System.Windows.Forms.Panel
-$botVerBadge.BackColor   = [System.Drawing.Color]::FromArgb(10, 24, 38)
+$botVerBadge.BackColor   = $cCard
 $botVerBadge.Location    = New-Object System.Drawing.Point(588, 7)
 $botVerBadge.Size        = New-Object System.Drawing.Size(88, 18)
 $botVerBadge.BorderStyle = 'None'
@@ -6747,7 +9944,7 @@ $botVerBadge.Add_Paint({
     $path.AddArc($w9-$r9*2, $h9-$r9*2, $r9*2, $r9*2, 0, 90)
     $path.AddArc(0, $h9-$r9*2, $r9*2, $r9*2, 90, 90)
     $path.CloseFigure()
-    $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(28, 58, 84), 1)
+    $pen = New-Object System.Drawing.Pen($cBorder, 1)
     $e.Graphics.DrawPath($pen, $path)
     $pen.Dispose(); $path.Dispose()
 })
@@ -6755,7 +9952,7 @@ $botVerBadge.Add_Paint({
 $botVer = New-Object System.Windows.Forms.Label
 $botVer.Text      = 'v4.1'
 $botVer.Font      = New-Object System.Drawing.Font('Segoe UI', 7.5, [System.Drawing.FontStyle]::Bold)
-$botVer.ForeColor = [System.Drawing.Color]::FromArgb(60, 110, 155)
+$botVer.ForeColor = $cMuted
 $botVer.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
 $botVer.Location  = New-Object System.Drawing.Point(0, 2)
 $botVer.Size      = New-Object System.Drawing.Size(88, 14)
@@ -6842,11 +10039,250 @@ function Hide-NewOsAlert {
     if ($script:osAlertPanel) { $script:osAlertPanel.Visible = $false }
 }
 
+function Show-OsConcorrenciaPopup {
+    param(
+        $Os,
+        [int]$ProximaOs,
+        [int]$NovasCount = 1
+    )
+    if ($script:osGlobalAlertOpen -or -not $Os) { return }
+    $numeroCriado = [int]$Os.numero
+    if ($numeroCriado -lt 1 -or $ProximaOs -lt 1) { return }
+
+    $script:osGlobalAlertOpen = $true
+    $owner = [System.Windows.Forms.Form]::ActiveForm
+    if (-not $owner -or $owner.IsDisposed) { $owner = $form }
+
+    $alertForm = New-Object System.Windows.Forms.Form
+    $alertForm.Text = 'Atualizacao de ordem de servico'
+    $alertForm.ClientSize = New-Object System.Drawing.Size(540, 326)
+    $alertForm.StartPosition = 'CenterParent'
+    $alertForm.FormBorderStyle = 'None'
+    $alertForm.BackColor = [System.Drawing.Color]::FromArgb(7, 9, 17)
+    $alertForm.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $alertForm.ShowInTaskbar = $false
+    $alertForm.TopMost = $true
+    $alertForm.KeyPreview = $true
+    Set-RoundedControl -Control $alertForm -Radius 10
+    $alertForm.Add_Paint({
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $_.Graphics.DrawRectangle($pen, 0, 0, ($this.Width - 1), ($this.Height - 1))
+        $pen.Dispose()
+    })
+
+    $header = New-Object System.Windows.Forms.Panel
+    $header.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
+    $header.Location = New-Object System.Drawing.Point(0, 0)
+    $header.Size = New-Object System.Drawing.Size(540, 78)
+    [void]$alertForm.Controls.Add($header)
+    $header.Add_Paint({
+        param($s, $e)
+        $headerLine = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $e.Graphics.DrawLine($headerLine, 0, ($s.Height - 1), $s.Width, ($s.Height - 1))
+        $headerLine.Dispose()
+    })
+
+    $headerRail = New-Object System.Windows.Forms.Panel
+    $headerRail.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $headerRail.Location = New-Object System.Drawing.Point(0, 0)
+    $headerRail.Size = New-Object System.Drawing.Size(0, 78)
+    [void]$header.Controls.Add($headerRail)
+
+    $eyebrow = New-Object System.Windows.Forms.Label
+    $eyebrow.Text = 'SINCRONIZACAO DA BANCADA'
+    $eyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $eyebrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $eyebrow.Location = New-Object System.Drawing.Point(22, 11)
+    $eyebrow.Size = New-Object System.Drawing.Size(300, 16)
+    [void]$header.Controls.Add($eyebrow)
+
+    $alertTitle = New-Object System.Windows.Forms.Label
+    $alertTitle.Text = 'Nova OS detectada'
+    $alertTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 16, [System.Drawing.FontStyle]::Bold)
+    $alertTitle.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $alertTitle.Location = New-Object System.Drawing.Point(20, 30)
+    $alertTitle.Size = New-Object System.Drawing.Size(360, 34)
+    [void]$header.Controls.Add($alertTitle)
+
+    $livePill = New-Object System.Windows.Forms.Panel
+    $livePill.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $livePill.Location = New-Object System.Drawing.Point(386, 23)
+    $livePill.Size = New-Object System.Drawing.Size(112, 30)
+    [void]$header.Controls.Add($livePill)
+    Set-RoundedControl -Control $livePill -Radius 8
+    $livePill.Add_Paint({
+        param($s, $e)
+        $pillBorder = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $e.Graphics.DrawRectangle($pillBorder, 0, 0, ($s.Width - 1), ($s.Height - 1))
+        $pillBorder.Dispose()
+    })
+
+    $liveText = New-Object System.Windows.Forms.Label
+    $liveText.Text = 'ATUALIZADO'
+    $liveText.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $liveText.ForeColor = [System.Drawing.Color]::FromArgb(46, 204, 113)
+    $liveText.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $liveText.Dock = 'Fill'
+    [void]$livePill.Controls.Add($liveText)
+
+    $alertClose = New-Object System.Windows.Forms.Button
+    $alertClose.Text = 'X'
+    $alertClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
+    $alertClose.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $alertClose.BackColor = $header.BackColor
+    $alertClose.FlatStyle = 'Flat'
+    $alertClose.FlatAppearance.BorderSize = 0
+    $alertClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $alertClose.Location = New-Object System.Drawing.Point(505, 6)
+    $alertClose.Size = New-Object System.Drawing.Size(28, 28)
+    $alertClose.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $alertClose.Add_Click({ $alertForm.Close() })
+    [void]$header.Controls.Add($alertClose)
+
+    $alertDrag = @{ Active = $false; Mouse = [System.Drawing.Point]::Empty; Form = [System.Drawing.Point]::Empty }
+    $header.Add_MouseDown({
+        if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+            $alertDrag.Active = $true
+            $alertDrag.Mouse = [System.Windows.Forms.Cursor]::Position
+            $alertDrag.Form = $alertForm.Location
+        }
+    })
+    $header.Add_MouseMove({
+        if ($alertDrag.Active) {
+            $mouseNow = [System.Windows.Forms.Cursor]::Position
+            $alertForm.Location = New-Object System.Drawing.Point(
+                ($alertDrag.Form.X + $mouseNow.X - $alertDrag.Mouse.X),
+                ($alertDrag.Form.Y + $mouseNow.Y - $alertDrag.Mouse.Y)
+            )
+        }
+    })
+    $header.Add_MouseUp({ $alertDrag.Active = $false })
+
+    $tecnico = ([string]$Os.tecnico).Trim()
+    if (-not $tecnico) { $tecnico = 'outra estacao' }
+    $hora = (Get-Date).ToString('HH:mm:ss')
+    try {
+        if ($Os.dataCadastro) { $hora = ([datetime]::Parse([string]$Os.dataCadastro)).ToString('HH:mm:ss') }
+    } catch {}
+    $extra = if ($NovasCount -gt 1) { " e mais $($NovasCount - 1)" } else { '' }
+
+    $detail = New-Object System.Windows.Forms.Label
+    $detail.Text = "$(Format-OsCodigo -Numero $numeroCriado) foi criada por $tecnico as $hora$extra."
+    $detail.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+    $detail.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $detail.Location = New-Object System.Drawing.Point(22, 92)
+    $detail.Size = New-Object System.Drawing.Size(496, 22)
+    [void]$alertForm.Controls.Add($detail)
+
+    $createdCard = New-Object System.Windows.Forms.Panel
+    $createdCard.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $createdCard.Location = New-Object System.Drawing.Point(22, 126)
+    $createdCard.Size = New-Object System.Drawing.Size(210, 76)
+    [void]$alertForm.Controls.Add($createdCard)
+    Set-RoundedControl -Control $createdCard -Radius 8
+    $createdCard.Add_Paint({
+        param($s, $e)
+        $cardBorder = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
+        $e.Graphics.DrawRectangle($cardBorder, 0, 0, ($s.Width - 1), ($s.Height - 1))
+        $cardBorder.Dispose()
+    })
+
+    $createdCaption = New-Object System.Windows.Forms.Label
+    $createdCaption.Text = 'OS CRIADA EM OUTRA ESTACAO'
+    $createdCaption.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $createdCaption.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $createdCaption.Location = New-Object System.Drawing.Point(14, 11)
+    $createdCaption.Size = New-Object System.Drawing.Size(170, 16)
+    [void]$createdCard.Controls.Add($createdCaption)
+
+    $createdValue = New-Object System.Windows.Forms.Label
+    $createdValue.Text = (Format-OsCodigo -Numero $numeroCriado)
+    $createdValue.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
+    $createdValue.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $createdValue.Location = New-Object System.Drawing.Point(13, 32)
+    $createdValue.Size = New-Object System.Drawing.Size(180, 30)
+    [void]$createdCard.Controls.Add($createdValue)
+
+    $arrow = New-Object System.Windows.Forms.Label
+    $arrow.Text = [char]0x2192
+    $arrow.Font = New-Object System.Drawing.Font('Segoe UI Symbol', 18, [System.Drawing.FontStyle]::Bold)
+    $arrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $arrow.TextAlign = [System.Drawing.ContentAlignment]::MiddleCenter
+    $arrow.Location = New-Object System.Drawing.Point(238, 146)
+    $arrow.Size = New-Object System.Drawing.Size(62, 34)
+    [void]$alertForm.Controls.Add($arrow)
+
+    $nextCard = New-Object System.Windows.Forms.Panel
+    $nextCard.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
+    $nextCard.Location = New-Object System.Drawing.Point(306, 126)
+    $nextCard.Size = New-Object System.Drawing.Size(212, 76)
+    [void]$alertForm.Controls.Add($nextCard)
+    Set-RoundedControl -Control $nextCard -Radius 8
+    $nextCard.Add_Paint({
+        param($s, $e)
+        $nextBorder = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(94, 106, 210), 1)
+        $e.Graphics.DrawRectangle($nextBorder, 0, 0, ($s.Width - 1), ($s.Height - 1))
+        $nextBorder.Dispose()
+    })
+
+    $nextCaption = New-Object System.Windows.Forms.Label
+    $nextCaption.Text = 'SUA PROXIMA OS'
+    $nextCaption.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+    $nextCaption.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $nextCaption.Location = New-Object System.Drawing.Point(14, 11)
+    $nextCaption.Size = New-Object System.Drawing.Size(180, 16)
+    [void]$nextCard.Controls.Add($nextCaption)
+
+    $nextValue = New-Object System.Windows.Forms.Label
+    $nextValue.Text = (Format-OsCodigo -Numero $ProximaOs)
+    $nextValue.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 15, [System.Drawing.FontStyle]::Bold)
+    $nextValue.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
+    $nextValue.Location = New-Object System.Drawing.Point(13, 32)
+    $nextValue.Size = New-Object System.Drawing.Size(184, 30)
+    [void]$nextCard.Controls.Add($nextValue)
+
+    $message = New-Object System.Windows.Forms.Label
+    $message.Text = 'Toda a interface foi atualizada automaticamente para evitar OS duplicada.'
+    $message.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
+    $message.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
+    $message.Location = New-Object System.Drawing.Point(22, 218)
+    $message.Size = New-Object System.Drawing.Size(496, 20)
+    [void]$alertForm.Controls.Add($message)
+
+    $continue = New-Object System.Windows.Forms.Button
+    $continue.Text = "Continuar com $(Format-OsCodigo -Numero $ProximaOs)"
+    $continue.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
+    $continue.ForeColor = [System.Drawing.Color]::White
+    $continue.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
+    $continue.FlatStyle = 'Flat'
+    $continue.FlatAppearance.BorderSize = 0
+    $continue.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
+    $continue.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $continue.Location = New-Object System.Drawing.Point(306, 260)
+    $continue.Size = New-Object System.Drawing.Size(212, 42)
+    $continue.Add_Click({ $alertForm.Close() })
+    [void]$alertForm.Controls.Add($continue)
+    Set-RoundedControl -Control $continue -Radius 7
+    $alertForm.AcceptButton = $continue
+    $alertForm.Add_KeyDown({
+        if ($_.KeyCode -eq [System.Windows.Forms.Keys]::Escape) { $alertForm.Close() }
+    })
+
+    try {
+        Set-CaijWindowsTypography -Root $alertForm
+        [void]$alertForm.ShowDialog($owner)
+    } finally {
+        try { $alertForm.Dispose() } catch {}
+        $script:osGlobalAlertOpen = $false
+    }
+}
+
 function Show-NewOsAlert {
-    param($Os, [int]$NovasCount = 1)
-    if (-not $Os -or -not $script:osAlertPanel) { return }
+    param($Os, [int]$NovasCount = 1, [int]$ProximaOs = 0)
+    if (-not $Os) { return }
     $numero = [int]$Os.numero
     if ($numero -lt 1) { return }
+    if ($ProximaOs -lt 1) { $ProximaOs = $numero + 1 }
     $script:alertaOsAtual = $Os
     $tec = ([string]$Os.tecnico).Trim()
     if (-not $tec) { $tec = 'tecnico nao informado' }
@@ -6856,9 +10292,13 @@ function Show-NewOsAlert {
     } catch {}
     if (-not $hora) { $hora = (Get-Date).ToString('HH:mm:ss') }
     $extra = if ($NovasCount -gt 1) { " (+$($NovasCount - 1) novas)" } else { '' }
-    $script:osAlertText.Text = "OS $(Format-OsCodigo -Numero $numero) adicionada por $tec as $hora$extra"
-    $script:osAlertPanel.Visible = $true
-    $script:osAlertPanel.BringToFront()
+    if ($script:osAlertText) {
+        $script:osAlertText.Text = "OS $(Format-OsCodigo -Numero $numero) adicionada por $tec as $hora$extra"
+    }
+    Hide-NewOsAlert
+    Set-OsNumeroAtual -Numero $ProximaOs -Fonte 'concorrencia'
+    Set-AppStatus -Texto "OS $(Format-OsCodigo -Numero $numero) criada em outra estacao | usando $(Format-OsCodigo -Numero $ProximaOs)" -Cor $cGreen
+    Show-OsConcorrenciaPopup -Os $Os -ProximaOs $ProximaOs -NovasCount $NovasCount
 }
 
 $script:btnUsarOsNova.Add_Click({
@@ -6885,11 +10325,17 @@ function Update-OsRecentesMonitor {
     if ($script:osAlertMonitorBusy) { return }
     $script:osAlertMonitorBusy = $true
     try {
-        $resp = Invoke-CaijServer -Path '/status-os' -Method GET -TimeoutSec 5 -Retries 1
+        try {
+            $resp = Invoke-CaijServer -Path '/status-os-local' -Method GET -TimeoutSec 4 -Retries 1
+        } catch {
+            $resp = Invoke-CaijServer -Path '/status-os' -Method GET -TimeoutSec 5 -Retries 1
+        }
+        $proximaDetectada = 0
         if ($resp -and [string]$resp.status -eq 'ok' -and $resp.ultimoConfirmado) {
             $maiorStatus = [int]$resp.ultimoConfirmado
             $anteriorConfirmado = [int]$script:ultimoConfirmadoServidor
             $script:ultimoConfirmadoServidor = $maiorStatus
+            if ($resp.proximoDisponivel) { $proximaDetectada = [int]$resp.proximoDisponivel }
             if ($resp.proximoDisponivel -and -not $script:osDefinidaPorAltertag -and -not $script:osDefinidaManual) {
                 Set-OsNumeroAtual -Numero ([int]$resp.proximoDisponivel) -Fonte 'sync'
             }
@@ -6901,10 +10347,21 @@ function Update-OsRecentesMonitor {
         }
 
         $resp = Invoke-CaijServer -Path '/os-recentes?limit=3' -Method GET -TimeoutSec 12 -Retries 1
-        if (-not $resp -or [string]$resp.status -ne 'ok' -or -not $resp.ordens) { return }
+        if (-not $resp -or [string]$resp.status -ne 'ok' -or -not $resp.ordens) {
+            if ($maiorStatus -gt [int]$script:maiorOsVistaAltertag -and $maiorStatus -gt [int]$script:ultimoAlertaOsNumero) {
+                $script:maiorOsVistaAltertag = $maiorStatus
+                Show-NewOsAlert -Os ([pscustomobject]@{ numero = $maiorStatus; tecnico = 'outra estacao' }) -ProximaOs $proximaDetectada
+            }
+            return
+        }
         $ordens = @($resp.ordens | Where-Object { $_ -and $_.numero } | Sort-Object -Property numero -Descending)
         if (-not $ordens -or $ordens.Count -eq 0) { return }
         $maior = [int]$ordens[0].numero
+        if ($maiorStatus -gt $maior -and $maiorStatus -gt [int]$script:maiorOsVistaAltertag -and $maiorStatus -gt [int]$script:ultimoAlertaOsNumero) {
+            $script:maiorOsVistaAltertag = $maiorStatus
+            Show-NewOsAlert -Os ([pscustomobject]@{ numero = $maiorStatus; tecnico = 'outra estacao' }) -ProximaOs $proximaDetectada
+            return
+        }
         if ($PrimeiraLeitura -or $script:maiorOsVistaAltertag -lt 1) {
             $script:maiorOsVistaAltertag = $maior
             $script:ultimoConfirmadoServidor = $maior
@@ -6915,7 +10372,7 @@ function Update-OsRecentesMonitor {
             $novas = @($ordens | Where-Object { [int]$_.numero -gt $baseAnterior })
             $script:maiorOsVistaAltertag = $maior
             $script:ultimoConfirmadoServidor = $maior
-            Show-NewOsAlert -Os $ordens[0] -NovasCount $novas.Count
+            Show-NewOsAlert -Os $ordens[0] -NovasCount $novas.Count -ProximaOs $proximaDetectada
         } elseif ($maior -gt $script:maiorOsVistaAltertag) {
             $script:maiorOsVistaAltertag = $maior
             $script:ultimoConfirmadoServidor = $maior
@@ -6930,7 +10387,90 @@ function Update-OsRecentesMonitor {
 # ================================================
 # TAMANHO FINAL
 # ================================================
-$form.ClientSize = New-Object System.Drawing.Size($W, ($botY + 34))
+$mainClientHeight = $botY + 34
+$form.ClientSize = New-Object System.Drawing.Size($W, $mainClientHeight)
+$form.MinimumSize = $form.Size
+$script:mainLayoutWidth = $W
+$script:mainLayoutHeight = $mainClientHeight
+$script:mainLayoutSuspended = $false
+$script:mainDpiScaleApplied = 1.0
+$script:mainResponsiveScaleX = 1.0
+$script:mainResponsiveScaleY = 1.0
+
+# Guarda os controles principais para dimensionamento responsivo.
+$script:mainLayoutControls = @(
+    foreach ($control in @($form.Controls)) {
+        [pscustomobject]@{
+            Control = $control
+            X = $control.Left
+            Y = $control.Top
+        }
+    }
+)
+$form.Add_ClientSizeChanged({
+    if ($script:mainLayoutSuspended) { return }
+
+    $targetScaleX = [Math]::Max(1.0, ([double]$this.ClientSize.Width / [Math]::Max(1, $script:mainLayoutWidth)))
+    $targetScaleY = [Math]::Max(1.0, ([double]$this.ClientSize.Height / [Math]::Max(1, $script:mainLayoutHeight)))
+    $ratioX = $targetScaleX / [Math]::Max(0.01, $script:mainResponsiveScaleX)
+    $ratioY = $targetScaleY / [Math]::Max(0.01, $script:mainResponsiveScaleY)
+    if ([Math]::Abs($ratioX - 1.0) -lt 0.002 -and [Math]::Abs($ratioY - 1.0) -lt 0.002) { return }
+
+    $script:mainLayoutSuspended = $true
+    try {
+        $this.SuspendLayout()
+        $scaleFactor = New-Object System.Drawing.SizeF([float]$ratioX, [float]$ratioY)
+        foreach ($item in $script:mainLayoutControls) {
+            if (-not $item.Control.IsDisposed) { $item.Control.Scale($scaleFactor) }
+        }
+        $script:mainResponsiveScaleX = $targetScaleX
+        $script:mainResponsiveScaleY = $targetScaleY
+
+        $radiusScale = $script:mainDpiScaleApplied * [Math]::Min($targetScaleX, $targetScaleY)
+        $regionQueue = New-Object System.Collections.Queue
+        foreach ($item in $script:mainLayoutControls) { $regionQueue.Enqueue($item.Control) }
+        while ($regionQueue.Count -gt 0) {
+            $regionControl = [System.Windows.Forms.Control]$regionQueue.Dequeue()
+            foreach ($child in $regionControl.Controls) { $regionQueue.Enqueue($child) }
+            $radiusProperty = $regionControl.PSObject.Properties['CaijBaseCornerRadius']
+            if ($radiusProperty) {
+                $radius = [Math]::Max(1, [int][Math]::Round(([int]$radiusProperty.Value * $radiusScale)))
+                Set-RoundedControl -Control $regionControl -Radius $radius
+            }
+        }
+    } finally {
+        $this.ResumeLayout($true)
+        $script:mainLayoutSuspended = $false
+    }
+})
+
+# F11 alterna tela cheia; Esc retorna ao modo de janela.
+$script:mainFullscreen = $false
+$script:mainRestoreBounds = $null
+$script:mainRestoreWindowState = [System.Windows.Forms.FormWindowState]::Normal
+$form.Add_KeyDown({
+    param($sender, $eventArgs)
+
+    $toggleFullscreen = ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::F11)
+    $leaveFullscreen = ($eventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Escape -and $script:mainFullscreen)
+    if (-not $toggleFullscreen -and -not $leaveFullscreen) { return }
+
+    $eventArgs.SuppressKeyPress = $true
+    if (-not $script:mainFullscreen) {
+        $script:mainRestoreBounds = $sender.Bounds
+        $script:mainRestoreWindowState = $sender.WindowState
+        $sender.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        $sender.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::None
+        $sender.Bounds = [System.Windows.Forms.Screen]::FromControl($sender).Bounds
+        $script:mainFullscreen = $true
+    } else {
+        $sender.FormBorderStyle = [System.Windows.Forms.FormBorderStyle]::Sizable
+        $sender.WindowState = [System.Windows.Forms.FormWindowState]::Normal
+        if ($script:mainRestoreBounds) { $sender.Bounds = $script:mainRestoreBounds }
+        $sender.WindowState = $script:mainRestoreWindowState
+        $script:mainFullscreen = $false
+    }
+})
 
 # Fecha splash e abre o form principal
 & $script:UpdateSplashProgress 100 'Pronto!'
@@ -6948,7 +10488,7 @@ $form.Add_Shown({
                 Sync-OsFromAltertag -Silent
                 Update-OsRecentesMonitor -PrimeiraLeitura
                 $script:osRecentesTimer = New-Object System.Windows.Forms.Timer
-                $script:osRecentesTimer.Interval = 15000
+                $script:osRecentesTimer.Interval = 4000
                 $script:osRecentesTimer.Add_Tick({
                     Update-OsRecentesMonitor
                 })
@@ -6964,4 +10504,6 @@ $form.Add_FormClosed({
     try { if ($script:osRecentesTimer) { $script:osRecentesTimer.Stop(); $script:osRecentesTimer.Dispose() } } catch {}
 })
 
+Set-CaijWindowsTypography -Root $form
+try { [CaijWindowTheme]::UseDarkTitleBar($form) } catch {}
 $form.ShowDialog() | Out-Null

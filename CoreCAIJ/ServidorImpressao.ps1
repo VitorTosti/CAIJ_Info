@@ -9,7 +9,7 @@ $impressora = 'LABEL'
 $clientePadrao = 'CAIJ SERVICOS E COMERCIO LTDA'
 $clientePadraoId = 39509812
 $almoxarifadoBancadaTecnicaId = 31196
-$tecnicosPermitidos = @('HYURI', 'HYRIDES', 'VITOR', 'LUCAS', 'ERICK')
+$tecnicosPermitidos = @('HYURI', 'HYRIDES', 'VITOR', 'LUCAS', 'ERICK', 'FELIPE')
 $mapaProdutosArquivo = Join-Path (Split-Path -Parent $PSCommandPath) 'mapa_produtos.json'
 $desktopUsuario = [Environment]::GetFolderPath('Desktop')
 $produtosCsvPadrao = Join-Path $desktopUsuario 'produtos_1019993.csv'
@@ -29,6 +29,13 @@ $script:triagemJobs = @{}
 $script:triagemLock = New-Object object
 $script:triagemWorkerBusy = $false
 $script:printLock = New-Object object
+
+function Test-TecnicoCadastroValido {
+    param([string]$Tecnico)
+    $nome = ([string]$Tecnico).Trim()
+    if ($tecnicosPermitidos -contains $nome.ToUpper()) { return $true }
+    return ($nome.Length -ge 2 -and $nome.Length -le 40 -and $nome -match "^[\p{L}][\p{L}\s'.-]+$")
+}
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type @"
@@ -524,9 +531,10 @@ function Get-ProdutoSortKey {
 
     $codigo = ([string]$Produto.codigo).Trim().ToUpper()
     if (-not $codigo -and [string]$Produto.texto -match '^([A-Z]*\d+[A-Z0-9._/-]*)\s+(?:-\s+)?') { $codigo = $matches[1].ToUpper() }
-    if ($codigo -match '^P') { return '0_' + $codigo }
-    if ($codigo -match '^A') { return '1_' + $codigo }
-    if ($codigo) { return '2_' + $codigo }
+    if ($codigo -match '^T') { return '0_' + $codigo }
+    if ($codigo -match '^P') { return '1_' + $codigo }
+    if ($codigo -match '^A') { return '2_' + $codigo }
+    if ($codigo) { return '3_' + $codigo }
     return '9_' + ([string]$Produto.texto).ToUpper()
 }
 
@@ -606,7 +614,7 @@ function Normalize-BuscaProdutos {
     $preferenciais = @($norm | Where-Object {
         $codPref = ([string]$_.codigo).Trim().ToUpper()
         if (-not $codPref -and [string]$_.texto -match '^([A-Z]*\d+[A-Z0-9._/-]*)\s+(?:-\s+)?') { $codPref = $matches[1].ToUpper() }
-        $codPref -match '^[PA]'
+        $codPref -match '^[TPA]'
     })
     if ($preferenciais.Count -gt 0) { $norm = $preferenciais }
     $norm = @($norm | Sort-Object -Property @{ Expression = { Get-ProdutoSortKey $_ }; Descending = $false })
@@ -892,7 +900,7 @@ function New-AltertagApiHeaders {
         'secret-access-token' = $SecretAccessToken
         'Cache-Control' = 'no-cache'
         'User-Agent' = 'CAIJ-ServidorImpressao/5.1'
-        'Content-Type' = 'application/json'
+        'Content-Type' = 'application/json; charset=utf-8'
     }
 }
 
@@ -1066,7 +1074,8 @@ function ConvertFrom-VhsysProdutosOrdemServico {
 function Get-VhsysProdutosOrdemServico {
     param(
         [Parameter(Mandatory=$true)]$Config,
-        [Parameter(Mandatory=$true)][int]$IdOrdem
+        [Parameter(Mandatory=$true)][int]$IdOrdem,
+        [switch]$ThrowOnError
     )
 
     $uri = '{0}/ordens-servico/{1}/produtos' -f $Config.ApiBaseUrl.TrimEnd('/'), $IdOrdem
@@ -1075,8 +1084,25 @@ function Get-VhsysProdutosOrdemServico {
         $resp = Invoke-RestMethod -Uri $uri -Method Get -Headers $headers -TimeoutSec 10 -ErrorAction Stop
         return @(ConvertFrom-VhsysProdutosOrdemServico -Response $resp)
     } catch {
+        if ($ThrowOnError) { throw }
         return @()
     }
+}
+
+function Test-VhsysProdutoVinculado {
+    param(
+        [object[]]$Produtos = @(),
+        [Parameter(Mandatory=$true)][int]$IdProduto
+    )
+
+    foreach ($grupo in @($Produtos)) {
+        foreach ($produto in @($grupo)) {
+            if ($produto -and [int]$produto.idProduto -eq $IdProduto) {
+                return $true
+            }
+        }
+    }
+    return $false
 }
 
 function ConvertFrom-VhsysProdutosCatalogo {
@@ -1226,6 +1252,49 @@ function Format-CaijServicoNome {
     }
 }
 
+function Format-CaijTecnicoObservacao {
+    param([string]$Tecnico)
+
+    $t = ([string]$Tecnico).Trim()
+    if (-not $t) { return '' }
+    $ti = (Get-Culture).TextInfo
+    return $ti.ToTitleCase($t.ToLower())
+}
+
+function New-CaijObservacaoCadastroOs {
+    param(
+        [string]$Tecnico,
+        [string]$Observacao = '',
+        [object[]]$Servicos = @()
+    )
+
+    $partes = @()
+    $obs = ([string]$Observacao).Trim()
+    if ($obs -match '^\d{2}/\d{2}/\d{2}\s+-\s+\d{2}:\d{2}\s+-') { return $obs }
+    if ($obs -match '^[A-Z]{3}\s+\(\d{2}/\d{2}/\d{2}\)\s+\d{2}:\d{2}\s+/') { return $obs }
+    if ($obs -match '^\d{2}/\d{2}/\d{4}\s+-\s+\d{2}:\d{2}\s+-') { return $obs }
+    if ($obs) { $partes += $obs }
+
+    $detalhes = @(
+        foreach ($svc in @($Servicos)) {
+            $nome = Format-CaijServicoNome -Nome ([string]$svc)
+            if ($nome) { $nome }
+        }
+    )
+    if ($detalhes.Count -gt 0) {
+        $partes += ('Detalhes: ' + ($detalhes -join ', '))
+    }
+
+    $conteudo = ($partes -join "`r`n").Trim()
+    if (-not $conteudo) { return '' }
+
+    $tecnicoDisplay = Format-CaijTecnicoObservacao -Tecnico $Tecnico
+    $agora = Get-Date
+    $prefixo = ('{0} - {1}' -f $agora.ToString('dd/MM/yy'), $agora.ToString('HH:mm'))
+    if ($tecnicoDisplay) { $prefixo = "$prefixo - $tecnicoDisplay" }
+    return "${prefixo}: $conteudo"
+}
+
 function Normalize-VhsysValorUnitario {
     param([string]$Valor)
 
@@ -1241,7 +1310,8 @@ function New-VhsysOrdemServicoPayload {
         [string]$Serial,
         [string]$Referencia,
         [string]$Equipamento,
-        [string]$Problema = ''
+        [string]$Problema = '',
+        [string]$Observacao = ''
     )
 
     [ordered]@{
@@ -1253,6 +1323,7 @@ function New-VhsysOrdemServicoPayload {
         equipamento_ordem = ([string]$Equipamento).Trim()
         problema_ordem = ([string]$Problema).Trim()
         referencia_ordem = ([string]$Referencia).Trim()
+        obs_pedido = ([string]$Observacao).Trim()
         status_pedido = 'Em Aberto'
     }
 }
@@ -1268,10 +1339,10 @@ function New-VhsysOrdemProdutoPayload {
         qtde_produto = '1'
         id_produto = $IdProduto
         valor_unit_produto = Normalize-VhsysValorUnitario $ValorUnitario
-        desc_produto = ([string]$Descricao).Trim()
+        desc_produto = (([string]$Descricao).Trim() -replace '[^\x20-\x7E]', '')
     }
 
-    @([pscustomobject]$payload)
+    return ,@([pscustomobject]$payload)
 }
 
 function Test-VhsysProdutoLocalizacao {
@@ -1334,8 +1405,11 @@ function Invoke-VhsysJson {
         $resp = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -TimeoutSec $TimeoutSec -ErrorAction Stop
         return (Assert-VhsysSuccess -Response $resp -Contexto $Path)
     }
-    $jsonBody = $Body | ConvertTo-Json -Depth 8 -Compress
-    $resp = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $jsonBody -TimeoutSec $TimeoutSec -ErrorAction Stop
+    # -InputObject preserva arrays com um unico item, exigidos pelos endpoints
+    # de produtos e servicos do VHSYS.
+    $jsonBody = ConvertTo-Json -InputObject $Body -Depth 8 -Compress
+    $bodyUtf8 = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
+    $resp = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $bodyUtf8 -TimeoutSec $TimeoutSec -ErrorAction Stop
     return (Assert-VhsysSuccess -Response $resp -Contexto $Path)
 }
 
@@ -1385,9 +1459,56 @@ function Add-VhsysProdutoNaOrdemServico {
 
     $prodPath = "/ordens-servico/{0}/produtos" -f $IdOrdem
     $prodPayload = New-VhsysOrdemProdutoPayload -IdProduto $IdProduto -Descricao $ProdutoDescricao -ValorUnitario $ProdutoValor
-    $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
+    $prodResp = $null
+    $ultimoErroEnvio = $null
+    $ultimoErroConsulta = $null
+    foreach ($tentativaEnvio in 1..3) {
+        # Evita duplicidade quando uma tentativa anterior foi aceita com atraso pelo VHSYS.
+        try {
+            $produtosAntesDoEnvio = @(Get-VhsysProdutosOrdemServico -Config $Config -IdOrdem $IdOrdem -ThrowOnError)
+            if (Test-VhsysProdutoVinculado -Produtos $produtosAntesDoEnvio -IdProduto $IdProduto) {
+                return $prodResp
+            }
+        } catch {
+            $ultimoErroConsulta = $_.Exception.Message
+        }
 
-    return $prodResp
+        if ($tentativaEnvio -gt 1) {
+            Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Produto $IdProduto ainda ausente na OS $IdPedido; repetindo envio ($tentativaEnvio/3)."
+        }
+
+        $envioFalhou = $false
+        try {
+            $prodResp = Invoke-VhsysJson -Config $Config -Path $prodPath -Method 'Post' -Body $prodPayload -TimeoutSec 25
+        } catch {
+            $envioFalhou = $true
+            $ultimoErroEnvio = $_.Exception.Message
+        }
+
+        $consultaConcluida = $false
+        foreach ($tentativaConsulta in 1..6) {
+            try {
+                $produtosPersistidos = @(Get-VhsysProdutosOrdemServico -Config $Config -IdOrdem $IdOrdem -ThrowOnError)
+                $consultaConcluida = $true
+                if (Test-VhsysProdutoVinculado -Produtos $produtosPersistidos -IdProduto $IdProduto) {
+                    return $prodResp
+                }
+            } catch {
+                $ultimoErroConsulta = $_.Exception.Message
+            }
+            if ($tentativaConsulta -lt 6) { Start-Sleep -Milliseconds (300 * $tentativaConsulta) }
+        }
+
+        # Sem nenhuma leitura valida, nao ha seguranca para repetir um POST aceito.
+        if (-not $envioFalhou -and -not $consultaConcluida) { break }
+        if ($tentativaEnvio -lt 3) { Start-Sleep -Milliseconds 800 }
+    }
+
+    $detalhes = @()
+    if ($ultimoErroEnvio) { $detalhes += "falha no envio: $ultimoErroEnvio" }
+    if ($ultimoErroConsulta) { $detalhes += "falha ao conferir: $ultimoErroConsulta" }
+    $sufixo = if ($detalhes.Count -gt 0) { ' ' + ($detalhes -join ' | ') } else { '' }
+    throw "A OS $IdPedido foi criada, mas o produto $IdProduto nao apareceu na lista de produtos apos o envio.$sufixo"
 }
 
 function Add-VhsysServicosNaOrdemServico {
@@ -1442,32 +1563,44 @@ function New-VhsysOrdemServico {
         [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][string]$ProdutoDescricao,
         [string]$ProdutoValor = '0.00',
-        [object[]]$Servicos = @()
+        [object[]]$Servicos = @(),
+        [string]$Observacao = ''
     )
 
-    if (-not ($tecnicosPermitidos -contains $Tecnico.Trim().ToUpper())) {
-        throw 'Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick'
+    if (-not (Test-TecnicoCadastroValido -Tecnico $Tecnico)) {
+        throw 'Tecnico invalido. Selecione um nome ou informe outro tecnico valido.'
     }
     if (-not $Serial.Trim()) { throw 'Campo serial obrigatorio' }
     if ($IdProduto -lt 1) { throw 'Produto sem id_produto valido' }
     if (-not $ProdutoDescricao.Trim()) { throw 'Descricao do produto obrigatoria' }
 
     $cfg = Read-AltertagApiConfig
-    $osPayload = New-VhsysOrdemServicoPayload -Tecnico $Tecnico -Serial $Serial -Referencia $Referencia -Equipamento ''
+    $observacaoFormatada = New-CaijObservacaoCadastroOs -Tecnico $Tecnico -Observacao $Observacao -Servicos $Servicos
+    $osPayload = New-VhsysOrdemServicoPayload -Tecnico $Tecnico -Serial $Serial -Referencia $Referencia -Equipamento '' -Observacao $observacaoFormatada
     $osResp = Invoke-VhsysJson -Config $cfg -Path '/ordens-servico' -Method 'Post' -Body $osPayload -TimeoutSec 25
     $idOrdem = [int]$osResp.data.id_ordem
     $idPedido = [int]$osResp.data.id_pedido
     if ($idOrdem -lt 1) { throw 'API vhsys nao retornou id_ordem ao criar OS.' }
 
+    # O cadastro da OS e o cadastro do produto usam endpoints separados no VHSYS.
+    # Uma breve espera evita que o segundo endpoint receba uma ordem ainda em propagacao.
+    Start-Sleep -Milliseconds 650
+
     $prodResp = $null
     $produtoErro = $null
+    $produtoConfirmado = $false
     try {
         $prodResp = Add-VhsysProdutoNaOrdemServico -Config $cfg -IdOrdem $idOrdem -IdPedido $idPedido -IdProduto $IdProduto -ProdutoDescricao $ProdutoDescricao -ProdutoValor $ProdutoValor
+        $produtoConfirmado = $true
     } catch {
         $produtoErro = $_.Exception.Message
         Write-Host "[$(Get-Date -Format 'HH:mm:ss')] OS $idPedido criada, mas o produto falhou: $produtoErro"
     }
-    $servOut = Add-VhsysServicosNaOrdemServico -Config $cfg -IdOrdem $idOrdem -IdPedido $idPedido -Servicos $Servicos
+    $servOut = [pscustomobject]@{
+        servicos = @()
+        servicosErro = $null
+        servicosResposta = @()
+    }
 
     try {
         Reconcile-OsState -UltimoConfirmado $idPedido -Fonte 'vhsys_api_create' -Observacao 'OS criada pelo CAIJ InfoNotebook.' | Out-Null
@@ -1482,9 +1615,11 @@ function New-VhsysOrdemServico {
         tecnico = $Tecnico.Trim().ToUpper()
         garantia = $Serial.Trim()
         referencia = $Referencia.Trim()
+        observacao = $observacaoFormatada.Trim()
         produto = $ProdutoDescricao.Trim()
         idProduto = $IdProduto
         idAlmoxarifado = $almoxarifadoBancadaTecnicaId
+        produtoConfirmado = $produtoConfirmado
         produtoErro = $produtoErro
         servicos = @($servOut.servicos)
         servicosErro = $servOut.servicosErro
@@ -1626,11 +1761,17 @@ function Reconcile-OsState {
     return Invoke-WithOsLock {
         $st = Get-OsState
         if ($UltimoConfirmado -lt 1) { throw 'UltimoConfirmado invalido.' }
-        $st.ultimoConfirmado = $UltimoConfirmado
-        $st.proximoDisponivel = $UltimoConfirmado + 1
+        $ultimoAtual = [int]$st.ultimoConfirmado
+        $ultimoEfetivo = [Math]::Max($ultimoAtual, $UltimoConfirmado)
+        $st.ultimoConfirmado = $ultimoEfetivo
+        $st.proximoDisponivel = $ultimoEfetivo + 1
         $st.status = 'ok'
         $st.fonte = $Fonte
-        $st.observacao = $Observacao
+        $st.observacao = if ($UltimoConfirmado -lt $ultimoAtual) {
+            "Evento atrasado da OS $UltimoConfirmado ignorado; estado atual preservado em $ultimoAtual."
+        } else {
+            $Observacao
+        }
         Save-OsState -State $st
         return $st
     }
@@ -2330,7 +2471,7 @@ function Test-CaijPortLocal {
     }
 }
 
-Ensure-CaijFirewallRule
+if ($env:CAIJ_SKIP_FIREWALL -ne '1') { Ensure-CaijFirewallRule }
 
 $listener = New-Object System.Net.HttpListener
 foreach ($prefix in @("http://+:$porta/", "http://*:$porta/")) {
@@ -2407,6 +2548,159 @@ function Send-JsonResponse {
     }
 }
 
+function Send-FileResponse {
+    param(
+        [Parameter(Mandatory = $true)] $Response,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [string]$ContentType = 'application/octet-stream'
+    )
+    try {
+        $file = Get-Item -LiteralPath $Path -ErrorAction Stop
+        $Response.ContentType = $ContentType
+        $Response.ContentLength64 = $file.Length
+        $stream = [IO.File]::OpenRead($file.FullName)
+        try { $stream.CopyTo($Response.OutputStream) } finally { $stream.Dispose() }
+    } finally {
+        try { $Response.OutputStream.Close() } catch {}
+    }
+}
+
+function Get-CaijUpdateDirectory {
+    $candidates = @()
+    if ($env:CAIJ_UPDATE_DIR) { $candidates += ([string]$env:CAIJ_UPDATE_DIR).Trim() }
+    $candidates += (Join-Path $PSScriptRoot 'atualizacoes')
+    $candidates += (Join-Path ([Environment]::GetFolderPath('Desktop')) 'CAIJ-Atualizacoes')
+    foreach ($candidate in $candidates) {
+        if ($candidate -and (Test-Path -LiteralPath (Join-Path $candidate 'manifesto.json') -PathType Leaf)) { return $candidate }
+    }
+    return $candidates[-1]
+}
+
+function Send-HtmlResponse {
+    param(
+        [Parameter(Mandatory = $true)] $Response,
+        [Parameter(Mandatory = $true)][string]$Html
+    )
+    try {
+        $buffer = [System.Text.Encoding]::UTF8.GetBytes($Html)
+        $Response.ContentType = 'text/html; charset=utf-8'
+        $Response.ContentLength64 = $buffer.Length
+        $Response.OutputStream.Write($buffer, 0, $buffer.Length)
+    } finally {
+        try { $Response.OutputStream.Close() } catch {}
+    }
+}
+
+$script:qrFichaDir = Join-Path $PSScriptRoot 'caij_qr_fichas'
+
+function Save-QrFicha {
+    param([Parameter(Mandatory = $true)] $Ficha)
+    if (-not (Test-Path -LiteralPath $script:qrFichaDir)) {
+        [void](New-Item -ItemType Directory -Path $script:qrFichaDir -Force)
+    }
+    $id = [guid]::NewGuid().ToString('N').Substring(0, 10)
+    $path = Join-Path $script:qrFichaDir "$id.json"
+    $json = $Ficha | ConvertTo-Json -Depth 5
+    [System.IO.File]::WriteAllText($path, $json, (New-Object System.Text.UTF8Encoding($false)))
+    return $id
+}
+
+function Publish-QrFicha {
+    param([Parameter(Mandatory = $true)] $Ficha)
+    $apiKey = [string]$env:CAIJ_LABEL_API_KEY
+    $keyPath = Join-Path $PSScriptRoot 'caij_ficha_api_key.txt'
+    if (-not $apiKey -and (Test-Path -LiteralPath $keyPath)) {
+        $apiKey = ([string](Get-Content -LiteralPath $keyPath -Raw)).Trim()
+    }
+    if (-not $apiKey) {
+        throw 'Chave da API publica de fichas nao encontrada.'
+    }
+
+    $publicBaseUrl = if ($env:CAIJ_LABEL_PUBLIC_URL) {
+        ([string]$env:CAIJ_LABEL_PUBLIC_URL).TrimEnd('/')
+    } else {
+        'https://infocaij.com.br'
+    }
+    try {
+        $body = $Ficha | ConvertTo-Json -Depth 5 -Compress
+        $result = Invoke-RestMethod `
+            -Method Post `
+            -Uri "$publicBaseUrl/api/label-sheets" `
+            -Headers @{ 'x-caij-label-key' = $apiKey } `
+            -ContentType 'application/json; charset=utf-8' `
+            -Body ([System.Text.Encoding]::UTF8.GetBytes($body)) `
+            -TimeoutSec 8
+        $publishedUrl = ([string]$result.url).Trim()
+        if ($publishedUrl -notmatch '^https://[^/]+/f/[a-fA-F0-9]{32}$') {
+            throw 'A API publica retornou uma URL de ficha invalida.'
+        }
+
+        $lastValidationError = ''
+        foreach ($attempt in 1..4) {
+            try {
+                $validation = Invoke-WebRequest `
+                    -Method Get `
+                    -Uri $publishedUrl `
+                    -UseBasicParsing `
+                    -TimeoutSec 8 `
+                    -Headers @{ 'Cache-Control' = 'no-cache' }
+                if ([int]$validation.StatusCode -eq 200 -and [string]$validation.Content -match 'FICHA TECNICA') {
+                    Write-Host "[$(Get-Date -Format 'HH:mm:ss')] Ficha publica confirmada: $publishedUrl"
+                    return $publishedUrl
+                }
+                $lastValidationError = "resposta HTTP $([int]$validation.StatusCode) sem a ficha esperada"
+            } catch {
+                $lastValidationError = $_.Exception.Message
+            }
+            if ($attempt -lt 4) { Start-Sleep -Milliseconds (300 * $attempt) }
+        }
+        throw "A ficha foi publicada, mas nao ficou acessivel para leitura: $lastValidationError"
+    } catch {
+        throw "Nao foi possivel publicar e validar a ficha do QR: $($_.Exception.Message)"
+    }
+}
+
+function Get-QrFichaPage {
+    param([string]$Id)
+    if (-not $Id -or $Id -notmatch '^[a-fA-F0-9]{10}$') {
+        return @{ Status = 400; Html = '<!doctype html><meta name="viewport" content="width=device-width"><h1>Ficha invalida</h1>' }
+    }
+    $path = Join-Path $script:qrFichaDir "$Id.json"
+    if (-not (Test-Path -LiteralPath $path)) {
+        return @{ Status = 404; Html = '<!doctype html><meta name="viewport" content="width=device-width"><h1>Ficha nao encontrada</h1>' }
+    }
+
+    $ficha = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    function ConvertTo-HtmlSafe {
+        param([object]$Value)
+        return [System.Net.WebUtility]::HtmlEncode([string]$Value)
+    }
+    $rows = New-Object System.Collections.Generic.List[string]
+    foreach ($item in @(
+        @('MODELO', $ficha.modelo), @('SERIAL', $ficha.serial), @('OS', $ficha.os), @('GRADE', $ficha.grade)
+    )) {
+        if ([string]$item[1]) { $rows.Add("<div class='row'><span>$(ConvertTo-HtmlSafe $item[0])</span><strong>$(ConvertTo-HtmlSafe $item[1])</strong></div>") }
+    }
+    if ([string]$ficha.tipo -eq 'MONITOR') {
+        $specs = @(@('TAMANHO', $ficha.tamanho), @('ENTRADAS', $ficha.entradas))
+    } elseif ([string]$ficha.tipo -eq 'CELULAR') {
+        $specs = @(@('IMEI', $ficha.imei), @('ARMAZENAMENTO', $ficha.disco), @('BATERIA', $ficha.bateria))
+    } else {
+        $specs = @(@('CPU', $ficha.cpu), @('RAM', $ficha.ram), @('DISCO', $ficha.disco), @('GPU', $ficha.gpu), @('BATERIA', $ficha.bateria))
+    }
+    foreach ($item in $specs) {
+        if ([string]$item[1]) { $rows.Add("<div class='row'><span>$(ConvertTo-HtmlSafe $item[0])</span><strong>$(ConvertTo-HtmlSafe $item[1])</strong></div>") }
+    }
+    $obsHtml = if ([string]$ficha.obs) { "<section class='obs'><span>OBSERVACOES</span><p>$(ConvertTo-HtmlSafe $ficha.obs)</p></section>" } else { '' }
+    $html = @"
+<!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Ficha tecnica - $(ConvertTo-HtmlSafe $ficha.serial)</title><style>
+:root{color-scheme:dark;font-family:Inter,"Segoe UI",Arial,sans-serif}*{box-sizing:border-box}body{margin:0;min-height:100vh;background:#090e1d;color:#f5f3ff;padding:22px}.sheet{width:min(680px,100%);margin:auto;border:1px solid #39305a;background:#11182a;box-shadow:0 18px 55px #0008}.rail{height:4px;background:#8b5cf6}.head{padding:24px 24px 20px;border-bottom:1px solid #2b344a}.eyebrow,.type,.row span,.obs span{font-size:12px;font-weight:800;color:#a78bfa;letter-spacing:.08em}.head h1{margin:8px 0 12px;font-size:clamp(24px,7vw,38px);letter-spacing:0}.type{display:inline-block;border:1px solid #5b3ca4;padding:7px 10px;background:#21183c}.grid{padding:10px 24px 18px}.row{display:grid;grid-template-columns:110px 1fr;gap:18px;padding:14px 0;border-bottom:1px solid #28334a}.row strong{font-size:16px;overflow-wrap:anywhere}.obs{margin:0 24px 24px;padding:16px;border-left:3px solid #8b5cf6;background:#171d31}.obs p{margin:8px 0 0;line-height:1.5}.foot{display:flex;justify-content:space-between;gap:12px;padding:14px 24px;border-top:1px solid #2b344a;color:#8995ad;font-size:12px}@media(max-width:480px){body{padding:0}.sheet{border:0;min-height:100vh}.head,.grid,.foot{padding-left:18px;padding-right:18px}.row{grid-template-columns:92px 1fr}.obs{margin-left:18px;margin-right:18px}}
+</style></head><body><main class="sheet"><div class="rail"></div><header class="head"><div class="eyebrow">CAIJ INFORMATICA / FICHA TECNICA</div><h1>$(ConvertTo-HtmlSafe $ficha.modelo)</h1><div class="type">$(ConvertTo-HtmlSafe $ficha.tipo)</div></header><section class="grid">$($rows -join '')</section>$obsHtml<footer class="foot"><span>Registro da etiqueta</span><span>$(ConvertTo-HtmlSafe $ficha.data)</span></footer></main></body></html>
+"@
+    return @{ Status = 200; Html = $html }
+}
+
 function Send-TsplToPrinter {
     param(
         [Parameter(Mandatory=$true)][string]$Tspl,
@@ -2442,18 +2736,83 @@ while ($listener.IsListening) {
         $metodo   = $request.HttpMethod
         $rota     = $request.Url.AbsolutePath
 
-        if ($metodo -eq 'GET' -and $rota -eq '/status') {
+        if ($metodo -eq 'GET' -and $rota -eq '/atualizacao/manifesto') {
+            $updateDirectory = Get-CaijUpdateDirectory
+            $manifestPath = Join-Path $updateDirectory 'manifesto.json'
+            if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
+                $manifestJson = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop
+                $response.StatusCode = 200
+                Send-JsonResponse -Response $response -Json $manifestJson
+            } else {
+                $response.StatusCode = 404
+                Send-JsonResponse -Response $response -Json '{"status":"erro","mensagem":"Nenhuma atualizacao publicada"}'
+            }
+            continue
+
+        } elseif ($metodo -eq 'GET' -and $rota -eq '/atualizacao/pacote') {
+            $updateDirectory = Get-CaijUpdateDirectory
+            $manifestPath = Join-Path $updateDirectory 'manifesto.json'
+            if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+                $response.StatusCode = 404
+                Send-JsonResponse -Response $response -Json '{"status":"erro","mensagem":"Nenhuma atualizacao publicada"}'
+                continue
+            }
+            $updateManifest = Get-Content -LiteralPath $manifestPath -Raw -ErrorAction Stop | ConvertFrom-Json
+            $packageName = [IO.Path]::GetFileName([string]$updateManifest.packageName)
+            $packagePath = Join-Path $updateDirectory $packageName
+            if (-not $packageName.EndsWith('.zip', [StringComparison]::OrdinalIgnoreCase) -or -not (Test-Path -LiteralPath $packagePath -PathType Leaf)) {
+                $response.StatusCode = 404
+                Send-JsonResponse -Response $response -Json '{"status":"erro","mensagem":"Pacote de atualizacao nao encontrado"}'
+                continue
+            }
+            $response.StatusCode = 200
+            Send-FileResponse -Response $response -Path $packagePath -ContentType 'application/zip'
+            continue
+
+        # Alguns firmwares acrescentam bytes/sufixos ao conteudo do QR.
+        # O ID valido esta nos 10 primeiros hexadecimais; ignore qualquer sobra.
+        } elseif ($metodo -eq 'GET' -and $rota -match '^/f/([a-fA-F0-9]{10})') {
+            $page = Get-QrFichaPage -Id ([string]$matches[1])
+            $response.StatusCode = [int]$page.Status
+            Send-HtmlResponse -Response $response -Html ([string]$page.Html)
+            continue
+
+        } elseif ($metodo -eq 'GET' -and $rota -eq '/ficha') {
+            $page = Get-QrFichaPage -Id ([string]$request.QueryString['id'])
+            $response.StatusCode = [int]$page.Status
+            Send-HtmlResponse -Response $response -Html ([string]$page.Html)
+            continue
+
+        } elseif ($metodo -eq 'GET' -and $rota -eq '/status') {
             Write-Host "[$horario] Ping de status de $($request.RemoteEndPoint)"
             $json = (@{
                 status='ok'
                 mensagem='Servidor CAIJ ativo'
-                versao='v6.2-popup-servicos'
+                versao='v6.15-mac-ciclos-bateria'
                 modoImpressao='assincrono'
                 servidorIp=[string]$script:caijServerIp
                 porta=[int]$porta
                 url=("http://{0}:{1}" -f $script:caijServerIp, $porta)
             } | ConvertTo-Json -Compress)
             $response.StatusCode = 200
+
+        } elseif ($metodo -eq 'GET' -and $rota -eq '/status-os-local') {
+            try {
+                $st = Get-OsState
+                $json = (@{
+                    status = 'ok'
+                    ultimoConfirmado = [int]$st.ultimoConfirmado
+                    proximoDisponivel = [int]$st.proximoDisponivel
+                    fonte = [string]$st.fonte
+                    sincronizacao = [string]$st.status
+                    atualizadoEm = [string]$st.atualizadoEm
+                    observacao = [string]$st.observacao
+                } | ConvertTo-Json -Compress)
+                $response.StatusCode = 200
+            } catch {
+                $json = (@{ status='erro'; mensagem=$_.Exception.Message } | ConvertTo-Json -Compress)
+                $response.StatusCode = 500
+            }
 
         } elseif ($metodo -eq 'GET' -and $rota -eq '/status-os') {
             try {
@@ -2714,6 +3073,7 @@ while ($listener.IsListening) {
                     $produtoReq = ([string]$dados.produtoDescricao).Trim()
                     $valorReq = if ($dados.produtoValor) { [string]$dados.produtoValor } else { '0.00' }
                     $servReq = @($dados.servicos)
+                    $observacaoReq = ([string]$dados.observacao).Trim()
                     if ($idProdutoReq -lt 1 -and $codigoProdutoReq) {
                         Write-Host "[$horario] Resolvendo produto pelo codigo: $codigoProdutoReq"
                         $produtoResolvido = Resolve-VhsysProdutoCatalogo -Codigo $codigoProdutoReq -Descricao $produtoReq
@@ -2725,20 +3085,24 @@ while ($listener.IsListening) {
                     }
 
                     Write-Host "[$horario] Criando OS Altertag via API | Serial=$serialReq | Tecnico=$tecReq | Produto=$idProdutoReq"
-                    $out = New-VhsysOrdemServico -Tecnico $tecReq -Serial $serialReq -Referencia $refReq -IdProduto $idProdutoReq -ProdutoDescricao $produtoReq -ProdutoValor $valorReq -Servicos $servReq
+                    $out = New-VhsysOrdemServico -Tecnico $tecReq -Serial $serialReq -Referencia $refReq -IdProduto $idProdutoReq -ProdutoDescricao $produtoReq -ProdutoValor $valorReq -Servicos $servReq -Observacao $observacaoReq
+                    $estadoAposCriacao = Get-OsState
                     $json = (@{
                         status='ok'
                         mensagem='OS criada no Altertag.'
                         idOrdem=$out.idOrdem
                         osNumero=$out.osNumero
                         osCodigo=$out.osCodigo
+                        proximoDisponivel=[int]$estadoAposCriacao.proximoDisponivel
                         cliente=$out.cliente
                         tecnico=$out.tecnico
                         garantia=$out.garantia
                         referencia=$out.referencia
+                        observacao=$out.observacao
                         produto=$out.produto
                         idProduto=$out.idProduto
                         idAlmoxarifado=$out.idAlmoxarifado
+                        produtoConfirmado=$out.produtoConfirmado
                         produtoErro=$out.produtoErro
                         servicos=@($out.servicos)
                         servicosErro=$out.servicosErro
@@ -2770,8 +3134,8 @@ while ($listener.IsListening) {
                     if (-not $serialReq -or $serialReq.Trim() -eq '') {
                         $json = '{"status":"erro","mensagem":"Campo serial obrigatorio"}'
                         $response.StatusCode = 400
-                    } elseif (-not ($tecnicosPermitidos -contains $tecReq)) {
-                        $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick"}'
+                    } elseif (-not (Test-TecnicoCadastroValido -Tecnico $tecReq)) {
+                        $json = '{"status":"erro","mensagem":"Tecnico invalido. Selecione um nome ou informe outro tecnico valido."}'
                         $response.StatusCode = 400
                     } else {
                         $resProduto = Resolve-ProdutoCodigo -Modelo $modeloReq -Cpu $cpuReq -Ram $ramReq -Disco $discoReq -ProdutoCodigoManual $codManual
@@ -2849,8 +3213,8 @@ while ($listener.IsListening) {
                 if (-not $serialReq -or $serialReq.Trim() -eq '') {
                     $json = '{"status":"erro","mensagem":"Campo serial obrigatorio"}'
                     $response.StatusCode = 400
-                } elseif (-not ($tecnicosPermitidos -contains $tecReq)) {
-                    $json = '{"status":"erro","mensagem":"Tecnico invalido. Use: Lucas, Hyrides, Vitor ou Erick"}'
+                } elseif (-not (Test-TecnicoCadastroValido -Tecnico $tecReq)) {
+                    $json = '{"status":"erro","mensagem":"Tecnico invalido. Selecione um nome ou informe outro tecnico valido."}'
                     $response.StatusCode = 400
                 } else {
                     $resProduto = Resolve-ProdutoCodigo -Modelo $modeloReq -Cpu $cpuReq -Ram $ramReq -Disco $discoReq -ProdutoCodigoManual $codManual
@@ -2989,13 +3353,34 @@ while ($listener.IsListening) {
             }
             function Short-Gpu($s) {
                 $t = Limpar $s
-                if ($t -match '(?i)MX\s*450') { return 'MX450 Dedicada' }
-                if ($t -match '(?i)MX\s*350') { return 'MX350 Dedicada' }
-                if ($t -match '(?i)RTX\s*([0-9]{4})') { return "RTX $($Matches[1]) Dedicada" }
-                if ($t -match '(?i)GTX\s*([0-9]{3,4})') { return "GTX $($Matches[1]) Dedicada" }
+                $vramSuf = if ($t -match '(?i)\b(\d+(?:[.,]\d+)?)\s*GB\b') { ' ' + ($Matches[1] -replace ',', '.') + 'GB' } else { '' }
+                if ($t -match '(?i)MX\s*450') { return "MX450$vramSuf Dedicada" }
+                if ($t -match '(?i)MX\s*350') { return "MX350$vramSuf Dedicada" }
+                if ($t -match '(?i)QUADRO\s+RTX\s*([0-9]{4})') { return "Quadro RTX $($Matches[1])$vramSuf Dedicada" }
+                if ($t -match '(?i)RTX\s*([0-9]{4})') { return "RTX $($Matches[1])$vramSuf Dedicada" }
+                if ($t -match '(?i)GTX\s*([0-9]{3,4})') { return "GTX $($Matches[1])$vramSuf Dedicada" }
                 if ($t -match '(?i)Iris\s*Xe') { return 'Intel Iris Xe' }
                 if ($t -match '(?i)UHD') { return 'Intel UHD' }
+                if ($t -match '(?i)AMD\s+Radeon\s+Graphics.*Integr') { return 'AMD Radeon Int.' }
                 if ($t.Length -gt 32) { return $t.Substring(0, 32) }
+                return $t
+            }
+            function Format-GpuEtiqueta($s) {
+                $t = Limpar $s
+                $t = $t -replace '(?i)^NVIDIA\s+', ''
+                $t = $t -replace '(?i)\s*\(\s*DEDICADA\s*\)\s*$', ' DED.'
+                $t = $t -replace '(?i)\s+DEDICADA\s*$', ' DED.'
+                return Fit-TsplText $t 27
+            }
+            function Expand-GpuCompleta($s, $cpuTexto) {
+                $t = Limpar $s
+                if ($t -match '(?i)^AMD\s+Radeon\s+Graphics\s*\(\s*Integra') {
+                    return 'AMD Radeon Graphics (Integrada)'
+                }
+                if ($t -match '(?i)(Microsoft\s+Basic|Basic\s+Display|Adaptador\s+de\s+V.deo\s+B.sico)' -and
+                    ([string]$cpuTexto) -match '(?i)\b(AMD|Ryzen)\b') {
+                    return 'AMD Radeon Graphics (Integrada)'
+                }
                 return $t
             }
             function Short-Disco($s) {
@@ -3023,33 +3408,67 @@ while ($listener.IsListening) {
                 if ($maxLen -le 3) { return $t.Substring(0, $maxLen) }
                 return $t.Substring(0, $maxLen - 3) + '...'
             }
+            function Format-QrValue($s, [int]$maxLen) {
+                $t = Limpar $s '/,:%'
+                $t = ($t -replace '\s+', ' ').Trim()
+                if ($t.Length -gt $maxLen) { return $t.Substring(0, $maxLen) }
+                return $t
+            }
+            function Format-ObservacaoEtiqueta($s) {
+                $t = ([string]$s).Trim()
+                if (-not $t) { return '' }
+                # A OS guarda auditoria completa; a etiqueta mostra somente o relato tecnico.
+                $t = $t -replace '^\s*\d{2}/\d{2}/\d{2,4}\s*-\s*\d{1,2}:\d{2}(?:\s*-\s*[^:\r\n]{1,60})?\s*:\s*', ''
+                return $t.Trim()
+            }
+            function Short-ModeloEtiqueta($s) {
+                $t = Limpar $s
+                $t = $t -replace '(?i)^\s*T\d{3}(?:-+)?\s*(?:[-:|]\s*)?(?=(?:CPU|DESKTOP|MINI\s+DESKTOP|COMPUTADOR\s+DESKTOP)\b)', ''
+                $t = $t -replace '(?i)^\s*(SMARTPHONE|CELULAR|TELEFONE|TABLET)\s*(?:[-:|]\s*)?', ''
+                $t = $t -replace '(?i)^\s*(NOTEBOOK|LAPTOP|COMPUTADOR|CPU)\s+', ''
+                $t = $t -replace '(?i)\bGEN(?:ERACAO)?\s*(\d+)\b', 'G$1'
+                return (($t -replace '\s+', ' ').Trim())
+            }
             function Format-BateriaQualidade($s) {
                 $raw = ([string]$s).Trim()
                 if (-not $raw -or $raw -match '^(?i:N/?A|Nao identificada|Não identificada)$') { return 'N/A' }
 
                 $pctText = ''
+                $cycleText = ''
+                $cycleMatch = [regex]::Match($raw, '(?i)(\d+)\s*ciclos?')
+                if ($cycleMatch.Success -and [int]$cycleMatch.Groups[1].Value -gt 0) {
+                    $cycleText = " C:$([int]$cycleMatch.Groups[1].Value)"
+                }
                 $pctMatch = [regex]::Match($raw, '(\d{1,3})\s*%?')
                 if ($pctMatch.Success) {
                     $pct = [math]::Min(100, [math]::Max(0, [int]$pctMatch.Groups[1].Value))
-                    $pctText = " ($pct%)"
+                    if ($pct -le 0) { return 'N/A' }
+                    $pctText = " ($pct$([char]37))"
                 }
 
-                if ($raw -match '(?i)\b(excellent|excelente)\b') { return "EXCELLENT$pctText" }
-                if ($raw -match '(?i)\b(good|boa|normal)\b') { return "GOOD$pctText" }
-                if ($raw -match '(?i)\b(fair|regular)\b') { return "FAIR$pctText" }
-                if ($raw -match '(?i)\b(poor|ruim|service|replace|trocar|substituir|manutencao|manutenção)\b') { return "POOR$pctText" }
+                if ($raw -match '(?i)\b(excellent|excelente)\b') { return "EXCELLENT$pctText$cycleText" }
+                if ($raw -match '(?i)\b(good|boa|normal)\b') { return "GOOD$pctText$cycleText" }
+                if ($raw -match '(?i)\b(fair|regular)\b') { return "FAIR$pctText$cycleText" }
+                if ($raw -match '(?i)\b(poor|ruim|service|replace|trocar|substituir|manutencao|manutenção)\b') { return "POOR$pctText$cycleText" }
 
                 if ($pctMatch.Success) {
-                    if ($pct -ge 90) { return "EXCELLENT$pctText" }
-                    if ($pct -ge 75) { return "GOOD$pctText" }
-                    if ($pct -ge 50) { return "FAIR$pctText" }
-                    if ($pct -gt 0) { return "POOR$pctText" }
+                    if ($pct -ge 90) { return "EXCELLENT$pctText$cycleText" }
+                    if ($pct -ge 75) { return "GOOD$pctText$cycleText" }
+                    if ($pct -ge 50) { return "FAIR$pctText$cycleText" }
+                    if ($pct -gt 0) { return "POOR$pctText$cycleText" }
                 }
                 return Fit-TsplText $raw 12
             }
 
-            $modelo  = Limpar $dados.modelo
+            $modelo  = Limpar $dados.modelo ','
             $serial  = $dados.serial -replace '[^a-zA-Z0-9]', ''
+            $tipoEquipamento = if ($dados.tipoEquipamento) { ([string]$dados.tipoEquipamento).Trim() } else { 'Notebook' }
+            $isMonitor = ($tipoEquipamento -match '^(?i)Monitor$')
+            $isCelular = ($tipoEquipamento -match '^(?i)Celular$')
+            $isDesktop = ($tipoEquipamento -match '^(?i)Desktop$')
+            $monitorTamanho = if ($dados.monitorTamanho) { Limpar $dados.monitorTamanho } else { '' }
+            $monitorEntradas = if ($dados.monitorEntradas) { Limpar $dados.monitorEntradas '/ ' } else { '' }
+            $celularImei = if ($dados.celularImei) { ([string]$dados.celularImei -replace '[^0-9]', '') } else { '' }
             $osNum   = ''
             if ($null -ne $dados.os) { $osNum = ([string]$dados.os -replace '[^0-9]', '') }
             $osCodigo = if ($osNum) { 'C{0:D6}' -f [int]$osNum } else { '' }
@@ -3065,23 +3484,31 @@ while ($listener.IsListening) {
                 ''
             }
             $bateriaQualidade = Format-BateriaQualidade $bateria
-            $gpu     = Short-Gpu $dados.gpu
+            $bateriaFicha = $bateriaQualidade -replace '\s+C:\d+\s*$', ''
+            $bateriaCiclosMatch = [regex]::Match($bateria, '(?i)(\d+)\s*ciclos?')
+            if ($bateriaCiclosMatch.Success -and [int]$bateriaCiclosMatch.Groups[1].Value -gt 0) {
+                $bateriaFicha += " | $([int]$bateriaCiclosMatch.Groups[1].Value) CICLOS"
+            }
+            $gpuCompleta = Expand-GpuCompleta $dados.gpu $cpu
+            $gpu     = if ($modoManual) { $gpuCompleta } else { Short-Gpu $gpuCompleta }
             if (-not $gpu -or $gpu.Trim() -eq '') { $gpu = 'N/A' }
             $mostrarGpu = ($gpu -and $gpu.Trim() -ne '' -and $gpu -notmatch '^(?i:N/?A|Nao identificada|Não identificada)$')
-            $mostrarBateria = ($bateria -and $bateria.Trim() -ne '')
+            $mostrarBateria = (-not $isDesktop -and $bateria -and $bateria.Trim() -ne '')
             $gradeRaw = if ($dados.grade) { ([string]$dados.grade).Trim().ToUpper() } else { '' }
             if ($gradeRaw -eq 'RNA') { $gradeRaw = 'RMA' }
             if ($gradeRaw -match '^C\s*-\s*PINTURA\s*([123])$') {
                 $grade = "C - PINTURA $($matches[1])"
             } elseif ($gradeRaw -match '^(?:GRADE\s*)?T(?:\s*-\s*TRIAGEM)?$') {
                 $grade = 'T - TRIAGEM'
-            } elseif ($gradeRaw -in @('A','B','RMA')) {
+            } elseif ($gradeRaw -in @('A','B','C','RMA')) {
                 $grade = $gradeRaw
             } else {
                 $grade = ''
             }
-            $obs     = if ($dados.obs -and $dados.obs.Length -gt 0) {
-                           $tmp = Limpar $dados.obs '!,;:'
+            $obsQr = if ($dados.obs) { ([string]$dados.obs).Trim() } else { '' }
+            $obs   = if ($obsQr) {
+                           $obsVisual = Format-ObservacaoEtiqueta $obsQr
+                           $tmp = Limpar $obsVisual '!,;:/%'
                            if ($tmp.Length -gt 180) { $tmp.Substring(0, 180) } else { $tmp }
                        } else { '' }
 
@@ -3090,42 +3517,55 @@ while ($listener.IsListening) {
             # Manter a altura alinhada ao rolo evita feed em branco e erro de gap.
             # Fontes: 1=8x12  2=12x20  3=16x24  4=24x32
             # ================================================
-            $diasSemana = @('DOM','SEG','TER','QUA','QUI','SEX','SAB')
-            $dataCurta = "$($diasSemana[[int](Get-Date).DayOfWeek]) $(Get-Date -Format 'dd/MM HH:mm')"
-            if ($modelo.Length -le 16) {
-                $modeloTop = Fit-TsplText $modelo 16
-                $modeloFont = '4'
-                $modeloY = 26
-            } elseif ($modelo.Length -le 25) {
-                $modeloTop = Fit-TsplText $modelo 25
+            $dataCurta = Get-Date -Format 'dd/MM/yy'
+            $modeloResumido = Short-ModeloEtiqueta $modelo
+            if ($modeloResumido.Length -le 24) {
+                $modeloTop = Fit-TsplText $modeloResumido 24
                 $modeloFont = '3'
-                $modeloY = 34
+                $modeloY = 38
             } else {
-                $modeloTop = Fit-TsplText $modelo 42
+                $modeloTop = Fit-TsplText $modeloResumido 32
                 $modeloFont = '2'
-                $modeloY = 34
+                $modeloY = 38
             }
-            if ($osCodigo) {
+            if ($serial.Length -le 15) {
                 $serialTop = Fit-TsplText $serial 15
-                $serialScaleX = 1
-            } elseif ($serial.Length -le 12) {
-                $serialTop = Fit-TsplText $serial 12
-                $serialScaleX = 2
-            } else {
+                $serialFont = '4'
+            } elseif ($serial.Length -le 22) {
                 $serialTop = Fit-TsplText $serial 22
-                $serialScaleX = 1
+                $serialFont = '3'
+            } else {
+                $serialTop = Fit-TsplText $serial 28
+                $serialFont = '2'
             }
             $serialBar = ($serial -replace '[^A-Za-z0-9]', '').ToUpper()
             $gradeBadge = ''
             if ($grade) {
                 if ($grade -match '^C\s*-\s*PINTURA\s*([123])$') {
-                    $gradeBadge = "GRADE C - PINTURA $($matches[1])"
+                    $gradeBadge = "C - PINTURA $($matches[1])"
                 } elseif ($grade -match '^T\s*-\s*TRIAGEM$') {
                     $gradeBadge = 'T - TRIAGEM'
                 } else {
-                    $gradeBadge = $grade
+                    $gradeBadge = "GRADE $grade"
                 }
             }
+
+            $qrCpu = if ($dados.fichaCpu) { Limpar $dados.fichaCpu '@,/' } else { $cpu }
+            $qrGpu = if ($dados.fichaGpu) { Limpar $dados.fichaGpu ',/' } else { $gpuCompleta }
+            $qrRam = if ($dados.fichaRam) { Limpar $dados.fichaRam '+,/' } else { $ramMods }
+            $qrDisco = if ($dados.fichaDisco) { Limpar $dados.fichaDisco '+,/' } else { $disco }
+            $qrTipo = if ($isMonitor) { 'MONITOR' } elseif ($isCelular) { 'CELULAR' } elseif ($isDesktop) { 'DESKTOP' } else { 'NOTEBOOK' }
+            $qrFicha = [ordered]@{
+                tipo=$qrTipo; modelo=$modelo; serial=$serial; os=$osCodigo; grade=$grade
+                cpu=$qrCpu; ram=$qrRam; disco=$qrDisco; gpu=$qrGpu; bateria=$(if ($isDesktop) { '' } elseif ($isCelular) { $bateria } else { $bateriaFicha })
+                tamanho=$monitorTamanho; entradas=$monitorEntradas; imei=$celularImei; obs=$obsQr
+                data=(Get-Date -Format 'dd/MM/yyyy HH:mm')
+            }
+            $qrId = Save-QrFicha -Ficha $qrFicha
+            $publicQrUrl = Publish-QrFicha -Ficha $qrFicha
+            $qrPayload = $publicQrUrl
+            $qrUrlLogPath = Join-Path $script:qrFichaDir "$qrId.url.txt"
+            [System.IO.File]::WriteAllText($qrUrlLogPath, $qrPayload, [System.Text.Encoding]::ASCII)
 
             $tspl  = "SIZE 80 mm,50 mm`r`n"
             $tspl += "GAP 3 mm,0 mm`r`n"
@@ -3137,42 +3577,39 @@ while ($listener.IsListening) {
             $tspl += "CODEPAGE 850`r`n"
             $tspl += "CLS`r`n"
 
-            # Moldura completa ajustada dentro da etiqueta real 80x50mm.
-            $tspl += "BOX 2,4,638,398,2`r`n"
-
-            # Modelo no topo, usando o espaco antes ocupado pela marca.
-            $tspl += "BOX 10,14,430,74,2`r`n"
-            $tspl += "TEXT 24,$modeloY,`"$modeloFont`",0,1,1,`"$modeloTop`"`r`n"
-
-            # Grade em destaque, com texto completo para C - Pintura.
+            # Uma unica moldura, cerca de 1,25 mm para dentro da area fisica de 80x50mm.
+            # Blocos internos usam divisorias unicas para evitar borda duplicada.
+            $tspl += "BOX 10,10,630,390,2`r`n"
+            $tspl += "TEXT 22,16,`"2`",0,1,1,`"EQUIPAMENTO`"`r`n"
+            $tspl += "TEXT 22,$modeloY,`"$modeloFont`",0,1,1,`"$modeloTop`"`r`n"
             if ($gradeBadge) {
-                $gradeBadge = Fit-TsplText $gradeBadge 22
-                $tspl += "BOX 442,14,630,74,3`r`n"
-                if ($gradeBadge -match '^GRADE C') {
-                    $tspl += "TEXT 452,31,`"1`",0,1,1,`"$gradeBadge`"`r`n"
-                } elseif ($gradeBadge.Length -le 3) {
-                    $tspl += "TEXT 508,28,`"4`",0,1,1,`"$gradeBadge`"`r`n"
-                } else {
-                    $tspl += "TEXT 472,32,`"2`",0,1,1,`"$gradeBadge`"`r`n"
-                }
+                $gradeBadge = Fit-TsplText $gradeBadge 13
+                $gradeFont = if ($gradeBadge.Length -le 9) { '2' } else { '1' }
+                $gradeTextX = if ($gradeFont -eq '2') { 535 - [Math]::Floor($gradeBadge.Length * 6) } else { 535 - [Math]::Floor($gradeBadge.Length * 4) }
+                $tspl += "BOX 452,20,618,70,2`r`n"
+                $tspl += "TEXT $gradeTextX,34,`"$gradeFont`",0,1,1,`"$gradeBadge`"`r`n"
             }
+            $tspl += "BAR 10,82,620,2`r`n"
 
             if ($osCodigo) {
-                # Serial e OS em caixas separadas.
-                $tspl += "BOX 10,84,410,154,3`r`n"
-                $tspl += "TEXT 28,94,`"4`",0,$serialScaleX,1,`"$serialTop`"`r`n"
+                $tspl += "TEXT 22,86,`"2`",0,1,1,`"SERIAL`"`r`n"
+                $serialFontComBarcode = if ($serial.Length -le 22) { '3' } else { '2' }
+                $tspl += "TEXT 22,108,`"$serialFontComBarcode`",0,1,1,`"$serialTop`"`r`n"
                 if ($serialBar.Length -ge 4) {
-                    $tspl += "BARCODE 28,128,`"128`",18,0,0,1,2,`"$serialBar`"`r`n"
+                    $tspl += "BARCODE 22,136,`"128`",16,0,0,1,2,`"$serialBar`"`r`n"
                 }
-                $tspl += "BOX 430,84,630,154,3`r`n"
-                $tspl += "TEXT 454,103,`"4`",0,1,1,`"$osCodigo`"`r`n"
+                $tspl += "BAR 430,82,2,76`r`n"
+                $tspl += "TEXT 446,86,`"2`",0,1,1,`"ORDEM DE SERV.`"`r`n"
+                $tspl += "TEXT 446,112,`"4`",0,1,1,`"$osCodigo`"`r`n"
             } else {
-                $tspl += "BOX 10,84,630,154,3`r`n"
-                $tspl += "TEXT 28,94,`"4`",0,$serialScaleX,1,`"$serialTop`"`r`n"
+                $tspl += "TEXT 22,86,`"2`",0,1,1,`"SERIAL`"`r`n"
+                $serialFontComBarcode = if ($serial.Length -le 22) { '3' } else { '2' }
+                $tspl += "TEXT 22,108,`"$serialFontComBarcode`",0,1,1,`"$serialTop`"`r`n"
                 if ($serialBar.Length -ge 4) {
-                    $tspl += "BARCODE 28,128,`"128`",18,0,0,1,2,`"$serialBar`"`r`n"
+                    $tspl += "BARCODE 22,136,`"128`",16,0,0,1,2,`"$serialBar`"`r`n"
                 }
             }
+            $tspl += "BAR 10,158,620,2`r`n"
 
             function Wrap-TsplLines {
                 param(
@@ -3182,96 +3619,169 @@ while ($listener.IsListening) {
                 )
                 $clean = ([string]$Text -replace '\s+', ' ').Trim()
                 if (-not $clean) { return @() }
-                $words = $clean -split '\s+'
                 $lines = New-Object System.Collections.Generic.List[string]
-                $current = ''
-                foreach ($word in $words) {
-                    $candidate = if ($current) { "$current $word" } else { $word }
-                    if ($candidate.Length -le $MaxLen) {
-                        $current = $candidate
-                        continue
+                $remaining = $clean
+                while ($remaining -and $lines.Count -lt $MaxLines) {
+                    if ($remaining.Length -le $MaxLen) {
+                        $lines.Add($remaining)
+                        $remaining = ''
+                        break
                     }
-                    if ($current) {
-                        $lines.Add($current)
-                        $current = ''
-                        if ($lines.Count -ge $MaxLines) { break }
-                    }
-                    if ($word.Length -le $MaxLen) {
-                        $current = $word
-                    } else {
-                        $remaining = $word
-                        while ($remaining.Length -gt $MaxLen -and $lines.Count -lt $MaxLines) {
-                            $lines.Add($remaining.Substring(0, $MaxLen))
-                            $remaining = $remaining.Substring($MaxLen)
-                        }
-                        $current = $remaining
-                    }
-                    if ($lines.Count -ge $MaxLines) { break }
+                    $breakAt = $remaining.LastIndexOf(' ', [Math]::Min($MaxLen, ($remaining.Length - 1)))
+                    if ($breakAt -lt [Math]::Floor($MaxLen * 0.55)) { $breakAt = $MaxLen }
+                    $lines.Add($remaining.Substring(0, $breakAt).Trim())
+                    $remaining = $remaining.Substring($breakAt).Trim()
                 }
-                if ($current -and $lines.Count -lt $MaxLines) { $lines.Add($current) }
-                if ($lines.Count -gt $MaxLines) { $lines = @($lines[0..($MaxLines - 1)]) }
-                if ($lines.Count -eq $MaxLines -and $current.Length -gt 0) {
+                if ($remaining -and $lines.Count -gt 0) {
                     $last = $lines[$MaxLines - 1]
-                    if ($last.Length -gt $MaxLen) {
-                        $cutLen = [math]::Min($last.Length, [math]::Max(0, $MaxLen - 3))
-                        $lines[$MaxLines - 1] = $last.Substring(0, $cutLen) + '...'
-                    }
+                    $cutLen = [math]::Min($last.Length, [math]::Max(0, $MaxLen - 3))
+                    $lines[$MaxLines - 1] = $last.Substring(0, $cutLen).TrimEnd() + '...'
                 }
                 return @($lines)
             }
 
-            # Metade inferior: informacoes fixas a esquerda e observacoes a direita.
-            $tspl += "BOX 10,166,630,384,2`r`n"
-            $tspl += "BAR 318,166,2,218`r`n"
-            $tspl += "BAR 10,194,620,2`r`n"
-
-            $cpuInfo = Fit-TsplText $cpu 16
-            $ramInfo = Fit-TsplText $ramMods 16
-            $discoInfo = Fit-TsplText $disco 16
-            $gpuInfo = Fit-TsplText $gpu 16
-            $batInfo = Fit-TsplText $bateriaQualidade 16
-
-            $tspl += "TEXT 22,173,`"2`",0,1,1,`"CONFIGURACAO`"`r`n"
-            $specY = 204
-            $specStep = 32
-            $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"CPU`"`r`n"
-            $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$cpuInfo`"`r`n"
-            $tspl += "BAR 20,$($specY + 22),282,1`r`n"
-            $specY += $specStep
-            $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"RAM`"`r`n"
-            $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$ramInfo`"`r`n"
-            $tspl += "BAR 20,$($specY + 22),282,1`r`n"
-            $specY += $specStep
-            $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"DISCO`"`r`n"
-            $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$discoInfo`"`r`n"
-            $tspl += "BAR 20,$($specY + 22),282,1`r`n"
-            $specY += $specStep
-            $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"GPU`"`r`n"
-            $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$gpuInfo`"`r`n"
-            $tspl += "BAR 20,$($specY + 22),282,1`r`n"
-            $specY += $specStep
-            $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"BAT`"`r`n"
-            $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$batInfo`"`r`n"
-
-            # Observacoes
-            $tspl += "TEXT 334,173,`"2`",0,1,1,`"OBSERVACOES`"`r`n"
+            # Metade inferior: uma unica divisoria separa configuracao e QR.
             $obsLines = @()
-            if ($obs) {
-                $obsLines = Wrap-TsplLines -Text $obs -MaxLen 19 -MaxLines 5
-                if ($obsLines.Count -gt 0) {
-                    $obsY = 208
-                    $obsStep = 30
-                    foreach ($linhaObs in $obsLines) {
-                        $fontObs = '3'
-                        $tspl += "TEXT 336,$obsY,`"$fontObs`",0,1,1,`"$linhaObs`"`r`n"
-                        $obsY += $obsStep
+            if (-not [string]::IsNullOrWhiteSpace([string]$obs)) {
+                $obsLines = Wrap-TsplLines -Text ([string]$obs).Trim() -MaxLen 69 -MaxLines 3
+            }
+            $temObservacaoEtiqueta = ($obsLines.Count -gt 0)
+            $alturaDivisoriaInferior = if ($temObservacaoEtiqueta) { 172 } else { 232 }
+            $tspl += "BAR 318,158,2,$alturaDivisoriaInferior`r`n"
+            $tspl += "BAR 10,194,308,1`r`n"
+
+            if ($isMonitor) {
+                $tamanhoInfo = Fit-TsplText $monitorTamanho 18
+                $entradasInfo = Fit-TsplText $monitorEntradas 25
+                $tspl += "TEXT 22,173,`"2`",0,1,1,`"MONITOR`"`r`n"
+                $specY = 206
+                $specStep = 44
+                foreach ($monitorSpec in @(
+                    @('TAMANHO', $tamanhoInfo),
+                    @('ENTRADAS', $entradasInfo)
+                )) {
+                    $monitorLabel = [string]$monitorSpec[0]
+                    $monitorFont = if ($monitorLabel -eq 'ENTRADAS') { '1' } else { '2' }
+                    $monitorValueY = if ($monitorLabel -eq 'ENTRADAS') { $specY } else { $specY - 3 }
+                    $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"$monitorLabel`"`r`n"
+                    $tspl += "TEXT 94,$monitorValueY,`"$monitorFont`",0,1,1,`"$([string]$monitorSpec[1])`"`r`n"
+                    if ($monitorLabel -ne 'ENTRADAS') {
+                        $tspl += "BAR 20,$($specY + 25),282,1`r`n"
                     }
-                    $tspl += "TEXT 438,358,`"2`",0,1,1,`"$dataCurta`"`r`n"
+                    $specY += $specStep
+                }
+            } elseif ($isCelular) {
+                $imeiInfo = Fit-TsplText $celularImei 15
+                $storageInfo = if ($disco) { Fit-TsplText $disco 10 } else { 'N/A' }
+                $batPctMatch = [regex]::Match([string]$bateria, '(\d{1,3})')
+                $batInfo = if ($batPctMatch.Success) {
+                    [string][math]::Min(100, [math]::Max(0, [int]$batPctMatch.Groups[1].Value))
                 } else {
-                    $tspl += "TEXT 438,358,`"2`",0,1,1,`"$dataCurta`"`r`n"
+                    'N/A'
+                }
+                $tspl += "TEXT 22,173,`"2`",0,1,1,`"CELULAR`"`r`n"
+                $specY = 206
+                $specStep = 44
+                foreach ($celularSpec in @(
+                    @('IMEI', $imeiInfo),
+                    @('ARMAZ.', $storageInfo),
+                    @('BATERIA', $batInfo)
+                )) {
+                    $celularLabel = [string]$celularSpec[0]
+                    $cellLabelX = 22
+                    $cellValueX = if ($celularLabel -eq 'IMEI') { 76 } else { 94 }
+                    $tspl += "TEXT $cellLabelX,$specY,`"1`",0,1,1,`"$celularLabel`"`r`n"
+                    if ($celularLabel -eq 'BATERIA' -and $batInfo -ne 'N/A') {
+                        $tspl += "TEXT $cellValueX,$($specY - 3),`"2`",0,1,1,`"$batInfo`"`r`n"
+                        # Simbolo percentual em barras: compativel com firmwares que omitem o glifo %.
+                        $percentX = ($cellValueX + 4) + ($batInfo.Length * 12)
+                        $percentY = $specY - 2
+                        $tspl += "BAR $percentX,$percentY,4,4`r`n"
+                        $tspl += "BAR $($percentX + 13),$($percentY + 16),4,4`r`n"
+                        $tspl += "BAR $($percentX + 12),$percentY,2,4`r`n"
+                        $tspl += "BAR $($percentX + 10),$($percentY + 4),2,4`r`n"
+                        $tspl += "BAR $($percentX + 8),$($percentY + 8),2,4`r`n"
+                        $tspl += "BAR $($percentX + 6),$($percentY + 12),2,4`r`n"
+                        $tspl += "BAR $($percentX + 4),$($percentY + 16),2,4`r`n"
+                    } else {
+                        $tspl += "TEXT $cellValueX,$($specY - 3),`"2`",0,1,1,`"$([string]$celularSpec[1])`"`r`n"
+                    }
+                    if ($celularLabel -ne 'BATERIA') {
+                        $tspl += "BAR 20,$($specY + 25),282,1`r`n"
+                    }
+                    $specY += $specStep
+                }
+            } elseif ($isDesktop) {
+                $tspl += "TEXT 22,173,`"2`",0,1,1,`"DESKTOP`"`r`n"
+                $specY = 202
+                foreach ($desktopSpec in @(
+                    @('CPU', (Fit-TsplText $cpu 16)),
+                    @('RAM', (Fit-TsplText $ramMods 16)),
+                    @('DISCO', (Fit-TsplText $disco 16)),
+                    @('GPU', (Format-GpuEtiqueta $gpu))
+                )) {
+                    $desktopLabel = [string]$desktopSpec[0]
+                    $desktopValue = ([string]$desktopSpec[1]).Trim()
+                    if (-not $desktopValue -or $desktopValue -match '^(?i:N/?A)$') { continue }
+                    $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"$desktopLabel`"`r`n"
+                    $desktopFont = if ($desktopLabel -eq 'GPU' -and $desktopValue.Length -gt 18) { '1' } else { '2' }
+                    $desktopValueY = if ($desktopFont -eq '1') { $specY } else { $specY - 3 }
+                    $tspl += "TEXT 76,$desktopValueY,`"$desktopFont`",0,1,1,`"$desktopValue`"`r`n"
+                    $tspl += "BAR 20,$($specY + 22),282,1`r`n"
+                    $specY += 30
                 }
             } else {
-                $tspl += "TEXT 438,358,`"2`",0,1,1,`"$dataCurta`"`r`n"
+                $cpuInfo = Fit-TsplText $cpu 16
+                $ramInfo = Fit-TsplText $ramMods 16
+                $discoInfo = Fit-TsplText $disco 16
+                $gpuInfo = Format-GpuEtiqueta $gpu
+                $batInfo = Fit-TsplText $bateriaQualidade 20
+
+                $tspl += "TEXT 22,173,`"2`",0,1,1,`"CONFIGURACAO`"`r`n"
+                $specY = 200
+                $specStep = 28
+                $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"CPU`"`r`n"
+                $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$cpuInfo`"`r`n"
+                $tspl += "BAR 20,$($specY + 22),282,1`r`n"
+                $specY += $specStep
+                $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"RAM`"`r`n"
+                $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$ramInfo`"`r`n"
+                $tspl += "BAR 20,$($specY + 22),282,1`r`n"
+                $specY += $specStep
+                $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"DISCO`"`r`n"
+                $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$discoInfo`"`r`n"
+                $tspl += "BAR 20,$($specY + 22),282,1`r`n"
+                $specY += $specStep
+                $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"GPU`"`r`n"
+                $gpuFont = if ($gpuInfo.Length -gt 18) { '1' } else { '2' }
+                $gpuY = if ($gpuFont -eq '1') { $specY } else { $specY - 3 }
+                $tspl += "TEXT 76,$gpuY,`"$gpuFont`",0,1,1,`"$gpuInfo`"`r`n"
+                $tspl += "BAR 20,$($specY + 22),282,1`r`n"
+                $specY += $specStep
+                $tspl += "TEXT 22,$specY,`"1`",0,1,1,`"BAT`"`r`n"
+                $tspl += "TEXT 76,$($specY - 3),`"2`",0,1,1,`"$batInfo`"`r`n"
+            }
+
+            # O bloco inteiro de observacoes so existe quando ha texto imprimivel.
+            if ($temObservacaoEtiqueta) {
+                $tspl += "BAR 20,330,590,1`r`n"
+                $tspl += "TEXT 22,334,`"2`",0,1,1,`"OBS`"`r`n"
+                $obsY = 334
+                foreach ($linhaObs in $obsLines) {
+                    $tspl += "TEXT 66,$obsY,`"1`",0,1,1,`"$linhaObs`"`r`n"
+                    $obsY += 16
+                }
+            }
+
+            # Este firmware imprime o prefixo binario B00 literalmente. Use o
+            # modo automatico e modulo 5 para manter o QR dentro do quadro.
+            if ($temObservacaoEtiqueta) {
+                $tspl += "QRCODE 402,174,M,4,A,0,M2,S7,`"$qrPayload`"`r`n"
+            } else {
+                $tspl += "QRCODE 382,188,M,5,A,0,M2,S7,`"$qrPayload`"`r`n"
+            }
+            if (-not $temObservacaoEtiqueta) {
+                $tspl += "TEXT 244,370,`"1`",0,1,1,`"$dataCurta`"`r`n"
             }
 
             $tspl += "PRINT 1,1`r`n"
@@ -3281,7 +3791,8 @@ while ($listener.IsListening) {
 
             if ($printRes.ok) {
                 Write-Host "[$horario] Etiqueta enviada com sucesso!"
-                $json = '{"status":"ok","mensagem":"Impresso com sucesso"}'
+                Write-Host "[$horario] QR enviado: $qrPayload"
+                $json = (@{ status='ok'; mensagem='Impresso com sucesso'; fichaUrl=$qrPayload } | ConvertTo-Json -Compress)
                 $response.StatusCode = 200
             } else {
                 Write-Host "[$horario] Falha ao imprimir"

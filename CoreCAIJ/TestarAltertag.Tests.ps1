@@ -1,4 +1,4 @@
-param(
+﻿param(
     [string]$ScriptPath = (Join-Path $PSScriptRoot 'TestarAltertag.ps1')
 )
 
@@ -183,6 +183,10 @@ $prodResp = @{
 $prodApi = ConvertFrom-VhsysProdutosOrdemServico -Response $prodResp
 Assert-Equal $prodApi.Count 1 'produto api count'
 Assert-Equal $prodApi[0].Descricao 'Apple Macbook Pro 13" I7 16Gb 256GB' 'produto api descricao'
+Assert-True (Test-VhsysProdutoVinculado -Produtos $prodApi -IdProduto 82474640) 'confirma produto vinculado pelo id'
+Assert-True (-not (Test-VhsysProdutoVinculado -Produtos $prodApi -IdProduto 83717891)) 'rejeita produto diferente'
+$prodApiAninhado = @($prodApi)
+Assert-True (Test-VhsysProdutoVinculado -Produtos (, $prodApiAninhado) -IdProduto 82474640) 'confirma produto em resposta aninhada'
 
 $catalogoRespColunar = @{
     code = 200
@@ -219,6 +223,9 @@ Assert-Equal $draftOs.garantia_ordem 'PF3ABC12' 'payload os garantia'
 Assert-Equal $draftOs.referencia_ordem 'GRADE A' 'payload os referencia'
 Assert-Equal $draftOs.equipamento_ordem 'NOTEBOOK LENOVO T14' 'payload os equipamento'
 Assert-Equal $draftOs.problema_ordem 'Cadastro automatico CAIJ' 'payload os problema'
+$draftOsComObs = New-VhsysOrdemServicoPayload -Tecnico 'Felipe' -Serial 'IPHONE123' -Referencia 'GRADE B' -Equipamento '' -Observacao 'IMEI: 123 | Bateria: 75%'
+Assert-Equal $draftOsComObs.obs_pedido 'IMEI: 123 | Bateria: 75%' 'payload os observacao'
+Assert-Equal $draftOsComObs.problema_ordem '' 'observacao nao ocupa campo problema'
 Assert-True (-not $draftOs.Contains('obs_interno_pedido')) 'payload os sem obs interna'
 Assert-Equal $draftOs.status_pedido 'Em Aberto' 'payload os status'
 
@@ -227,6 +234,7 @@ Assert-Equal $draftProduto[0].id_produto 82530104 'payload produto id'
 Assert-Equal $draftProduto[0].desc_produto '5420 I5 16GB 256GB' 'payload produto descricao'
 Assert-Equal $draftProduto[0].qtde_produto '1' 'payload produto quantidade'
 Assert-Equal $draftProduto[0].valor_unit_produto '0.00' 'payload produto valor'
+Assert-True ((ConvertTo-Json -InputObject $draftProduto -Depth 5 -Compress).StartsWith('[')) 'payload de produto preserva lista com um item'
 Assert-True (-not $draftProduto[0].PSObject.Properties['id_almoxarifado']) 'payload produto sem campo nao documentado de almoxarifado'
 Assert-True (-not $draftProduto[0].PSObject.Properties['json_localizacoes']) 'payload produto sem campo nao documentado de localizacao'
 $draftProdutoValorRuim = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.000000 2950.000000 3000.000000'
@@ -236,7 +244,7 @@ $produtoComLocalizacao = @{
     data = @(
         @{
             id_produto = 82530104
-            json_localizacoes = '[{"desc_almoxarifado":"TÉCNICA_BT","id_almoxarifado":"31196","qtde_saida":"1,00"}]'
+            json_localizacoes = '[{"desc_almoxarifado":"TÃ‰CNICA_BT","id_almoxarifado":"31196","qtde_saida":"1,00"}]'
         }
     )
 } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
@@ -270,9 +278,31 @@ Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoEmOutroAlmoxar
 
 $serverText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ServidorImpressao.ps1') -Raw
 Assert-True ($serverText -notmatch 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor nao rejeita produto criado por localizacao ausente na resposta oficial'
-Assert-True ($serverText -notmatch '\$prodCheck\s*=\s*Invoke-VhsysJson') 'servidor nao consulta rota de produtos proibida depois do cadastro'
+Assert-True ($serverText -match 'Get-VhsysProdutosOrdemServico.*-ThrowOnError') 'servidor confirma produto persistido depois do cadastro'
+Assert-True ($serverText -match 'Test-VhsysProdutoVinculado') 'servidor valida produto persistido pelo id'
+Assert-True ($serverText -match 'ConvertTo-Json\s+-InputObject\s+\$Body') 'serializacao preserva arrays de produtos e servicos'
+Assert-True ($serverText -match 'Encoding\]::UTF8\.GetBytes\(\$jsonBody\)') 'servidor envia JSON ao VHSYS em UTF-8'
+Assert-True ($serverText -match '\\x20-\\x7E') 'descricao do produto remove caracteres corrompidos'
+Assert-True ($serverText -match '\$prodPath\s*=\s*"/ordens-servico/\{0\}/produtos"\s+-f\s+\$IdOrdem') 'produto usa id interno da OS'
+Assert-True ($serverText -match '\$servPath\s*=\s*"/ordens-servico/\{0\}/servicos"\s+-f\s+\$IdOrdem') 'servico usa id interno da OS'
+Assert-True ($serverText -match 'foreach\s*\(\$tentativaEnvio\s+in\s+1\.\.3\)') 'servidor repete produto ausente com limite seguro'
+Assert-True ($serverText -match '\$consultaConcluida\s*=\s*\$true') 'reenvio exige consulta valida ao VHSYS'
+Assert-True ($serverText -match 'Start-Sleep\s+-Milliseconds\s+650') 'cadastro aguarda propagacao da OS antes do produto'
 Assert-True ($serverText -match "New-VhsysOrdemServicoPayload.*-Equipamento\s+''") 'cadastro nao duplica produto no campo equipamento'
+Assert-True ($serverText -match "New-VhsysOrdemServicoPayload.*-Observacao\s+\`$Observacao") 'cadastro envia observacao para o campo correto da OS'
+Assert-True ($serverText -match 'obs_pedido\s*=\s*\(\[string\]\$Observacao\)\.Trim\(\)') 'payload mapeia observacao para obs_pedido'
+Assert-True ($serverText -match '\$observacaoReq\s*=\s*\(\[string\]\$dados\.observacao\)\.Trim\(\)') 'rota recebe observacao do aplicativo'
+Assert-True ($serverText -match '\$serialFont\s*=\s*''4''') 'etiqueta amplia fonte bitmap do serial comum'
+Assert-True ($serverText -notmatch '\$serialScaleX\s*=\s*2') 'serial nao recebe esticamento horizontal'
+Assert-True ($serverText -match '\$pctText\s*=\s*" \(\$pct\$\(\[char\]37\)\)"') 'percentual da bateria usa simbolo ASCII explicito'
+Assert-True ($serverText -match '\$batInfo\s*=\s*if\s*\(\$batPctMatch\.Success\)') 'celular imprime somente o numero percentual da bateria'
+Assert-True ($serverText -match '\$percentX\s*=\s*\(\$cellValueX\s*\+\s*4\)\s*\+\s*\(\$batInfo\.Length\s*\*\s*12\)') 'percentual acompanha a posicao dinamica da bateria'
+Assert-True ($serverText -notmatch 'DIAGONAL\s+\$\(\$percentX') 'percentual nao depende de comando diagonal da impressora'
+Assert-True ($serverText -match 'BAR\s+\$\(\$percentX\s*\+\s*10\)') 'simbolo percentual e construido com barras compativeis'
+Assert-True ($serverText -notmatch '\$celularSemObs') 'celular preserva o lado direito para o QR mesmo sem observacao'
+Assert-True ($serverText -match "if\s*\(\`$temObservacaoEtiqueta\)[\s\S]*?TEXT 22,334,.*OBS") 'titulo observacoes compacto so e impresso com conteudo'
 Assert-True ($serverText -match '\$produtoErro\s*=\s*\$null') 'cadastro acompanha falha parcial do produto'
+Assert-True ($serverText -match 'produtoConfirmado\s*=\s*\$produtoConfirmado') 'resposta informa confirmacao do produto'
 Assert-True ($serverText -match 'produtoErro\s*=\s*\$produtoErro') 'resposta devolve pendencia do produto'
 
 $draftServicos = New-VhsysOrdemServicosPayload -Servicos @('troca de bateria', 'Troca SSD', '', 'troca de tela')

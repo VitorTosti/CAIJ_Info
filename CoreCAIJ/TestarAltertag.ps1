@@ -1,4 +1,4 @@
-param(
+﻿param(
     [switch]$Library,
     [switch]$ShowConfig,
     [switch]$Discover,
@@ -391,7 +391,8 @@ function New-VhsysOrdemServicoPayload {
         [string]$Serial,
         [string]$Referencia,
         [string]$Equipamento,
-        [string]$Problema = ''
+        [string]$Problema = '',
+        [string]$Observacao = ''
     )
 
     [ordered]@{
@@ -403,6 +404,7 @@ function New-VhsysOrdemServicoPayload {
         equipamento_ordem = ([string]$Equipamento).Trim()
         problema_ordem = ([string]$Problema).Trim()
         referencia_ordem = ([string]$Referencia).Trim()
+        obs_pedido = ([string]$Observacao).Trim()
         status_pedido = 'Em Aberto'
     }
 }
@@ -418,10 +420,10 @@ function New-VhsysOrdemProdutoPayload {
         qtde_produto = '1'
         id_produto = $IdProduto
         valor_unit_produto = Normalize-VhsysValorUnitario $ValorUnitario
-        desc_produto = ([string]$Descricao).Trim()
+        desc_produto = (([string]$Descricao).Trim() -replace '[^\x20-\x7E]', '')
     }
 
-    @([pscustomobject]$payload)
+    return ,@([pscustomobject]$payload)
 }
 
 function Test-VhsysProdutoLocalizacao {
@@ -448,6 +450,22 @@ function Test-VhsysProdutoLocalizacao {
             return $false
         }
         return $false
+    }
+    return $false
+}
+
+function Test-VhsysProdutoVinculado {
+    param(
+        [object[]]$Produtos = @(),
+        [Parameter(Mandatory=$true)][int]$IdProduto
+    )
+
+    foreach ($grupo in @($Produtos)) {
+        foreach ($produto in @($grupo)) {
+            if ($produto -and [int]$produto.idProduto -eq $IdProduto) {
+                return $true
+            }
+        }
     }
     return $false
 }
