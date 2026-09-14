@@ -14,8 +14,49 @@ $bootstrapFiles = @(
     '.hidden',
     'CoreCAIJ/AtualizarCAIJ.ps1',
     'CoreCAIJ/AtualizarCAIJ.command',
-    'CoreCAIJ/PrepararLenovo.ps1'
+    'CoreCAIJ/PrepararLenovo.ps1',
+    'CoreCAIJ/caij_servidor_url.txt'
 )
+
+function Update-CaijPendriveNow {
+    param([string]$AppRoot)
+
+    $updaterPath = Join-Path $AppRoot 'CoreCAIJ\AtualizarCAIJ.ps1'
+    $serverConfigPath = Join-Path $AppRoot 'CoreCAIJ\caij_servidor_url.txt'
+    if (-not (Test-Path -LiteralPath $updaterPath -PathType Leaf)) {
+        throw "Atualizador nao encontrado depois da instalacao: $updaterPath"
+    }
+    if (-not (Test-Path -LiteralPath $serverConfigPath -PathType Leaf)) {
+        throw "Endereco do servidor nao foi gravado no pendrive: $serverConfigPath"
+    }
+
+    $baseUrl = ([string](Get-Content -LiteralPath $serverConfigPath -Raw)).Trim().TrimEnd('/')
+    if ($baseUrl -notmatch '^https?://') {
+        throw "Endereco do servidor invalido no pendrive: $baseUrl"
+    }
+
+    try {
+        $manifest = Invoke-RestMethod -Uri "$baseUrl/atualizacao/manifesto" -Method Get -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        throw "Pendrive preparado, mas o servidor $baseUrl nao respondeu: $($_.Exception.Message)"
+    }
+    $versaoRemota = ([string]$manifest.version).Trim()
+    if (-not $versaoRemota) { throw 'Servidor retornou manifesto sem versao.' }
+
+    # Reutilize exatamente o endpoint que acabou de responder acima. Fazer uma
+    # segunda descoberta podia falhar por DNS/transiente mesmo com o servidor ativo.
+    & powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $updaterPath -AppRoot $AppRoot -ServerBaseUrl $baseUrl -NoLaunch
+    if ($LASTEXITCODE -ne 0) { throw "Atualizador do pendrive terminou com codigo $LASTEXITCODE." }
+
+    $versionPath = Join-Path $AppRoot 'CoreCAIJ\caij_versao_app.txt'
+    $versaoLocal = if (Test-Path -LiteralPath $versionPath -PathType Leaf) {
+        ([string](Get-Content -LiteralPath $versionPath -Raw)).Trim()
+    } else { '' }
+    if ($versaoLocal -ne $versaoRemota) {
+        throw "Pendrive ainda esta na versao '$versaoLocal'; servidor oferece '$versaoRemota'."
+    }
+    Write-Host "[OK] Versao $versaoLocal instalada agora em $AppRoot"
+}
 
 function Set-CaijLauncherVisibility {
     param([string]$AppRoot)
@@ -102,6 +143,7 @@ foreach ($driveRootRaw in $DriveRoots) {
         New-CaijWindowsShortcut -AppRoot $appRoot
         Set-CaijLauncherVisibility -AppRoot $appRoot
         Write-Host "[OK] Inicializador instalado em $appRoot"
+        Update-CaijPendriveNow -AppRoot $appRoot
         $updated++
     }
 }

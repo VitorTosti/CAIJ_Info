@@ -12,7 +12,9 @@ if (-not $AppRoot) { $AppRoot = Split-Path -Parent $scriptDirectory }
 $coreRoot = Join-Path $AppRoot 'CoreCAIJ'
 $versionPath = Join-Path $coreRoot 'caij_versao_app.txt'
 $serverConfigPath = Join-Path $coreRoot 'caij_servidor_url.txt'
-$appScriptPath = Join-Path $coreRoot 'InfoNotebook.ps1'
+$appScriptPath = Join-Path $coreRoot 'InfoNotebookWindowsPreview.ps1'
+$legacyAppScriptPath = Join-Path $coreRoot 'InfoNotebook.ps1'
+if (-not (Test-Path -LiteralPath $appScriptPath -PathType Leaf)) { $appScriptPath = $legacyAppScriptPath }
 $protectedPattern = '(^|/)(caij_historico_notebooks\.json|caij_os_counter\.txt|caij_os_por_serial\.json|caij_servidor_url\.txt|caij_modelos_manuais\.json|caij_ultimo_modelo_manual\.json)$'
 
 function Write-UpdateMessage {
@@ -20,13 +22,54 @@ function Write-UpdateMessage {
     if (-not $Quiet) { Write-Host "[CAIJ] $Message" }
 }
 
-function Get-ServerBaseUrl {
-    if ($ServerBaseUrl) { return $ServerBaseUrl.Trim().TrimEnd('/') }
+function Get-CaijUpdateServerCandidates {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if ($ServerBaseUrl) { [void]$candidates.Add($ServerBaseUrl.Trim().TrimEnd('/')) }
     if (Test-Path -LiteralPath $serverConfigPath) {
         $configured = ([string](Get-Content -LiteralPath $serverConfigPath -Raw -ErrorAction SilentlyContinue)).Trim().TrimEnd('/')
-        if ($configured -match '^https?://') { return $configured }
+        if ($configured -match '^https?://') { [void]$candidates.Add($configured) }
     }
-    return ''
+    if ($env:CAIJ_SERVIDOR_URL) { [void]$candidates.Add($env:CAIJ_SERVIDOR_URL.Trim().TrimEnd('/')) }
+    if ($env:CAIJ_SERVIDOR_IP) { [void]$candidates.Add("http://$($env:CAIJ_SERVIDOR_IP.Trim()):9100") }
+
+    # Endereco conhecido do servidor principal e descoberta na rede atual.
+    # Isso recupera pendrives antigos cujo arquivo de configuracao esteja ausente
+    # ou ainda aponte para um IP usado anteriormente.
+    [void]$candidates.Add('http://INFOCAIJ:9100')
+    [void]$candidates.Add('http://192.168.15.11:9100')
+    try {
+        $localIps = @(Get-CimInstance Win32_NetworkAdapterConfiguration -ErrorAction SilentlyContinue |
+            Where-Object { $_.IPEnabled -and $_.IPAddress } |
+            ForEach-Object { $_.IPAddress } |
+            Where-Object { $_ -match '^\d{1,3}(\.\d{1,3}){3}$' -and $_ -notmatch '^(127\.|169\.254\.)' })
+        foreach ($localIp in $localIps) {
+            $parts = ([string]$localIp).Split('.')
+            if ($parts.Count -eq 4) {
+                [void]$candidates.Add(('http://{0}.{1}.{2}.11:9100' -f $parts[0], $parts[1], $parts[2]))
+            }
+        }
+    } catch {}
+
+    return @($candidates | Where-Object { $_ -match '^https?://' } | Select-Object -Unique)
+}
+
+function Find-CaijUpdateEndpoint {
+    $candidates = @(Get-CaijUpdateServerCandidates)
+    foreach ($attempt in 1..3) {
+        foreach ($candidate in $candidates) {
+            try {
+                $manifest = Invoke-RestMethod -Uri "$candidate/atualizacao/manifesto" -Method Get -TimeoutSec 5 -ErrorAction Stop
+                if ($manifest -and [string]$manifest.status -eq 'ok' -and ([string]$manifest.version).Trim()) {
+                    try {
+                        [IO.File]::WriteAllText($serverConfigPath, $candidate, (New-Object Text.UTF8Encoding($false)))
+                    } catch {}
+                    return [pscustomobject]@{ BaseUrl=$candidate; Manifest=$manifest }
+                }
+            } catch {}
+        }
+        if ($attempt -lt 3) { Start-Sleep -Milliseconds 400 }
+    }
+    return $null
 }
 
 function Resolve-UpdateUrl {
@@ -86,18 +129,13 @@ function New-CaijWindowsShortcut {
 }
 
 function Invoke-CaijUpdate {
-    $baseUrl = Get-ServerBaseUrl
-    if (-not $baseUrl) {
-        Write-UpdateMessage 'Servidor nao configurado; iniciando a versao local.'
-        return $false
-    }
-
-    try {
-        $manifest = Invoke-RestMethod -Uri "$baseUrl/atualizacao/manifesto" -Method Get -TimeoutSec 2 -ErrorAction Stop
-    } catch {
+    $endpoint = Find-CaijUpdateEndpoint
+    if (-not $endpoint) {
         Write-UpdateMessage 'Servidor de atualizacoes indisponivel; iniciando a versao local.'
         return $false
     }
+    $baseUrl = [string]$endpoint.BaseUrl
+    $manifest = $endpoint.Manifest
 
     $remoteVersion = ([string]$manifest.version).Trim()
     $localVersion = if (Test-Path -LiteralPath $versionPath) {

@@ -5,6 +5,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+function Get-CaijFileSha256 {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $stream = [IO.File]::OpenRead([IO.Path]::GetFullPath($Path))
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        return (($sha.ComputeHash($stream) | ForEach-Object { $_.ToString('x2') }) -join '')
+    } finally {
+        $sha.Dispose()
+        $stream.Dispose()
+    }
+}
 $scriptDirectory = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $AppRoot) { $AppRoot = Split-Path -Parent $scriptDirectory }
 $rootFiles = @(
@@ -17,6 +28,7 @@ $rootFiles = @(
 )
 $coreFiles = @(
     'CoreCAIJ/InfoNotebook.ps1',
+    'CoreCAIJ/InfoNotebookWindowsPreview.ps1',
     'CoreCAIJ/InfoNotebookMac.ps1',
     'CoreCAIJ/TestarNotebook.ps1',
     'CoreCAIJ/GradeRules.ps1',
@@ -44,7 +56,11 @@ try {
     foreach ($relativeDirectory in $coreDirectories) {
         $sourceDirectory = Join-Path $AppRoot ($relativeDirectory.Replace('/', [IO.Path]::DirectorySeparatorChar))
         if (-not (Test-Path -LiteralPath $sourceDirectory -PathType Container)) { continue }
-        foreach ($file in Get-ChildItem -LiteralPath $sourceDirectory -File -Recurse | Where-Object { $_.Name -notlike '*.pyc' -and $_.FullName -notmatch '[\\/]__pycache__[\\/]' }) {
+        foreach ($file in Get-ChildItem -LiteralPath $sourceDirectory -File -Recurse | Where-Object {
+            $_.Name -notlike '*.pyc' -and
+            $_.Name -notin @('caij-runtime.js', 'runtime-data.json', '.preview-runtime.json') -and
+            $_.FullName -notmatch '[\\/]__pycache__[\\/]'
+        }) {
             $relative = $file.FullName.Substring($AppRoot.TrimEnd('\').Length).TrimStart('\').Replace('\', '/')
             $destination = Join-Path $stagePath ($relative.Replace('/', [IO.Path]::DirectorySeparatorChar))
             New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
@@ -61,15 +77,15 @@ try {
     $lenovoCachePath = Join-Path $OutputDirectory 'vendor\portcoderev2.exe'
     $lenovoCacheValid = $false
     if (Test-Path -LiteralPath $lenovoCachePath -PathType Leaf) {
-        $lenovoCacheValid = ((Get-FileHash -LiteralPath $lenovoCachePath -Algorithm SHA256).Hash -eq $lenovoExpectedHash)
+        $lenovoCacheValid = ((Get-CaijFileSha256 -Path $lenovoCachePath) -eq $lenovoExpectedHash.ToLowerInvariant())
     }
     if (-not $lenovoCacheValid) {
         $lenovoDownloadPath = Join-Path $tempRoot 'portcoderev2.exe.download'
         Invoke-WebRequest -Uri $lenovoDownloadUrl -OutFile $lenovoDownloadPath -UseBasicParsing -TimeoutSec 60 -ErrorAction Stop
-        $downloadHash = (Get-FileHash -LiteralPath $lenovoDownloadPath -Algorithm SHA256).Hash
+        $downloadHash = Get-CaijFileSha256 -Path $lenovoDownloadPath
         $downloadSignature = Get-AuthenticodeSignature -LiteralPath $lenovoDownloadPath
         $downloadSigner = if ($downloadSignature.SignerCertificate) { [string]$downloadSignature.SignerCertificate.Subject } else { '' }
-        if ($downloadHash -ne $lenovoExpectedHash -or $downloadSignature.Status -ne 'Valid' -or $downloadSigner -notmatch '(?i)(CN|O)=Lenovo') {
+        if ($downloadHash -ne $lenovoExpectedHash.ToLowerInvariant() -or $downloadSignature.Status -ne 'Valid' -or $downloadSigner -notmatch '(?i)(CN|O)=Lenovo') {
             throw 'O download do patch Lenovo falhou na validacao de integridade ou assinatura.'
         }
         New-Item -ItemType Directory -Path (Split-Path -Parent $lenovoCachePath) -Force | Out-Null
@@ -98,7 +114,7 @@ try {
     $packagePath = Join-Path $OutputDirectory $packageName
     if (Test-Path -LiteralPath $packagePath) { Remove-Item -LiteralPath $packagePath -Force }
     Compress-Archive -Path (Join-Path $stagePath '*') -DestinationPath $packagePath -CompressionLevel Optimal
-    $hash = (Get-FileHash -LiteralPath $packagePath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $hash = Get-CaijFileSha256 -Path $packagePath
     $manifest = [ordered]@{
         status = 'ok'
         version = $Version

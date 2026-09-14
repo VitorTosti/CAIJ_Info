@@ -1,7 +1,7 @@
 $ErrorActionPreference = 'SilentlyContinue'
 
 $configPath = Join-Path $PSScriptRoot 'caij_servidor_url.txt'
-$url = 'http://192.168.15.127:9100'
+$url = 'http://INFOCAIJ:9100'
 if (Test-Path $configPath) {
     $cfg = (Get-Content -LiteralPath $configPath -Raw).Trim()
     if ($cfg) { $url = $cfg.TrimEnd('/') }
