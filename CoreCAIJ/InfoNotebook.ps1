@@ -217,9 +217,16 @@ function Set-CaijDpiLayout {
     $Form | Add-Member -NotePropertyName CaijDpiLayoutApplied -NotePropertyValue $true
     if ($dpiScale -le 1.01) { return }
 
-    $workingArea = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
-    $maxScaleX = [Math]::Max(1.0, (($workingArea.Width - 32.0) / [Math]::Max(1, $Form.Width)))
-    $maxScaleY = [Math]::Max(1.0, (($workingArea.Height - 32.0) / [Math]::Max(1, $Form.Height)))
+    $targetAreaProperty = $Form.PSObject.Properties['CaijTargetWorkingArea']
+    $workingArea = if ($targetAreaProperty -and $targetAreaProperty.Value) {
+        [System.Drawing.Rectangle]$targetAreaProperty.Value
+    } else {
+        [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+    }
+    # Permite reduzir abaixo do tamanho-base em telas compactas ou com DPI alto.
+    # Antes o limite minimo 1.0 impedia o encaixe e deixava partes da janela fora da tela.
+    $maxScaleX = [Math]::Max(0.72, (($workingArea.Width - 32.0) / [Math]::Max(1, $Form.Width)))
+    $maxScaleY = [Math]::Max(0.72, (($workingArea.Height - 32.0) / [Math]::Max(1, $Form.Height)))
     $scale = [Math]::Min($dpiScale, [Math]::Min($maxScaleX, $maxScaleY))
 
     # Se uma janela alta precisar de escala menor, fonte e geometria continuam proporcionais.
@@ -302,7 +309,7 @@ public sealed class CaijGradeMenuRenderer : ToolStripProfessionalRenderer
         string tag = Convert.ToString(rawTag).Trim().ToUpperInvariant();
         if (tag == "A") return Color.FromArgb(34, 197, 94);
         if (tag == "B") return Color.FromArgb(245, 158, 11);
-        if (tag.StartsWith("C - PINTURA")) return Color.FromArgb(249, 115, 22);
+        if (tag == "C" || tag.StartsWith("C - PINTURA")) return Color.FromArgb(249, 115, 22);
         if (tag.StartsWith("T - TRIAGEM")) return Color.FromArgb(139, 92, 246);
         if (tag == "RMA") return Color.FromArgb(244, 63, 94);
         return Color.FromArgb(112, 105, 133);
@@ -947,6 +954,7 @@ $script:osDefinidaPorAltertag = $false
 $script:osDefinidaManual = $false
 $script:altertagOsAtual = $null
 $script:osImpressaoPendente = $null
+$script:cadastroOsAberto = $false
 $script:altertagOsDetalheConfirmado = $null
 $script:maiorOsVistaAltertag = 0
 $script:ultimoAlertaOsNumero = 0
@@ -1205,6 +1213,76 @@ function Get-IPhoneStorageUsb {
     return if ([int]$marketedGb -ge 1024) { "$([int]$marketedGb / 1024)TB" } else { "$marketedGb`GB" }
 }
 
+function Get-AppleDeviceRam {
+    param(
+        [string]$ProductType,
+        [string]$Armazenamento = ''
+    )
+
+    $tipo = ([string]$ProductType).Trim()
+    if (-not $tipo) { return '' }
+
+    # O 3uTools informa o identificador interno (ProductType), mas nao grava a
+    # RAM no cache. Esta tabela resolve modelos em que a memoria e fixa.
+    $ramFixaGb = @{
+        'iPhone7,1'=1;  'iPhone7,2'=1
+        'iPhone8,1'=2;  'iPhone8,2'=2;  'iPhone8,4'=2
+        'iPhone9,1'=2;  'iPhone9,2'=3;  'iPhone9,3'=2;  'iPhone9,4'=3
+        'iPhone10,1'=2; 'iPhone10,2'=3; 'iPhone10,3'=3; 'iPhone10,4'=2; 'iPhone10,5'=3; 'iPhone10,6'=3
+        'iPhone11,2'=4; 'iPhone11,4'=4; 'iPhone11,6'=4; 'iPhone11,8'=3
+        'iPhone12,1'=4; 'iPhone12,3'=4; 'iPhone12,5'=4; 'iPhone12,8'=3
+        'iPhone13,1'=4; 'iPhone13,2'=4; 'iPhone13,3'=6; 'iPhone13,4'=6
+        'iPhone14,2'=6; 'iPhone14,3'=6; 'iPhone14,4'=4; 'iPhone14,5'=4; 'iPhone14,6'=4; 'iPhone14,7'=6; 'iPhone14,8'=6
+        'iPhone15,2'=6; 'iPhone15,3'=6; 'iPhone15,4'=6; 'iPhone15,5'=6
+        'iPhone16,1'=8; 'iPhone16,2'=8
+        'iPhone17,1'=8; 'iPhone17,2'=8; 'iPhone17,3'=8; 'iPhone17,4'=8; 'iPhone17,5'=8
+        'iPad8,9'=6;  'iPad8,10'=6; 'iPad8,11'=6; 'iPad8,12'=6
+        'iPad11,1'=3; 'iPad11,2'=3; 'iPad11,3'=3; 'iPad11,4'=3; 'iPad11,6'=3; 'iPad11,7'=3
+        'iPad12,1'=3; 'iPad12,2'=3
+        'iPad13,1'=4; 'iPad13,2'=4; 'iPad13,16'=8; 'iPad13,17'=8; 'iPad13,18'=4; 'iPad13,19'=4
+        'iPad14,1'=4; 'iPad14,2'=4; 'iPad14,8'=8; 'iPad14,9'=8; 'iPad14,10'=8; 'iPad14,11'=8
+        'iPad15,3'=8; 'iPad15,4'=8; 'iPad15,5'=8; 'iPad15,6'=8
+        'iPad16,1'=8; 'iPad16,2'=8
+    }
+    if ($ramFixaGb.ContainsKey($tipo)) { return "$($ramFixaGb[$tipo])GB" }
+
+    $armazenamentoGb = 0
+    $armazenamentoTexto = ([string]$Armazenamento).Trim().ToUpperInvariant()
+    if ($armazenamentoTexto -match '^(\d+)\s*TB$') {
+        $armazenamentoGb = [int]$matches[1] * 1024
+    } elseif ($armazenamentoTexto -match '^(\d+)\s*GB$') {
+        $armazenamentoGb = [int]$matches[1]
+    }
+
+    # Nos iPad Pro com chips M1/M2/M4, 1 TB e 2 TB usam 16 GB; as demais
+    # capacidades usam 8 GB. Nos Pro de 2018, somente 1 TB usa 6 GB.
+    if ($tipo -match '^iPad(?:13,(?:4|5|6|7|8|9|10|11)|14,(?:3|4|5|6)|16,(?:3|4|5|6))$') {
+        return $(if ($armazenamentoGb -ge 1024) { '16GB' } else { '8GB' })
+    }
+    if ($tipo -match '^iPad8,(?:1|2|3|4|5|6|7|8)$') {
+        return $(if ($armazenamentoGb -ge 1024) { '6GB' } else { '4GB' })
+    }
+    return ''
+}
+
+function Get-AppleStorageFromModelNumber {
+    param([string]$ModelNumber)
+
+    $modelo = (([string]$ModelNumber).Trim().ToUpperInvariant() -replace '[^A-Z0-9]', '')
+    if (-not $modelo) { return '' }
+    if ($modelo -match '^([A-Z0-9]{5})') { $modelo = [string]$Matches[1] }
+    $capacidadePorModelo = @{
+        'MHDH3'='128GB'; 'MHDA3'='64GB'
+        'MGJ53'='64GB';  'MGJ63'='64GB'
+        'MLPF3'='128GB'; 'MPUF3'='128GB'
+        'MMXF3'='64GB'
+        'MK4E3'='256GB'; 'MK4H3'='256GB'
+        'MQ6T3'='256GB'
+    }
+    if ($capacidadePorModelo.ContainsKey($modelo)) { return [string]$capacidadePorModelo[$modelo] }
+    return ''
+}
+
 function Get-3uToolsDeviceInfo {
     $installDirs = New-Object System.Collections.Generic.List[string]
     foreach ($candidate in @(
@@ -1308,9 +1386,15 @@ function Get-3uToolsDeviceInfo {
     } catch {
         $storageError = $_.Exception.Message
     }
+    if (-not $storage) {
+        $storage = Get-AppleStorageFromModelNumber -ModelNumber ([string]$values['ModelNumber'])
+        if ($storage) { $storageError = '' }
+    }
+    $ram = Get-AppleDeviceRam -ProductType $productType -Armazenamento $storage
 
     return [pscustomobject]@{
         Modelo = $modelName
+        ProductType = $productType
         Serial = $serial
         Imei = $imei
         Bateria = if ($battery) { [string]$battery.Qualidade } else { '' }
@@ -1318,6 +1402,7 @@ function Get-3uToolsDeviceInfo {
         BateriaErro = $batteryError
         Armazenamento = [string]$storage
         ArmazenamentoErro = $storageError
+        Ram = [string]$ram
         Arquivo = $infoFile.FullName
         AtualizadoEm = $infoFile.LastWriteTime
     }
@@ -1573,8 +1658,9 @@ function Get-ServidorCandidates {
     if ($env:CAIJ_SERVIDOR_URL) { [void]$candidatos.Add($env:CAIJ_SERVIDOR_URL.TrimEnd('/')) }
     if ($env:CAIJ_SERVIDOR_IP)  { [void]$candidatos.Add(('http://{0}:{1}' -f $env:CAIJ_SERVIDOR_IP.Trim(), $portaServidor)) }
 
-    # IP do PC principal.
-    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.127', $portaServidor))
+    # Nome estavel do PC principal; o IP atual permanece como contingencia.
+    [void]$candidatos.Add(('http://{0}:{1}' -f 'INFOCAIJ', $portaServidor))
+    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.11', $portaServidor))
 
     # Tenta o final .127 em cada rede IPv4 local do notebook.
     try {
@@ -1632,6 +1718,45 @@ function Invoke-CaijServer {
     }
     if ($lastErr) { throw $lastErr }
     throw "Falha ao acessar servidor CAIJ em $Path"
+}
+
+function Invoke-CaijUiResponsiveJsonPost {
+    param(
+        [Parameter(Mandatory=$true)][string]$Uri,
+        [Parameter(Mandatory=$true)][string]$JsonBody,
+        [System.Windows.Forms.Form]$Owner,
+        [System.Windows.Forms.Button]$StatusButton,
+        [int]$TimeoutSec = 45
+    )
+
+    $client = New-Object System.Net.WebClient
+    $client.Encoding = [System.Text.Encoding]::UTF8
+    $client.Headers[[System.Net.HttpRequestHeader]::ContentType] = 'application/json; charset=utf-8'
+    $inicio = Get-Date
+    try {
+        $task = $client.UploadStringTaskAsync([Uri]$Uri, 'POST', $JsonBody)
+        while (-not $task.IsCompleted) {
+            if ($Owner -and $Owner.IsDisposed) {
+                $client.CancelAsync()
+                throw 'A janela foi fechada durante a criacao da OS.'
+            }
+            $decorrido = [int]((Get-Date) - $inicio).TotalSeconds
+            if ($decorrido -ge $TimeoutSec) {
+                $client.CancelAsync()
+                throw "O servidor demorou mais de $TimeoutSec segundos para criar a OS."
+            }
+            if ($StatusButton -and -not $StatusButton.IsDisposed) {
+                $StatusButton.Text = "Criando... ${decorrido}s"
+            }
+            [System.Windows.Forms.Application]::DoEvents()
+            Start-Sleep -Milliseconds 40
+        }
+        if ($task.IsCanceled) { throw 'A criacao da OS foi cancelada.' }
+        if ($task.IsFaulted) { throw $task.Exception.GetBaseException() }
+        return ($task.Result | ConvertFrom-Json)
+    } finally {
+        $client.Dispose()
+    }
 }
 
 function Show-OsAltertagDetalheConfirm {
@@ -1789,7 +1914,7 @@ function Get-ServidorBaseUrl {
         }
     }
 
-    $script:servidorBaseUrlCache = 'http://192.168.15.127:9100'
+    $script:servidorBaseUrlCache = 'http://INFOCAIJ:9100'
     return $script:servidorBaseUrlCache
 }
 
@@ -2512,11 +2637,11 @@ function Apply-OsAltertagNaEtiqueta {
     if (-not $Ordem) { return }
     $equipamentoOs = Get-ModeloEtiquetaProduto -Descricao (([string]$Ordem.equipamento) -replace 'Â°|°', '')
     $serialOs = ([string]$Ordem.garantia).Trim()
-    $referenciaOs = ([string]$Ordem.referencia).Trim().ToUpperInvariant()
+    $referenciaOs = Format-CaijGradeReference (Normalize-CaijGrade ([string]$Ordem.referencia))
     if ($equipamentoOs) { $script:modeloEtiqueta = $equipamentoOs }
     if ($serialOs) { $script:serialEtiqueta = $serialOs }
 
-    foreach ($gradeOpcaoOs in @(@(Get-CaijGradeOptions) + @(Get-CaijGradeOptions -EquipmentType 'Celular') | Select-Object -Unique)) {
+    foreach ($gradeOpcaoOs in @(Get-CaijGradeOptions)) {
         if ((Format-CaijGradeReference $gradeOpcaoOs).ToUpperInvariant() -eq $referenciaOs) {
             $script:gradeAtual = $gradeOpcaoOs
             break
@@ -2593,7 +2718,7 @@ function Apply-CadastroOsEtiquetaNaImpressao {
     $script:monitorEntradasEtiqueta = ''
     $script:cpuEtiqueta = ''
     $script:memEtiqueta = [string]$Etiqueta.armazenamento
-    $script:ramEtiqueta = ''
+    $script:ramEtiqueta = [string]$Etiqueta.ram
     $script:gpuEtiqueta = ''
     $script:modoManualEtiqueta = $true
 }
@@ -2968,7 +3093,10 @@ function Sync-OsFromAltertag {
         $erroServidor = ''
         try {
             if (-not $Silent) {
-                $respRecentes = Invoke-CaijServer -Path '/os-recentes?limit=15&produtos=1' -Method GET -TimeoutSec 25 -Retries 2
+                # A lista usa o resumo ja devolvido pela OS. O produto completo e
+                # carregado somente ao selecionar uma ordem, evitando 15 chamadas
+                # externas sequenciais antes de abrir a janela.
+                $respRecentes = Invoke-CaijServer -Path '/os-recentes?limit=15' -Method GET -TimeoutSec 12 -Retries 1
                 if ($respRecentes -and [string]$respRecentes.status -eq 'ok') {
                     $selecionouOs = Select-OsFromAltertagRecentes -Ordens @($respRecentes.ordens)
                     if (-not $selecionouOs) {
@@ -2979,7 +3107,9 @@ function Sync-OsFromAltertag {
                     $erroServidor = [string]$respRecentes.mensagem
                 }
             } else {
-                $respOs = Invoke-CaijServer -Path '/status-os' -Method GET -TimeoutSec 12 -Retries 2
+                # Sincronizacoes silenciosas nao precisam bloquear a interface
+                # aguardando a API externa; o servidor reconcilia em segundo plano.
+                $respOs = Invoke-CaijServer -Path '/status-os-local' -Method GET -TimeoutSec 4 -Retries 1
                 if ($respOs -and [string]$respOs.status -eq 'ok' -and $respOs.proximoDisponivel) {
                     $proximaSrv = [int]$respOs.proximoDisponivel
                     if (-not $script:osDefinidaPorAltertag -and -not $script:osDefinidaManual) {
@@ -3064,7 +3194,7 @@ function Show-DialogConfigurarServidor {
     $urlAtual = ''
     if ($script:servidorBaseUrlCache) { $urlAtual = $script:servidorBaseUrlCache }
     elseif (Test-Path $cfgPath) { try { $urlAtual = (Get-Content $cfgPath -Raw).Trim() } catch {} }
-    if (-not $urlAtual) { $urlAtual = 'http://192.168.15.127:9100' }
+    if (-not $urlAtual) { $urlAtual = 'http://INFOCAIJ:9100' }
 
     $f = New-Object System.Windows.Forms.Form
     $f.Text = 'Configurar Servidor CAIJ'
@@ -3083,7 +3213,7 @@ function Show-DialogConfigurarServidor {
     [void]$f.Controls.Add($lHead)
 
     $lHint = New-Object System.Windows.Forms.Label
-    $lHint.Text = 'Digite o IP ou URL completa do servidor (ex: http://192.168.15.127:9100)'
+    $lHint.Text = 'Digite o nome, IP ou URL do servidor (ex: http://INFOCAIJ:9100)'
     $lHint.Font = New-Object System.Drawing.Font('Segoe UI', 8)
     $lHint.ForeColor = [System.Drawing.Color]::FromArgb(139, 130, 158)
     $lHint.Location = New-Object System.Drawing.Point(16, 40)
@@ -4181,6 +4311,7 @@ function Show-TecnicoCadastroOs {
 function Show-CadastroOsAltertagDraft {
     param([Parameter(Mandatory=$true)][string]$TecnicoInicial)
     if ([string]::IsNullOrWhiteSpace($TecnicoInicial)) { return }
+    $script:cadastroOsAberto = $true
     $osUiBg = [System.Drawing.Color]::FromArgb(7, 9, 17)
     $osUiSurface = [System.Drawing.Color]::FromArgb(15, 18, 29)
     $osUiSurfaceRaised = [System.Drawing.Color]::FromArgb(21, 24, 38)
@@ -4196,11 +4327,14 @@ function Show-CadastroOsAltertagDraft {
     $dlg.Text = 'Cadastrar OS Altertag'
     $dlg.ClientSize = New-Object System.Drawing.Size(920, 700)
     $dlg.StartPosition = 'CenterParent'
+    $cadastroWorkingArea = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $dlg | Add-Member -NotePropertyName CaijTargetWorkingArea -NotePropertyValue $cadastroWorkingArea
     $dlg.BackColor = $osUiBg
     $dlg.ForeColor = $cMain
     $dlg.FormBorderStyle = 'None'
     $dlg.MaximizeBox = $false
     $dlg.MinimizeBox = $false
+    $dlg.ShowInTaskbar = $true
     $dlg.KeyPreview = $true
     Set-RoundedControl -Control $dlg -Radius 14
     $dlg.Add_Paint({
@@ -4265,6 +4399,20 @@ function Show-CadastroOsAltertagDraft {
     $btnFecharCadastroTopo.Cursor = [System.Windows.Forms.Cursors]::Hand
     $btnFecharCadastroTopo.Add_Click({ $dlg.Close() })
     [void]$cadastroHeader.Controls.Add($btnFecharCadastroTopo)
+
+    $btnMinimizarCadastroTopo = New-Object System.Windows.Forms.Button
+    $btnMinimizarCadastroTopo.Text = [char]0x2014
+    $btnMinimizarCadastroTopo.Font = New-Object System.Drawing.Font('Segoe UI', 11)
+    $btnMinimizarCadastroTopo.ForeColor = $osUiMuted
+    $btnMinimizarCadastroTopo.BackColor = $osUiSurface
+    $btnMinimizarCadastroTopo.FlatStyle = 'Flat'
+    $btnMinimizarCadastroTopo.FlatAppearance.BorderSize = 0
+    $btnMinimizarCadastroTopo.FlatAppearance.MouseOverBackColor = $osUiSurfaceRaised
+    $btnMinimizarCadastroTopo.Location = New-Object System.Drawing.Point(832, 12)
+    $btnMinimizarCadastroTopo.Size = New-Object System.Drawing.Size(36, 36)
+    $btnMinimizarCadastroTopo.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $btnMinimizarCadastroTopo.Add_Click({ $dlg.WindowState = [System.Windows.Forms.FormWindowState]::Minimized })
+    [void]$cadastroHeader.Controls.Add($btnMinimizarCadastroTopo)
 
     $script:cadastroDragAtivo = $false
     $script:cadastroDragOrigem = [System.Drawing.Point]::Empty
@@ -4407,6 +4555,7 @@ function Show-CadastroOsAltertagDraft {
     $lblGradeCaption.Size = New-Object System.Drawing.Size(162, 12)
     [void]$cardGrade.Controls.Add($lblGradeCaption)
     $script:gradeCadastroOs = if ($script:rnaAtivo) { 'RMA' } elseif ($script:gradeAtual) { [string]$script:gradeAtual } else { 'A' }
+    $script:gradeCadastroOs = Normalize-CaijGrade $script:gradeCadastroOs
     $btnGradeOs = New-Object System.Windows.Forms.Button
     $btnGradeOs.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
     $btnGradeOs.BackColor = $osUiSurfaceRaised
@@ -4431,7 +4580,7 @@ function Show-CadastroOsAltertagDraft {
     $gradeMenuOs.Padding = New-Object System.Windows.Forms.Padding(1, 4, 1, 4)
     $gradeMenuOs.MinimumSize = New-Object System.Drawing.Size(178, 0)
     $gradeMenuOs.Renderer = New-Object CaijGradeMenuRenderer
-    foreach ($gradeOpcao in @(@(Get-CaijGradeOptions) + @(Get-CaijGradeOptions -EquipmentType 'Celular') | Select-Object -Unique)) {
+    foreach ($gradeOpcao in @(Get-CaijGradeOptions)) {
         $gradeItem = New-Object System.Windows.Forms.ToolStripMenuItem
         $gradeItem.Text = (Format-CaijGradeReference $gradeOpcao)
         $gradeItem.Tag = $gradeOpcao
@@ -4713,6 +4862,7 @@ function Show-CadastroOsAltertagDraft {
     })
     $scrollProdTimer.Start()
     $dlg.Add_FormClosed({
+        $script:cadastroOsAberto = $false
         $scrollProdTimer.Stop()
         $scrollProdTimer.Dispose()
     })
@@ -4827,6 +4977,7 @@ function Show-CadastroOsAltertagDraft {
     $servicosCadastroEstado = [pscustomobject]@{
         Selecoes = @{ Notebook=@(); Monitor=@(); Celular=@() }
         DadosCelular = $null
+        ConfiguracaoEditada = $false
         TipoAtual = switch ([string]$script:tipoEtiqueta) {
             'Monitor' { 'Monitor' }
             'Celular' { 'Celular' }
@@ -4979,23 +5130,13 @@ function Show-CadastroOsAltertagDraft {
     $renderServicosCadastro = {
         param([string]$Tipo)
         $servicosCadastroEstado.TipoAtual = $Tipo
-        $tipoGradeCelular = ($Tipo -eq 'Celular')
         foreach ($item in @($gradeMenuOs.Items)) {
-            $tagGradeItem = [string]$item.Tag
-            $item.Visible = if ($tipoGradeCelular) {
-                $tagGradeItem -notmatch '^C\s*-\s*PINTURA'
-            } else {
-                $tagGradeItem -ne 'C'
-            }
+            $item.Visible = $true
         }
-        if ($tipoGradeCelular -and ([string]$script:gradeCadastroOs) -match '^C\s*-\s*PINTURA') {
+        if (([string]$script:gradeCadastroOs) -match '^C\s*-\s*PINTURA') {
             $script:gradeCadastroOs = 'C'
             $script:gradeAtual = 'C'
             $btnGradeOs.Text = (Format-CaijGradeReference 'C')
-        } elseif (-not $tipoGradeCelular -and ([string]$script:gradeCadastroOs) -eq 'C') {
-            $script:gradeCadastroOs = 'A'
-            $script:gradeAtual = 'A'
-            $btnGradeOs.Text = (Format-CaijGradeReference 'A')
         }
         $servPanel.Controls.Clear()
         foreach ($tipoNome in @('Notebook','Monitor','Celular')) {
@@ -5119,8 +5260,47 @@ function Show-CadastroOsAltertagDraft {
     $txtObsCadastro.ForeColor = $osUiText
     $txtObsCadastro.Font = New-Object System.Drawing.Font('Segoe UI',8.5)
     $txtObsCadastro.Location = New-Object System.Drawing.Point(12,22)
-    $txtObsCadastro.Size = New-Object System.Drawing.Size(774,112)
+    $txtObsCadastro.Size = New-Object System.Drawing.Size(774,54)
     [void]$obsPanelCadastro.Controls.Add($txtObsCadastro)
+
+    $configSeparatorCadastro = New-Object System.Windows.Forms.Panel
+    $configSeparatorCadastro.BackColor = $osUiBorder
+    $configSeparatorCadastro.Location = New-Object System.Drawing.Point(12, 80)
+    $configSeparatorCadastro.Size = New-Object System.Drawing.Size(774, 1)
+    [void]$obsPanelCadastro.Controls.Add($configSeparatorCadastro)
+
+    $lblConfigCadastro = New-Object System.Windows.Forms.Label
+    $lblConfigCadastro.Text = 'CONFIGURACOES ATUAIS'
+    $lblConfigCadastro.Font = New-Object System.Drawing.Font('Segoe UI', 6.5, [System.Drawing.FontStyle]::Bold)
+    $lblConfigCadastro.ForeColor = $osUiPrimaryHover
+    $lblConfigCadastro.Location = New-Object System.Drawing.Point(12, 86)
+    $lblConfigCadastro.Size = New-Object System.Drawing.Size(310, 13)
+    [void]$obsPanelCadastro.Controls.Add($lblConfigCadastro)
+
+    $lblConfigValorCadastro = New-Object System.Windows.Forms.Label
+    $lblConfigValorCadastro.Text = 'Carregando configuracao atual...'
+    $lblConfigValorCadastro.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 8)
+    $lblConfigValorCadastro.ForeColor = $osUiText
+    $lblConfigValorCadastro.Location = New-Object System.Drawing.Point(12, 102)
+    $lblConfigValorCadastro.Size = New-Object System.Drawing.Size(680, 22)
+    $lblConfigValorCadastro.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
+    $lblConfigValorCadastro.AutoEllipsis = $true
+    [void]$obsPanelCadastro.Controls.Add($lblConfigValorCadastro)
+
+    $btnEditarConfigCadastro = New-Object System.Windows.Forms.Button
+    $btnEditarConfigCadastro.Text = 'Trocar'
+    $btnEditarConfigCadastro.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 7.5)
+    $btnEditarConfigCadastro.ForeColor = $osUiText
+    $btnEditarConfigCadastro.BackColor = $osUiSurfaceRaised
+    $btnEditarConfigCadastro.FlatStyle = 'Flat'
+    $btnEditarConfigCadastro.FlatAppearance.BorderSize = 1
+    $btnEditarConfigCadastro.FlatAppearance.BorderColor = $osUiBorderStrong
+    $btnEditarConfigCadastro.Location = New-Object System.Drawing.Point(700, 94)
+    $btnEditarConfigCadastro.Size = New-Object System.Drawing.Size(86, 28)
+    $btnEditarConfigCadastro.Cursor = [System.Windows.Forms.Cursors]::Hand
+    [void]$obsPanelCadastro.Controls.Add($btnEditarConfigCadastro)
+    Set-RoundedControl -Control $btnEditarConfigCadastro -Radius 5
+    $configCadastroTip = New-Object System.Windows.Forms.ToolTip
 
     function Split-ProdutoOpcaoTexto {
         param([string]$Texto)
@@ -5135,6 +5315,15 @@ function Show-CadastroOsAltertagDraft {
     function Resolve-ProdutoBuscaTermosLocal {
         param([string]$Termo)
         $original = ([string]$Termo).Trim()
+
+        # Codigos T sem traco representam uma familia no Altertag. A API trata
+        # cada quantidade de tracos como um codigo exato, entao consultamos as
+        # variantes usadas atualmente no cadastro.
+        if ($original -match '^[A-Z]+\d+$') {
+            $codigoFamilia = $original.ToUpper()
+            return @($codigoFamilia, ($codigoFamilia + '-'), ($codigoFamilia + '--'))
+        }
+
         $t = $original.ToUpper() -replace '[^A-Z0-9 ]', ' '
 
         $cpu = ''
@@ -5277,7 +5466,11 @@ function Show-CadastroOsAltertagDraft {
     # Catálogo local de produtos baseado no CSV Altertag
     $script:catalogoProdutosLocal = @(
         # ── Codigos T (avulsos Altertag, com ID VHSys) ──────────────────────
-        @{c='T023';n='Notebook Dell Latitude 3420 I5 11th';e='0';i=83020915}
+        @{c='T019';n='Notebook Lenovo E14 AMD Ryzen 5 5500';e='1';i=83530047}
+        @{c='T019-';n='Notebook Lenovo E14 i5 10th';e='1';i=83751528}
+        @{c='T019--';n='Notebook Lenovo E14 i7 10th';e='1';i=83751574}
+        @{c='T023';n='Notebook Dell Latitude 3420 I7 11th';e='1';i=83020915}
+        @{c='T023-';n='Notebook Dell Latitude 3420 I5 11th';e='1';i=84549543}
         @{c='T029';n='CPU DELL OptiPlex 3050 i5 07th';e='1';i=83145792}
         @{c='T031';n='Notebook Lenovo T14 i5 10th';e='1';i=83590341}
         @{c='T031-';n='Notebook Lenovo T14 i7 10th';e='1';i=83591236}
@@ -5635,60 +5828,284 @@ function Show-CadastroOsAltertagDraft {
     function Format-CadastroOsCpuConfigLocal {
         param([string]$Cpu)
 
-        $cpuTexto = (([string]$Cpu -replace '\s+', ' ').Trim())
+        $cpuTexto = (([string]$Cpu -replace '\s+', ' ').Trim()).ToUpperInvariant()
         if (-not $cpuTexto) { return '' }
-        $cpuTexto = $cpuTexto -replace '(?i)\b(I[3579])\s+([7-9]|1[0-4])\b(?!\s*th)', '$1 $2th'
-        $cpuTexto = $cpuTexto -replace '(?i)\bi([3579])\b', 'I$1'
+
+        if ($cpuTexto -match '\bI([3579])[-\s]?(\d{4,5})[A-Z0-9]*\b') {
+            $familia = "I$($matches[1])"
+            $modeloCpu = [string]$matches[2]
+            $prefixoDois = if ($modeloCpu.Length -ge 2) { [int]$modeloCpu.Substring(0, 2) } else { 0 }
+            $geracao = if ($modeloCpu.Length -ge 5 -or ($prefixoDois -ge 10 -and $prefixoDois -le 14)) {
+                $prefixoDois
+            } else {
+                [int]$modeloCpu.Substring(0, 1)
+            }
+            return "$familia $($geracao)TH"
+        }
+        if ($cpuTexto -match '\bI([3579])\b.*?\b([7-9]|1[0-4])(?:TH)?\b') {
+            return "I$($matches[1]) $($matches[2])TH"
+        }
+        if ($cpuTexto -match '\bRYZEN\s+([3579])\s+(\d{4})[A-Z]*\b') {
+            return "RYZEN $($matches[1]) $($matches[2])"
+        }
+        $cpuTexto = $cpuTexto -replace '\b(INTEL|AMD|CORE|PROCESSOR|CPU)\b', '' -replace '\s+', ' '
         return $cpuTexto
     }
 
-    function Get-CadastroOsConfiguracaoAtualLocal {
+    function Format-CadastroOsArmazenamentoConfigLocal {
+        param([string]$Armazenamento)
+        $texto = (([string]$Armazenamento -replace '\s+', ' ').Trim()).ToUpperInvariant()
+        if (-not $texto) { return '' }
+        $capacidade = if ($texto -match '(\d+(?:[.,]\d+)?)\s*(TB|GB)') { "$($matches[1])$($matches[2])" } else { '' }
+        $tipo = if ($texto -match '\b(NVME|SSD|M\.2)\b') { 'SSD' } elseif ($texto -match '\bHDD\b') { 'HDD' } else { '' }
+        if ($capacidade -and $tipo) { return "$capacidade $tipo" }
+        if ($capacidade) { return $capacidade }
+        return $texto
+    }
+
+    function Format-CadastroOsRamConfigLocal {
+        param([string]$Ram)
+        $texto = (([string]$Ram -replace '\s+', ' ').Trim()).ToUpperInvariant()
+        if (-not $texto) { return '' }
+        if ($texto -match '(\d+(?:[.,]\d+)?)\s*GB') { return "$($matches[1])GB RAM" }
+        return $texto
+    }
+
+    function Format-CadastroOsGpuConfigLocal {
+        param([string]$Gpu)
+        $texto = (([string]$Gpu -replace '\s+', ' ').Trim()).ToUpperInvariant()
+        if (-not $texto -or $texto -match '^(N/A|NA|NAO IDENTIFICADA)$') { return '' }
+        $texto = $texto -replace '\bNVIDIA\b|\bGEFORCE\b|\bLAPTOP GPU\b|\bGRAPHICS\b|\s*\((?:DEDICADA|INTEGRADA)\)', ''
+        $texto = ($texto -replace '\s+', ' ').Trim()
+        if ($texto.Length -gt 34) { $texto = $texto.Substring(0, 34).Trim() }
+        return $texto
+    }
+
+    function Get-CadastroOsConfiguracaoValoresLocal {
         param([string]$TipoEquipamento = 'Notebook')
+
+        $tipoSolicitado = ([string]$TipoEquipamento).Trim()
+        $tipoEtiquetaAtual = if ([string]$script:tipoEtiqueta -eq 'CPU') { 'Desktop' } else { [string]$script:tipoEtiqueta }
+        $tipoDetectado = if ([string]$info.TipoEquipamento -eq 'CPU') { 'Desktop' } else { [string]$info.TipoEquipamento }
+        $podeUsarDeteccao = (-not [bool]$servicosCadastroEstado.ConfiguracaoEditada) -and ($tipoSolicitado -eq $tipoDetectado)
+        $podeUsarEtiqueta = ($tipoSolicitado -eq $tipoEtiquetaAtual)
+        $discoDetectado = @(([string]$info.Discos -split "`r?`n") | Where-Object { $_.Trim() } | Select-Object -First 1)[0]
+
+        return [pscustomobject]@{
+            Cpu = if ($podeUsarEtiqueta -and [string]$script:cpuEtiqueta) { [string]$script:cpuEtiqueta } elseif ($podeUsarDeteccao) { [string]$info.CPU } else { '' }
+            Ram = if ($podeUsarEtiqueta -and [string]$script:ramEtiqueta) { [string]$script:ramEtiqueta } elseif ($podeUsarDeteccao) { [string]$info.RAM } else { '' }
+            Armazenamento = if ($podeUsarEtiqueta -and [string]$script:memEtiqueta) { [string]$script:memEtiqueta } elseif ($podeUsarDeteccao) { [string]$discoDetectado } else { '' }
+            Gpu = if ($podeUsarEtiqueta -and [string]$script:gpuEtiqueta) { [string]$script:gpuEtiqueta } elseif ($podeUsarDeteccao) { [string]$info.GPU } else { '' }
+        }
+    }
+
+    function Get-CadastroOsConfiguracaoAtualLocal {
+        param(
+            [string]$TipoEquipamento = 'Notebook',
+            $DadosCelular = $null
+        )
 
         $tipoAtualCadastro = ([string]$TipoEquipamento).Trim()
         if ($tipoAtualCadastro -eq 'Celular') {
-            # Nao reutiliza a configuracao detectada do notebook ao cadastrar celular/tablet.
-            # Dados lidos pelo 3uTools ja entram na observacao; dados manuais so podem vir
-            # do estado que foi efetivamente salvo como Celular.
-            if ([string]$script:tipoEtiqueta -ne 'Celular') { return '' }
+            # Usa primeiro a leitura vinculada ao cadastro atual. O estado global so e
+            # aceito quando ele tambem pertence a um celular, evitando herdar o notebook.
+            $origemCelular = $DadosCelular
+            if (-not $origemCelular -and [string]$script:tipoEtiqueta -eq 'Celular') {
+                $origemCelular = [pscustomobject]@{
+                    Imei = [string]$script:celularImeiEtiqueta
+                    Armazenamento = [string]$script:memEtiqueta
+                    Ram = [string]$script:ramEtiqueta
+                    Bateria = [string]$script:bateriaEtiqueta
+                    Ciclos = 0
+                }
+            }
+            if (-not $origemCelular) { return '' }
 
-            $dadosCelular = @()
+            $itensDispositivo = @()
             foreach ($itemCelular in @(
-                @('Armazenamento', [string]$script:memEtiqueta),
-                @('Bateria', [string]$script:bateriaEtiqueta),
-                @('IMEI', [string]$script:celularImeiEtiqueta)
+                @('Imei', [string]$origemCelular.Imei),
+                @('Ram', [string]$origemCelular.Ram),
+                @('Bateria', [string]$origemCelular.Bateria),
+                @('Ciclos', $(if ([int]$origemCelular.Ciclos -gt 0) { [string][int]$origemCelular.Ciclos } else { '' }))
             )) {
                 $valorCelular = (([string]$itemCelular[1] -replace '\s+', ' ').Trim())
                 if ($valorCelular -and $valorCelular -notmatch '^(N/A|NA|-)$') {
-                    $dadosCelular += ('{0}: {1}' -f [string]$itemCelular[0], $valorCelular)
+                    $itensDispositivo += ('{0}: {1}' -f [string]$itemCelular[0], $valorCelular)
                 }
             }
-            if ($dadosCelular.Count -eq 0) { return '' }
-            return ('Dados do celular: ' + ($dadosCelular -join ' - '))
+            if ($itensDispositivo.Count -eq 0) { return '' }
+            return ($itensDispositivo -join ' - ')
         }
 
         if ($tipoAtualCadastro -eq 'Monitor') { return '' }
-        if ($tipoAtualCadastro -eq 'Desktop' -and [string]$script:tipoEtiqueta -ne 'Desktop') { return '' }
-        if ($tipoAtualCadastro -eq 'Notebook' -and [string]$script:tipoEtiqueta -ne 'Notebook') { return '' }
+        $valoresConfig = Get-CadastroOsConfiguracaoValoresLocal -TipoEquipamento $tipoAtualCadastro
 
-        $itensConfig = @()
-        foreach ($valor in @(
-            (Format-CadastroOsCpuConfigLocal -Cpu $script:cpuEtiqueta),
-            [string]$script:memEtiqueta,
-            [string]$script:ramEtiqueta
-        )) {
-            $v = (($valor -replace '\s+', ' ').Trim())
-            if ($v -and $v -notmatch '^(N/A|NA|-)$') { $itensConfig += $v }
-        }
+        $itensConfig = @(
+            (Format-CadastroOsCpuConfigLocal -Cpu ([string]$valoresConfig.Cpu)),
+            (Format-CadastroOsArmazenamentoConfigLocal -Armazenamento ([string]$valoresConfig.Armazenamento)),
+            (Format-CadastroOsRamConfigLocal -Ram ([string]$valoresConfig.Ram)),
+            (Format-CadastroOsGpuConfigLocal -Gpu ([string]$valoresConfig.Gpu))
+        ) | Where-Object { $_ -and ([string]$_).Trim() -and ([string]$_).Trim() -notmatch '^(N/A|NA|-)$' }
         if ($itensConfig.Count -eq 0) { return '' }
-        return ('Configuracao atual: ' + ($itensConfig -join ' - '))
+        return ('CONFIG: ' + ($itensConfig -join ' | '))
+    }
+
+    function Get-CadastroOsTipoAtualLocal {
+        $produtoAtual = $listProd.SelectedItem
+        $descricaoAtual = if ($produtoAtual) { [string]$produtoAtual.descricao } else { '' }
+        if ($servicosCadastroEstado.DadosCelular -or (Test-CelularProduto -Descricao $descricaoAtual)) { return 'Celular' }
+        if ($descricaoAtual -match '(?i)\b(Monitor|Display|Tela)\b') { return 'Monitor' }
+        if (Test-DesktopProduto -Descricao $descricaoAtual) { return 'Desktop' }
+        if ($descricaoAtual) { return 'Notebook' }
+        return [string]$servicosCadastroEstado.TipoAtual
+    }
+
+    function Update-CadastroOsConfiguracaoPreviewLocal {
+        $tipoAtual = Get-CadastroOsTipoAtualLocal
+        $configAtual = Get-CadastroOsConfiguracaoAtualLocal -TipoEquipamento $tipoAtual -DadosCelular $servicosCadastroEstado.DadosCelular
+        if (-not $configAtual) {
+            $configAtual = if ($tipoAtual -eq 'Monitor') { 'Monitor: sem configuracao automatica na observacao.' } else { 'CONFIG: dados ainda nao identificados.' }
+        }
+        $lblConfigValorCadastro.Text = $configAtual
+        $configCadastroTip.SetToolTip($lblConfigValorCadastro, $configAtual)
+    }
+
+    function Show-CadastroOsConfiguracaoEditorLocal {
+        $tipoAtual = Get-CadastroOsTipoAtualLocal
+        if ($tipoAtual -eq 'Monitor') {
+            [System.Windows.Forms.MessageBox]::Show(
+                'Monitores permanecem sem configuracao automatica na observacao.',
+                'Configuracao atual', 'OK', 'Information'
+            ) | Out-Null
+            return
+        }
+
+        $editor = New-Object System.Windows.Forms.Form
+        $editor.Text = 'Trocar configuracao atual'
+        $editor.ClientSize = New-Object System.Drawing.Size(520, 340)
+        $editor.StartPosition = 'CenterParent'
+        $editor.BackColor = $osUiBg
+        $editor.ForeColor = $osUiText
+        $editor.FormBorderStyle = 'FixedDialog'
+        $editor.MaximizeBox = $false
+        $editor.MinimizeBox = $false
+        $editor.KeyPreview = $true
+
+        $tituloEditor = New-Object System.Windows.Forms.Label
+        $tituloEditor.Text = "Configuracao atual - $tipoAtual"
+        $tituloEditor.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 12, [System.Drawing.FontStyle]::Bold)
+        $tituloEditor.ForeColor = $osUiText
+        $tituloEditor.Location = New-Object System.Drawing.Point(20, 18)
+        $tituloEditor.Size = New-Object System.Drawing.Size(470, 28)
+        [void]$editor.Controls.Add($tituloEditor)
+
+        $dadosCelularEditor = $servicosCadastroEstado.DadosCelular
+        $estadoGlobalCelular = ([string]$script:tipoEtiqueta -eq 'Celular')
+        $valoresEditor = Get-CadastroOsConfiguracaoValoresLocal -TipoEquipamento $tipoAtual
+        $camposEditor = if ($tipoAtual -eq 'Celular') {
+            @(
+                @('IMEI', $(if ($dadosCelularEditor) { [string]$dadosCelularEditor.Imei } elseif ($estadoGlobalCelular) { [string]$script:celularImeiEtiqueta } else { '' })),
+                @('RAM', $(if ($dadosCelularEditor) { [string]$dadosCelularEditor.Ram } elseif ($estadoGlobalCelular) { [string]$script:ramEtiqueta } else { '' })),
+                @('BATERIA', $(if ($dadosCelularEditor) { [string]$dadosCelularEditor.Bateria } elseif ($estadoGlobalCelular) { [string]$script:bateriaEtiqueta } else { '' })),
+                @('CICLOS', $(if ($dadosCelularEditor -and [int]$dadosCelularEditor.Ciclos -gt 0) { [string][int]$dadosCelularEditor.Ciclos } else { '' }))
+            )
+        } else {
+            @(
+                @('CPU', [string]$valoresEditor.Cpu),
+                @('RAM', [string]$valoresEditor.Ram),
+                @('ARMAZENAMENTO', [string]$valoresEditor.Armazenamento),
+                @('GPU', [string]$valoresEditor.Gpu)
+            )
+        }
+
+        $editoresConfig = @{}
+        for ($indiceCampo = 0; $indiceCampo -lt $camposEditor.Count; $indiceCampo++) {
+            $campoEditor = $camposEditor[$indiceCampo]
+            $coluna = $indiceCampo % 2
+            $linha = [Math]::Floor($indiceCampo / 2)
+            $xCampo = 20 + ($coluna * 245)
+            $yCampo = 66 + ($linha * 82)
+            $rotuloCampo = New-Object System.Windows.Forms.Label
+            $rotuloCampo.Text = [string]$campoEditor[0]
+            $rotuloCampo.Font = New-Object System.Drawing.Font('Segoe UI', 7, [System.Drawing.FontStyle]::Bold)
+            $rotuloCampo.ForeColor = $osUiMuted
+            $rotuloCampo.Location = New-Object System.Drawing.Point($xCampo, $yCampo)
+            $rotuloCampo.Size = New-Object System.Drawing.Size(225, 16)
+            [void]$editor.Controls.Add($rotuloCampo)
+
+            $entradaCampo = New-Object System.Windows.Forms.TextBox
+            $entradaCampo.Text = [string]$campoEditor[1]
+            $entradaCampo.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+            $entradaCampo.BackColor = $osUiSurfaceRaised
+            $entradaCampo.ForeColor = $osUiText
+            $entradaCampo.BorderStyle = 'FixedSingle'
+            $entradaCampo.Location = New-Object System.Drawing.Point($xCampo, ($yCampo + 20))
+            $entradaCampo.Size = New-Object System.Drawing.Size(225, 28)
+            [void]$editor.Controls.Add($entradaCampo)
+            $editoresConfig[[string]$campoEditor[0]] = $entradaCampo
+        }
+
+        $cancelarEditor = New-Object System.Windows.Forms.Button
+        $cancelarEditor.Text = 'Cancelar'
+        $cancelarEditor.DialogResult = [System.Windows.Forms.DialogResult]::Cancel
+        $cancelarEditor.Location = New-Object System.Drawing.Point(20, 274)
+        $cancelarEditor.Size = New-Object System.Drawing.Size(130, 40)
+        $cancelarEditor.BackColor = $osUiSurface
+        $cancelarEditor.ForeColor = $osUiText
+        $cancelarEditor.FlatStyle = 'Flat'
+        $cancelarEditor.FlatAppearance.BorderColor = $osUiBorder
+        [void]$editor.Controls.Add($cancelarEditor)
+
+        $salvarEditor = New-Object System.Windows.Forms.Button
+        $salvarEditor.Text = 'Aplicar configuracao'
+        $salvarEditor.DialogResult = [System.Windows.Forms.DialogResult]::OK
+        $salvarEditor.Location = New-Object System.Drawing.Point(330, 274)
+        $salvarEditor.Size = New-Object System.Drawing.Size(170, 40)
+        $salvarEditor.BackColor = $osUiPrimary
+        $salvarEditor.ForeColor = [System.Drawing.Color]::White
+        $salvarEditor.FlatStyle = 'Flat'
+        $salvarEditor.FlatAppearance.BorderSize = 0
+        [void]$editor.Controls.Add($salvarEditor)
+        $editor.AcceptButton = $salvarEditor
+        $editor.CancelButton = $cancelarEditor
+        Set-CaijWindowsTypography -Root $editor
+
+        if ($editor.ShowDialog($dlg) -eq [System.Windows.Forms.DialogResult]::OK) {
+            $servicosCadastroEstado.ConfiguracaoEditada = $true
+            if ($tipoAtual -eq 'Celular') {
+                $ciclosEditor = 0
+                [void][int]::TryParse($editoresConfig['CICLOS'].Text.Trim(), [ref]$ciclosEditor)
+                $servicosCadastroEstado.DadosCelular = [pscustomobject]@{
+                    Modelo = if ($dadosCelularEditor) { [string]$dadosCelularEditor.Modelo } else { '' }
+                    Serial = $txtSerialOs.Text.Trim()
+                    Imei = $editoresConfig['IMEI'].Text.Trim()
+                    Armazenamento = if ($dadosCelularEditor) { [string]$dadosCelularEditor.Armazenamento } elseif ($estadoGlobalCelular) { [string]$script:memEtiqueta } else { '' }
+                    Ram = $editoresConfig['RAM'].Text.Trim()
+                    Bateria = $editoresConfig['BATERIA'].Text.Trim()
+                    Ciclos = $ciclosEditor
+                }
+                $script:tipoEtiqueta = 'Celular'
+                $script:celularImeiEtiqueta = [string]$servicosCadastroEstado.DadosCelular.Imei
+                $script:ramEtiqueta = [string]$servicosCadastroEstado.DadosCelular.Ram
+                $script:bateriaEtiqueta = [string]$servicosCadastroEstado.DadosCelular.Bateria
+            } else {
+                $script:tipoEtiqueta = $tipoAtual
+                $script:cpuEtiqueta = $editoresConfig['CPU'].Text.Trim()
+                $script:ramEtiqueta = $editoresConfig['RAM'].Text.Trim()
+                $script:memEtiqueta = $editoresConfig['ARMAZENAMENTO'].Text.Trim()
+                $script:gpuEtiqueta = $editoresConfig['GPU'].Text.Trim()
+            }
+            Update-CadastroOsConfiguracaoPreviewLocal
+        }
+        $editor.Dispose()
     }
 
     function New-CadastroOsObservacaoLocal {
         param(
             [string]$Observacao,
             [string]$Tecnico,
-            [string]$TipoEquipamento = 'Notebook'
+            [string]$TipoEquipamento = 'Notebook',
+            $DadosCelular = $null
         )
 
         $linhas = @()
@@ -5697,8 +6114,14 @@ function Show-CadastroOsAltertagDraft {
             $linhas += @($texto -split "\r?\n" | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
         }
 
-        $configAtual = Get-CadastroOsConfiguracaoAtualLocal -TipoEquipamento $TipoEquipamento
-        if ($configAtual -and -not (($linhas -join "`n") -match '(?i)Configuracao atual\s*:')) {
+        $configAtual = Get-CadastroOsConfiguracaoAtualLocal -TipoEquipamento $TipoEquipamento -DadosCelular $DadosCelular
+        $rotuloAutomatico = if ($TipoEquipamento -eq 'Celular') {
+            '(?:TESTES(?:\s+3UTOOLS)?|DISPOSITIVO|Dados do celular|Imei)\s*:'
+        } else {
+            '(?:CONFIG|Configuracao atual)\s*:'
+        }
+        if ($configAtual) {
+            $linhas = @($linhas | Where-Object { ([string]$_) -notmatch "(?i)^$rotuloAutomatico" })
             $linhas += $configAtual
         }
 
@@ -5793,7 +6216,16 @@ function Show-CadastroOsAltertagDraft {
         }
         $preferenciais = @($items | Where-Object { (Get-ProdutoCodigoLocal $_) -match '^[A-Z]' })
         if ($preferenciais.Count -gt 0) { $items = $preferenciais }
-        return @($items | Sort-Object -Property @{ Expression = { Get-ProdutoSortKeyLocal $_ }; Descending = $false })
+        $codigosVistos = @{}
+        $itemsUnicos = @()
+        foreach ($itemBusca in $items) {
+            $codigoBusca = Get-ProdutoCodigoLocal $itemBusca
+            $chaveBusca = if ($codigoBusca) { 'COD:' + $codigoBusca } else { 'TXT:' + ([string]$itemBusca.texto).Trim().ToUpper() }
+            if ($codigosVistos.ContainsKey($chaveBusca)) { continue }
+            $codigosVistos[$chaveBusca] = $true
+            $itemsUnicos += $itemBusca
+        }
+        return @($itemsUnicos | Sort-Object -Property @{ Expression = { Get-ProdutoSortKeyLocal $_ }; Descending = $false })
     }
 
     function Set-ProdutoItems {
@@ -5959,6 +6391,7 @@ function Show-CadastroOsAltertagDraft {
     $script:cadastroOsProdutoBuscaClients = @()
     $script:cadastroOsProdutoBuscaTask = $null
     $script:cadastroOsProdutoBuscaTasks = @()
+    $script:cadastroOsProdutoBuscaLocais = @()
     $script:cadastroOsProdutoBuscaInicio = $null
     $script:cadastroOsProdutoBuscaTimer = New-Object System.Windows.Forms.Timer
     $script:cadastroOsProdutoBuscaTimer.Interval = 120
@@ -5994,6 +6427,7 @@ function Show-CadastroOsAltertagDraft {
                 $script:cadastroOsProdutoBuscaClients = @()
                 $script:cadastroOsProdutoBuscaTask = $null
                 $script:cadastroOsProdutoBuscaTasks = @()
+                $script:cadastroOsProdutoBuscaLocais = @()
                 $script:cadastroOsProdutoBuscaInicio = $null
                 $script:cadastroOsProdutoBuscaTimer.Stop()
             }
@@ -6024,6 +6458,10 @@ function Show-CadastroOsAltertagDraft {
                     $produtosBusca += @($respParcial.produtos)
                     if ($respParcial.fonte) { $fontesBusca += [string]$respParcial.fonte }
                     if ($respParcial.mensagem) { $mensagensBusca += [string]$respParcial.mensagem }
+                }
+                if (@($script:cadastroOsProdutoBuscaLocais).Count -gt 0) {
+                    $produtosBusca += @($script:cadastroOsProdutoBuscaLocais)
+                    $fontesBusca += 'catalogo-local'
                 }
                 if ($produtosBusca.Count -gt 0) {
                     $resp = [pscustomobject]@{
@@ -6080,6 +6518,7 @@ function Show-CadastroOsAltertagDraft {
             $script:cadastroOsProdutoBuscaClients = @()
             $script:cadastroOsProdutoBuscaTask = $null
             $script:cadastroOsProdutoBuscaTasks = @()
+            $script:cadastroOsProdutoBuscaLocais = @()
             $script:cadastroOsProdutoBuscaInicio = $null
         }
     })
@@ -6105,11 +6544,18 @@ function Show-CadastroOsAltertagDraft {
             $lblListaVazia.Visible = $false
             # Tenta catálogo local primeiro — retorna códigos Altertag precisos sem chamar API
             $itensLocais = @(Search-CatalogoProdutosLocal -Termo $termo)
-            if ($itensLocais.Count -gt 0) {
+            $buscaFamiliaCodigo = ($termo -match '^[A-Z]+\d+$')
+            if ($itensLocais.Count -gt 0 -and -not $buscaFamiliaCodigo) {
                 Set-ProdutoItems -Items $itensLocais -Fonte 'catalogo-local' -Mensagem ''
                 $btnBuscaProd.Enabled = $true
                 $btnBuscaProd.Text = 'Buscar'
                 return
+            }
+            $script:cadastroOsProdutoBuscaLocais = if ($buscaFamiliaCodigo) { @($itensLocais) } else { @() }
+            if ($buscaFamiliaCodigo -and $itensLocais.Count -gt 0) {
+                # Exibe o catalogo embarcado imediatamente. A consulta online
+                # continua assincrona e atualiza estoque/valor ao terminar.
+                Set-ProdutoItems -Items $itensLocais -Fonte 'catalogo-local' -Mensagem 'Atualizando dados online...'
             }
             $termosServidor = @(Resolve-ProdutoBuscaTermosLocal -Termo $termo)
             $urlBuscaProd = '{0}/buscar-opcoes-altertag' -f (Get-ServidorBaseUrl)
@@ -6146,6 +6592,7 @@ function Show-CadastroOsAltertagDraft {
             try { if ($script:cadastroOsProdutoBuscaClient) { $script:cadastroOsProdutoBuscaClient.Dispose() } } catch {}
             $script:cadastroOsProdutoBuscaClient = $null
             $script:cadastroOsProdutoBuscaTask = $null
+            $script:cadastroOsProdutoBuscaLocais = @()
             $script:cadastroOsProdutoBuscaInicio = $null
         }
     })
@@ -6155,6 +6602,7 @@ function Show-CadastroOsAltertagDraft {
             $prodSel = $listProd.SelectedItem
             $btnCriar.Enabled = (Test-ProdutoSelecionavel $prodSel)
             Update-ResumoOs -Produto $prodSel
+            Update-CadastroOsConfiguracaoPreviewLocal
         }
     })
 
@@ -6169,14 +6617,12 @@ function Show-CadastroOsAltertagDraft {
             $txtBuscaProd.Text = [string]$device3u.Modelo
             $detalhes3u = @("IMEI: $([string]$device3u.Imei)")
             if ($device3u.Armazenamento) { $detalhes3u += "Armazenamento: $([string]$device3u.Armazenamento)" }
+            if ($device3u.Ram) { $detalhes3u += "RAM: $([string]$device3u.Ram)" }
             if ($device3u.Bateria) { $detalhes3u += "Bateria: $([string]$device3u.Bateria)" }
             if ([int]$device3u.Ciclos -gt 0) { $detalhes3u += "Ciclos: $([int]$device3u.Ciclos)" }
             $linha3u = $detalhes3u -join ' | '
-            $obsAtual = $txtObsCadastro.Text.Trim()
-            if ($obsAtual -notmatch '(?i)\bIMEI\s*:') {
-                $txtObsCadastro.Text = if ($obsAtual) { "$obsAtual`r`n$linha3u" } else { $linha3u }
-            }
             $txtResumo.Text = "3uTools: $([string]$device3u.Modelo) | $linha3u"
+            Update-CadastroOsConfiguracaoPreviewLocal
             $btnBuscaProd.PerformClick()
         } catch {
             [System.Windows.Forms.MessageBox]::Show(
@@ -6191,6 +6637,8 @@ function Show-CadastroOsAltertagDraft {
 
     # $cmbTec e PSCustomObject — atualizacao do resumo feita no Add_Click de cada botao toggle
     $txtSerialOs.Add_TextChanged({ Update-ResumoOs -Produto $listProd.SelectedItem })
+    $txtObsCadastro.Add_TextChanged({ Update-CadastroOsConfiguracaoPreviewLocal })
+    $btnEditarConfigCadastro.Add_Click({ Show-CadastroOsConfiguracaoEditorLocal })
 
     $btnFecharDlg = New-Object System.Windows.Forms.Button
     $btnFecharDlg.Text = 'Cancelar'
@@ -6234,7 +6682,7 @@ function Show-CadastroOsAltertagDraft {
             'Notebook'
         }
         $qtdSel = Get-ProdutoQuantidadeOsDisplayLocal $prodSel
-        $observacaoCadastroFinal = New-CadastroOsObservacaoLocal -Observacao ($txtObsCadastro.Text.Trim()) -Tecnico ([string]$cmbTec.SelectedItem) -TipoEquipamento $tipoCadastroInferido
+        $observacaoCadastroFinal = New-CadastroOsObservacaoLocal -Observacao ($txtObsCadastro.Text.Trim()) -Tecnico ([string]$cmbTec.SelectedItem) -TipoEquipamento $tipoCadastroInferido -DadosCelular $estadoServicosAtual.DadosCelular
         $confirm = Show-CadastroOsConfirm `
             -Owner $dlg `
             -OsCodigo (Format-OsCodigo -Numero $script:osNumero) `
@@ -6264,7 +6712,12 @@ function Show-CadastroOsAltertagDraft {
                 observacao = $observacaoCadastroFinal
             }
             $payload = $payloadObj | ConvertTo-Json -Depth 5 -Compress
-            $resp = Invoke-RestMethod -Uri ('{0}/criar-os-altertag' -f (Get-ServidorBaseUrl)) -Method Post -Body $payload -ContentType 'application/json; charset=utf-8' -TimeoutSec 45 -ErrorAction Stop
+            $resp = Invoke-CaijUiResponsiveJsonPost `
+                -Uri ('{0}/criar-os-altertag' -f (Get-ServidorBaseUrl)) `
+                -JsonBody $payload `
+                -Owner $dlg `
+                -StatusButton $btnCriar `
+                -TimeoutSec 45
             if ([string]$resp.status -ne 'ok') { throw [Exception]::new([string]$resp.mensagem) }
             $osCriadaNumero = [int]$resp.osNumero
             $proximaOsNumero = if ($resp.proximoDisponivel) { [int]$resp.proximoDisponivel } else { $osCriadaNumero + 1 }
@@ -6307,6 +6760,7 @@ function Show-CadastroOsAltertagDraft {
                         imei = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Imei } else { '' }
                         bateria = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Bateria } else { '' }
                         armazenamento = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Armazenamento } else { '' }
+                        ram = if ($dadosCelularCadastro) { [string]$dadosCelularCadastro.Ram } else { '' }
                     }
                 } elseif ($tipoCadastroInferido -eq 'Desktop') {
                     $etiquetaCadastro = [pscustomobject]@{
@@ -6343,6 +6797,7 @@ function Show-CadastroOsAltertagDraft {
     })
 
     Update-ResumoOs -Produto $null
+    Update-CadastroOsConfiguracaoPreviewLocal
 
     $dlg.Add_Shown({
         $txtBuscaProd.Focus() | Out-Null
@@ -6489,8 +6944,15 @@ function Show-CadastroOsAltertagDraft {
     $lblObsCadastro.Location = New-Object System.Drawing.Point(14, 10)
     $lblObsCadastro.ForeColor = $osUiMuted
     $txtObsCadastro.Location = New-Object System.Drawing.Point(14, 30)
-    $txtObsCadastro.Size = New-Object System.Drawing.Size(844, 90)
+    $txtObsCadastro.Size = New-Object System.Drawing.Size(844, 43)
     $txtObsCadastro.BackColor = $osUiSurface
+    $configSeparatorCadastro.Location = New-Object System.Drawing.Point(14, 78)
+    $configSeparatorCadastro.Size = New-Object System.Drawing.Size(844, 1)
+    $lblConfigCadastro.Location = New-Object System.Drawing.Point(14, 84)
+    $lblConfigValorCadastro.Location = New-Object System.Drawing.Point(14, 100)
+    $lblConfigValorCadastro.Size = New-Object System.Drawing.Size(744, 22)
+    $btnEditarConfigCadastro.Location = New-Object System.Drawing.Point(770, 92)
+    $btnEditarConfigCadastro.Size = New-Object System.Drawing.Size(88, 30)
 
     $cadastroFooterLine.Location = New-Object System.Drawing.Point(24, 622)
     $cadastroFooterLine.Size = New-Object System.Drawing.Size(872, 1)
@@ -6515,13 +6977,38 @@ function Show-CadastroOsAltertagDraft {
     $btnFecharCadastroTopo.BringToFront()
 
     Set-CaijWindowsTypography -Root $dlg
+    # Sobrepoe a janela principal na posicao em que o operador a deixou. O limite
+    # da area util impede cortes quando o InfoNotebook esta encaixado na lateral.
+    $cadastroArea = [System.Drawing.Rectangle]$dlg.CaijTargetWorkingArea
+    $cadastroOwnerBounds = $form.Bounds
+    $cadastroXPreferido = $cadastroOwnerBounds.Left + [int][Math]::Floor(($cadastroOwnerBounds.Width - $dlg.Width) / 2.0)
+    $cadastroYPreferido = $cadastroOwnerBounds.Top + [int][Math]::Floor(($cadastroOwnerBounds.Height - $dlg.Height) / 2.0)
+    $cadastroMaxX = [Math]::Max(($cadastroArea.Left + 8), ($cadastroArea.Right - $dlg.Width - 8))
+    $cadastroMaxY = [Math]::Max(($cadastroArea.Top + 8), ($cadastroArea.Bottom - $dlg.Height - 8))
+    $cadastroX = [Math]::Max(($cadastroArea.Left + 8), [Math]::Min($cadastroXPreferido, $cadastroMaxX))
+    $cadastroY = [Math]::Max(($cadastroArea.Top + 8), [Math]::Min($cadastroYPreferido, $cadastroMaxY))
+    $dlg.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $dlg.Location = New-Object System.Drawing.Point($cadastroX, $cadastroY)
     [void]$dlg.ShowDialog($form)
 }
 
 $btnCadastrarOs.Add_Click({
-    $tecnicoCadastro = Show-TecnicoCadastroOs -Owner $form
-    if (-not [string]::IsNullOrWhiteSpace($tecnicoCadastro)) {
-        Show-CadastroOsAltertagDraft -TecnicoInicial $tecnicoCadastro
+    $timerCadastroPausado = $false
+    try {
+        if ($script:osRecentesTimer) {
+            $script:osRecentesTimer.Stop()
+            $timerCadastroPausado = $true
+        }
+        $script:cadastroOsAberto = $true
+        $tecnicoCadastro = Show-TecnicoCadastroOs -Owner $form
+        if (-not [string]::IsNullOrWhiteSpace($tecnicoCadastro)) {
+            Show-CadastroOsAltertagDraft -TecnicoInicial $tecnicoCadastro
+        }
+    } finally {
+        $script:cadastroOsAberto = $false
+        if ($timerCadastroPausado -and $script:osRecentesTimer -and -not $form.IsDisposed) {
+            $script:osRecentesTimer.Start()
+        }
     }
 })
 
@@ -6530,7 +7017,18 @@ $btnTestes.Add_Click({
         $workspaceDir = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
         $launcherTeste = Join-Path $workspaceDir 'TestarNotebook.vbs'
         if (Test-Path $launcherTeste) {
-            Start-Process wscript.exe -ArgumentList ('//B //Nologo "' + $launcherTeste + '"') -WindowStyle Hidden
+            $ancoraAnterior = [Environment]::GetEnvironmentVariable('CAIJ_TESTS_OWNER_BOUNDS', 'Process')
+            try {
+                $boundsAtual = $form.Bounds
+                [Environment]::SetEnvironmentVariable(
+                    'CAIJ_TESTS_OWNER_BOUNDS',
+                    ('{0},{1},{2},{3}' -f $boundsAtual.Left, $boundsAtual.Top, $boundsAtual.Width, $boundsAtual.Height),
+                    'Process'
+                )
+                Start-Process wscript.exe -ArgumentList ('//B //Nologo "' + $launcherTeste + '"') -WindowStyle Hidden
+            } finally {
+                [Environment]::SetEnvironmentVariable('CAIJ_TESTS_OWNER_BOUNDS', $ancoraAnterior, 'Process')
+            }
         } else {
             [System.Windows.Forms.MessageBox]::Show("Inicializador de testes nao encontrado:`n$launcherTeste", 'Central de Testes', 'OK', 'Warning') | Out-Null
         }
@@ -6622,10 +7120,24 @@ $btnImprimir.Add_Click({
     function Format-GpuEtiquetaLocal {
         param([string]$Gpu)
         $gpuTexto = (([string]$Gpu -replace '\s+', ' ').Trim())
+        $gpuTexto = $gpuTexto -replace '(?i)\s*\(\s*INTEGRADA\s*\)\s*$', ''
+        $gpuTexto = $gpuTexto -replace '(?i)\s+INTEGRADA\s*$', ''
         $gpuTexto = $gpuTexto -replace '(?i)^NVIDIA\s+', ''
+        $gpuTexto = $gpuTexto -replace '(?i)^INTEL\s+', ''
+        $gpuTexto = $gpuTexto -replace '(?i)^AMD\s+', ''
+        $gpuTexto = $gpuTexto -replace '(?i)^GEFORCE\s+', ''
+        $gpuTexto = $gpuTexto -replace '(?i)\bIRIS\s+PLUS\s+GRAPHICS\b', 'IRIS PLUS'
+        $gpuTexto = $gpuTexto -replace '(?i)\bIRIS\s+XE\s+GRAPHICS\b', 'IRIS XE'
+        $gpuTexto = $gpuTexto -replace '(?i)\bUHD\s+GRAPHICS\b', 'UHD'
+        $gpuTexto = $gpuTexto -replace '(?i)\bRADEON\s+GRAPHICS\b', 'RADEON INT.'
+        $gpuTexto = $gpuTexto -replace '(?i)\bQUADRO\s+RTX\b', 'Q. RTX'
         $gpuTexto = $gpuTexto -replace '(?i)\s*\(\s*DEDICADA\s*\)\s*$', ' DED.'
         $gpuTexto = $gpuTexto -replace '(?i)\s+DEDICADA\s*$', ' DED.'
-        return $gpuTexto.Trim()
+        $gpuTexto = $gpuTexto -replace '(?i)\bGRAPHICS\b', ''
+        $gpuTexto = (($gpuTexto -replace '\s+', ' ').Trim()).ToUpperInvariant()
+        if ($gpuTexto.Length -gt 19) { $gpuTexto = $gpuTexto -replace '\s+DED\.$', ' D' }
+        if ($gpuTexto.Length -gt 19) { return ($gpuTexto.Substring(0, 16).TrimEnd() + '...') }
+        return $gpuTexto
     }
     $script:IsGpuEtiquetaVisivel = {
         param([string]$Gpu)
@@ -6657,12 +7169,13 @@ $btnImprimir.Add_Click({
 
     $popup.AutoScaleMode   = [System.Windows.Forms.AutoScaleMode]::None
     $popup.ClientSize      = New-Object System.Drawing.Size(920, 628)
-    $popup.StartPosition   = 'CenterScreen'
+    $popup.StartPosition   = 'CenterParent'
     $popup.BackColor       = $previewUiBg
     $popup.FormBorderStyle = 'None'
     $popup.MaximizeBox     = $false
     $popup.MinimizeBox     = $false
-    $popup.TopMost         = $true
+    $popup.ShowInTaskbar   = $true
+    $popup.TopMost         = $false
     $popup.Font            = $fUI
     $popup.KeyPreview      = $true
     Set-DoubleBuffered $popup
@@ -6719,7 +7232,7 @@ $btnImprimir.Add_Click({
     $headerSurface.Controls.Add($popSub)
 
     $popChip = New-Object System.Windows.Forms.Panel
-    $popChip.Location = New-Object System.Drawing.Point(718, 21)
+    $popChip.Location = New-Object System.Drawing.Point(690, 21)
     $popChip.Size = New-Object System.Drawing.Size(142, 32)
     $popChip.BackColor = $previewUiRaised
     $popChip.BorderStyle = 'None'
@@ -6748,6 +7261,20 @@ $btnImprimir.Add_Click({
     $popClose.Cursor = [System.Windows.Forms.Cursors]::Hand
     $popClose.Add_Click({ $popup.DialogResult = 'Cancel'; $popup.Close() })
     $headerSurface.Controls.Add($popClose)
+
+    $popMinimize = New-Object System.Windows.Forms.Button
+    $popMinimize.Text = [char]0x2014
+    $popMinimize.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+    $popMinimize.ForeColor = $previewUiMuted
+    $popMinimize.BackColor = $headerSurface.BackColor
+    $popMinimize.FlatStyle = 'Flat'
+    $popMinimize.FlatAppearance.BorderSize = 0
+    $popMinimize.FlatAppearance.MouseOverBackColor = $previewUiRaised
+    $popMinimize.Location = New-Object System.Drawing.Point(842, 8)
+    $popMinimize.Size = New-Object System.Drawing.Size(28, 28)
+    $popMinimize.Cursor = [System.Windows.Forms.Cursors]::Hand
+    $popMinimize.Add_Click({ $popup.WindowState = [System.Windows.Forms.FormWindowState]::Minimized })
+    $headerSurface.Controls.Add($popMinimize)
 
     $previewDrag = [pscustomobject]@{ Ativo=$false; Origem=[System.Drawing.Point]::Empty }
     $headerSurface.Add_MouseDown({
@@ -6824,7 +7351,7 @@ $btnImprimir.Add_Click({
         }
         Apply-OsAltertagNaEtiqueta -Ordem $printContext.Ordem
         Apply-CadastroOsEtiquetaNaImpressao -Etiqueta $printContext.Etiqueta
-        $referenciaCriada = if ($printContext.Ordem) { ([string]$printContext.Ordem.referencia).Trim().ToUpperInvariant() } else { '' }
+        $referenciaCriada = if ($printContext.Ordem) { Format-CaijGradeReference (Normalize-CaijGrade ([string]$printContext.Ordem.referencia)) } else { '' }
         foreach ($gradeOpcaoCriada in @(Get-CaijGradeOptions)) {
             if ((Format-CaijGradeReference $gradeOpcaoCriada).ToUpperInvariant() -eq $referenciaCriada) {
                 $script:gradeAtual = $gradeOpcaoCriada
@@ -6901,6 +7428,27 @@ $btnImprimir.Add_Click({
             B $x1 ($y2 - $thickness) ($x2 - $x1) $thickness
             B $x1 $y1 $thickness ($y2 - $y1)
             B ($x2 - $thickness) $y1 $thickness ($y2 - $y1)
+        }
+
+        function CaijLogoPreview($x, $y) {
+            $logoHex = '000001F000000000000000007FFC0000000000000001FFC00000000000000007FF00000000000000001FFC00000000000000007FF00000000000000000FFE00000000000000001FF800000000000C01C03FF000F80000003F03E07FE007FF8000007F07F0FFE01FFFC000007F07F0FFC07FFFF000007F07F1FF80FFFFE000003F03F1FF001FFF8000001E03E3FF0003FE000000000003FE0000FC000000000007FE00007000FF007F07F7FE00000003FFC07F07F7FC00000007FFE07F07F7FC0000000FFFF07F07F7FC0000001FFFF87F07FFFC0000001FC3F87F07FFFC0000003F81FC7F07FFFC0000003F81FC7F07F7FC0000003F81FC7F07F7FC0000003F81FC7F07F7FE0000003FC1FC7F07F7FE0000001FFDFC7F07F3FE0000380FFDFC7F07F3FF0000FE0FFDFC7F07F3FF0001FF83FDFC7F07F1FF800FFFC000000007F0FFC0FFFFF00000000FF0FFC07FFFE00000001FF07FE01FFF80000001FFE03FF007FC00000001FFE01FFC000000000001FFC00FFE000000000001FF8003FF800000000001FE0000FFE000000000000000003FF8000000000000000007FF8000000000000'
+            $logoBitmap = New-Object System.Drawing.Bitmap(80, 42)
+            for ($row = 0; $row -lt 42; $row++) {
+                for ($byteX = 0; $byteX -lt 10; $byteX++) {
+                    $value = [Convert]::ToByte($logoHex.Substring((($row * 10) + $byteX) * 2, 2), 16)
+                    for ($bit = 0; $bit -lt 8; $bit++) {
+                        $color = if (($value -band (0x80 -shr $bit)) -ne 0) { $preto } else { [System.Drawing.Color]::White }
+                        $logoBitmap.SetPixel(($byteX * 8) + $bit, $row, $color)
+                    }
+                }
+            }
+            $picture = New-Object System.Windows.Forms.PictureBox
+            $picture.Image = $logoBitmap
+            $picture.SizeMode = [System.Windows.Forms.PictureBoxSizeMode]::StretchImage
+            $picture.BackColor = [System.Drawing.Color]::White
+            $picture.Location = New-Object System.Drawing.Point([int][math]::Round($x * $scaleX), [int][math]::Round($y * $scaleY))
+            $picture.Size = New-Object System.Drawing.Size([int][math]::Max(1, [math]::Round(80 * $scaleX)), [int][math]::Max(1, [math]::Round(42 * $scaleY)))
+            [void]$prevPanel.Controls.Add($picture)
         }
 
         function QrPreview($payload, $x, $y, $size) {
@@ -7018,31 +7566,31 @@ $btnImprimir.Add_Click({
         }
 
         # Canvas TSPL exato de 640x400 para etiqueta 80x50mm a 203 dpi.
-        # Uma unica moldura com margem segura evita o efeito de borda duplicada.
-        BoxPreview 10 10 630 390 2
+        # Sem moldura externa: pequenas inclinacoes do rolo nao dominam o visual.
 
         $modeloTxt = ([string]$script:modeloEtiqueta -replace '\s+', ' ').Trim()
         $modeloTxt = $modeloTxt -replace '(?i)^\s*T\d{3}(?:-+)?\s*(?:[-:|]\s*)?(?=(?:CPU|DESKTOP|MINI\s+DESKTOP|COMPUTADOR\s+DESKTOP)\b)', ''
         $modeloTxt = $modeloTxt -replace '(?i)^\s*(NOTEBOOK|LAPTOP|COMPUTADOR|CPU)\s+', ''
         $modeloTxt = $modeloTxt -replace '(?i)\bGEN(?:ERACAO)?\s*(\d+)\b', 'G$1'
-        if ($modeloTxt.Length -le 24) {
+        if ($modeloTxt.Length -le 19) {
             $modeloTop = $modeloTxt
             $modeloFont = $f3
-            $modeloY = 36
+            $modeloY = 40
         } else {
-            $modeloTop = if ($modeloTxt.Length -gt 32) { $modeloTxt.Substring(0, 32) } else { $modeloTxt }
+            $modeloTop = if ($modeloTxt.Length -gt 27) { $modeloTxt.Substring(0, 27) } else { $modeloTxt }
             $modeloFont = $f2
-            $modeloY = 36
+            $modeloY = 40
         }
-        L 'EQUIPAMENTO' 22 16 150 20 $f2 $preto
-        L $modeloTop 22 $modeloY 410 34 $modeloFont $preto
+        CaijLogoPreview 22 20
+        L 'EQUIPAMENTO' 120 16 150 20 $f2 $preto
+        L $modeloTop 120 $modeloY 322 34 $modeloFont $preto
 
         $gradeTxt = ''
         if ($gradeEfetiva) {
             $gradeTxt = if ($gradeEfetiva -eq 'RMA') {
                 'GRADE RMA'
-            } elseif ($gradeEfetiva -match '^C\s*-\s*PINTURA\s*([123])$') {
-                "C - PINTURA $($matches[1])"
+            } elseif ((Normalize-CaijGrade $gradeEfetiva) -eq 'C') {
+                'GRADE C'
             } elseif ($gradeEfetiva -match '^T\s*-\s*TRIAGEM$') {
                 'T - TRIAGEM'
             } else {
@@ -7056,7 +7604,7 @@ $btnImprimir.Add_Click({
             L $gradeTxt 464 34 142 24 $gradePreviewFont $preto
         }
 
-        B 10 82 620 2
+        B 18 82 604 2
 
         $serialTop = ([string]$script:serialEtiqueta -replace '\s+', '').Trim()
         $serialBar = ($serialTop -replace '[^A-Za-z0-9]', '').ToUpper()
@@ -7075,7 +7623,7 @@ $btnImprimir.Add_Click({
             L $serialTop 22 108 590 24 $serialPreviewFont $preto
             if ($serialBar.Length -ge 4) { BarcodePreview $serialBar 22 136 420 16 }
         }
-        B 10 158 620 2
+        B 18 158 604 2
 
         $isMonitorEtiqueta = ([string]$script:tipoEtiqueta -eq 'Monitor')
         $isCelularEtiqueta = ([string]$script:tipoEtiqueta -eq 'Celular')
@@ -7151,12 +7699,12 @@ $btnImprimir.Add_Click({
             } elseif ($specLabel -eq 'GPU') {
                 $specValue = Format-GpuEtiquetaLocal $specValue
             }
-            $specMaxLen = if ($specLabel -eq 'GPU') { 27 } elseif ($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') { 25 } else { 18 }
+            $specMaxLen = if ($specLabel -eq 'GPU') { 19 } elseif ($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') { 25 } else { 18 }
             if ($specValue.Length -gt $specMaxLen) { $specValue = $specValue.Substring(0, $specMaxLen) }
             $labelX = 22
             $labelWidth = if ($isEtiquetaCompacta) { 50 } else { 48 }
             $valueX = if ($isCelularEtiqueta -and $specLabel -eq 'BATERIA') { 94 } else { 76 }
-            $specFont = if (($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') -or ($specLabel -eq 'GPU' -and $specValue.Length -gt 18)) {
+            $specFont = if ($isMonitorEtiqueta -and $specLabel -eq 'ENTRADAS') {
                 $f1
             } else {
                 $f2
@@ -7171,7 +7719,7 @@ $btnImprimir.Add_Click({
             $specY += $specStep
         }
 
-        $qrPreviewPayload = 'http://192.168.15.127:9100/f/0000000000'
+        $qrPreviewPayload = 'http://INFOCAIJ:9100/f/0000000000'
         if ($temObservacaoEtiqueta) {
             QrPreview $qrPreviewPayload 398 172 150
         } else {
@@ -7179,9 +7727,9 @@ $btnImprimir.Add_Click({
         }
 
         if ($obsLines.Count -gt 0) {
-            B 20 330 590 1
-            L 'OBS' 22 334 40 20 $f2 $preto
-            $obsY = 334
+            B 20 334 590 1
+            L 'OBS' 22 346 40 20 $f2 $preto
+            $obsY = 346
             foreach ($line in $obsLines) {
                 L $line 66 $obsY 540 16 $f1 $preto
                 $obsY += 16
@@ -7237,240 +7785,10 @@ $btnImprimir.Add_Click({
     $gradesInfo = @(
         @{L='A'; D='Perfeito'},
         @{L='B'; D='Detalhes'},
-        @{L='C'; D='Pintura'},
+        @{L='C'; D='Grade C'},
         @{L='T'; D='Triagem'},
         @{L='RMA'; D='Defeitos'}
     )
-
-    $script:SelecionarPintura = {
-        $corPintura      = [System.Drawing.Color]::FromArgb(232, 102, 34)
-        $corPinturaClara = [System.Drawing.Color]::FromArgb(255, 180, 120)
-
-        $pForm = New-Object System.Windows.Forms.Form
-        $pForm.Text = 'Grade C - Pintura'
-        $pForm.ClientSize = New-Object System.Drawing.Size(400, 348)
-        $pForm.StartPosition = 'CenterParent'
-        $pForm.BackColor = [System.Drawing.Color]::FromArgb(7, 9, 17)
-        $pForm.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
-        $pForm.FormBorderStyle = 'None'
-        $pForm.MaximizeBox = $false
-        $pForm.MinimizeBox = $false
-        $pForm.ShowInTaskbar = $false
-        Set-DoubleBuffered $pForm
-        Set-RoundedControl -Control $pForm -Radius 12
-        $pForm.Add_SizeChanged({ Set-RoundedControl -Control $this -Radius 12 })
-        $pForm.Add_Paint({
-            param($s, $e)
-            $bordaPintura = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
-            $e.Graphics.DrawRectangle($bordaPintura, 0, 0, ($s.ClientSize.Width - 1), ($s.ClientSize.Height - 1))
-            $bordaPintura.Dispose()
-        })
-
-        $pHeader = New-Object System.Windows.Forms.Panel
-        $pHeader.Location = New-Object System.Drawing.Point(0, 0)
-        $pHeader.Size = New-Object System.Drawing.Size(400, 64)
-        $pHeader.BackColor = [System.Drawing.Color]::FromArgb(15, 18, 29)
-        $pHeader.Add_Paint({
-            param($s, $e)
-            $linhaHeader = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(42, 46, 63), 1)
-            $e.Graphics.DrawLine($linhaHeader, 0, ($s.Height - 1), $s.Width, ($s.Height - 1))
-            $linhaHeader.Dispose()
-        })
-        [void]$pForm.Controls.Add($pHeader)
-
-        $pEyebrow = New-Object System.Windows.Forms.Label
-        $pEyebrow.Text = 'ETIQUETA / CLASSIFICACAO'
-        $pEyebrow.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
-        $pEyebrow.ForeColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
-        $pEyebrow.Location = New-Object System.Drawing.Point(20, 9)
-        $pEyebrow.Size = New-Object System.Drawing.Size(260, 14)
-        [void]$pHeader.Controls.Add($pEyebrow)
-
-        $pHeaderTitle = New-Object System.Windows.Forms.Label
-        $pHeaderTitle.Text = 'Grade C - Pintura'
-        $pHeaderTitle.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 14, [System.Drawing.FontStyle]::Bold)
-        $pHeaderTitle.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
-        $pHeaderTitle.Location = New-Object System.Drawing.Point(18, 27)
-        $pHeaderTitle.Size = New-Object System.Drawing.Size(280, 28)
-        [void]$pHeader.Controls.Add($pHeaderTitle)
-
-        $pClose = New-Object System.Windows.Forms.Button
-        $pClose.Text = 'X'
-        $pClose.Font = New-Object System.Drawing.Font('Segoe UI', 8, [System.Drawing.FontStyle]::Bold)
-        $pClose.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
-        $pClose.BackColor = $pHeader.BackColor
-        $pClose.FlatStyle = 'Flat'
-        $pClose.FlatAppearance.BorderSize = 0
-        $pClose.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
-        $pClose.Location = New-Object System.Drawing.Point(364, 8)
-        $pClose.Size = New-Object System.Drawing.Size(28, 28)
-        $pClose.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $pClose.Add_Click({
-            $script:pinturaSelecionadaTemp = $null
-            $pForm.Tag = 'Cancel'
-            $pForm.Close()
-        })
-        [void]$pHeader.Controls.Add($pClose)
-
-        $pDrag = @{ Active = $false; Mouse = [System.Drawing.Point]::Empty; Form = [System.Drawing.Point]::Empty }
-        $pHeader.Add_MouseDown({
-            if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-                $pDrag.Active = $true
-                $pDrag.Mouse = [System.Windows.Forms.Cursor]::Position
-                $pDrag.Form = $pForm.Location
-            }
-        })
-        $pHeader.Add_MouseMove({
-            if ($pDrag.Active) {
-                $agora = [System.Windows.Forms.Cursor]::Position
-                $pForm.Location = New-Object System.Drawing.Point(
-                    ($pDrag.Form.X + $agora.X - $pDrag.Mouse.X),
-                    ($pDrag.Form.Y + $agora.Y - $pDrag.Mouse.Y)
-                )
-            }
-        })
-        $pHeader.Add_MouseUp({ $pDrag.Active = $false })
-
-        # Header: barra de destaque + titulo + hairline
-        $pAccent = New-Object System.Windows.Forms.Panel
-        $pAccent.BackColor = $corPintura
-        $pAccent.Location  = New-Object System.Drawing.Point(20, 80)
-        $pAccent.Size      = New-Object System.Drawing.Size(2, 16)
-        $pForm.Controls.Add($pAccent)
-
-        $pTitle = New-Object System.Windows.Forms.Label
-        $pTitle.Text = 'NIVEL DE PINTURA'
-        $pTitle.Font = New-Object System.Drawing.Font('Segoe UI', 6.8, [System.Drawing.FontStyle]::Bold)
-        $pTitle.ForeColor = [System.Drawing.Color]::FromArgb(255, 180, 120)
-        $pTitle.Location = New-Object System.Drawing.Point(30, 79)
-        $pTitle.Size = New-Object System.Drawing.Size(190, 18)
-        $pForm.Controls.Add($pTitle)
-
-        $pSub = New-Object System.Windows.Forms.Label
-        $pSub.Text = 'Escolha o nivel de pintura que vai aparecer na etiqueta.'
-        $pSub.Font = New-Object System.Drawing.Font('Segoe UI', 8)
-        $pSub.ForeColor = [System.Drawing.Color]::FromArgb(166, 170, 184)
-        $pSub.Location = New-Object System.Drawing.Point(20, 101)
-        $pSub.Size = New-Object System.Drawing.Size(360, 16)
-        $pForm.Controls.Add($pSub)
-
-        # Cards de opcao (estilo radio)
-        $script:pinturaSelecionadaTemp = $null
-        if ($script:pinturaOpcaoAtual) { $script:pinturaSelecionadaTemp = $script:pinturaOpcaoAtual }
-
-        $script:pinturaCardsUi = @()
-        $script:pinturaDescsUi = @{
-            'PINTURA 1' = 'Retoque pontual'
-            'PINTURA 2' = 'Pintura parcial'
-            'PINTURA 3' = 'Pintura completa'
-        }
-
-        $script:AtualizarPinturaCards = {
-            foreach ($card in @($script:pinturaCardsUi)) {
-                $opcaoCard = [string]$card.Tag
-                $selecionado = ($opcaoCard -eq [string]$script:pinturaSelecionadaTemp)
-                if ($selecionado) {
-                    $card.BackColor = [System.Drawing.Color]::FromArgb(50, 31, 22)
-                    $card.ForeColor = [System.Drawing.Color]::White
-                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(232, 102, 34)
-                    $card.FlatAppearance.BorderSize = 2
-                    $card.Text = ([string][char]0x25CF + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
-                } else {
-                    $card.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
-                    $card.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
-                    $card.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
-                    $card.FlatAppearance.BorderSize = 1
-                    $card.Text = ([string][char]0x25CB + '   ' + $opcaoCard + '   -   ' + $script:pinturaDescsUi[$opcaoCard])
-                }
-            }
-            if ($script:pinturaConfirmBtn) {
-                $temSel = [bool]$script:pinturaSelecionadaTemp
-                $script:pinturaConfirmBtn.Enabled = $temSel
-                $script:pinturaConfirmBtn.BackColor = if ($temSel) { [System.Drawing.Color]::FromArgb(94, 106, 210) } else { [System.Drawing.Color]::FromArgb(26, 29, 43) }
-                $script:pinturaConfirmBtn.ForeColor = if ($temSel) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(98, 102, 118) }
-            }
-        }
-
-        $yCard = 126
-        foreach ($opcaoPintura in @('PINTURA 1', 'PINTURA 2', 'PINTURA 3')) {
-            $card = New-Object System.Windows.Forms.Button
-            $card.Tag = $opcaoPintura
-            $card.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
-            $card.FlatStyle = 'Flat'
-            $card.TextAlign = [System.Drawing.ContentAlignment]::MiddleLeft
-            $card.Padding = New-Object System.Windows.Forms.Padding(12, 0, 0, 0)
-            $card.Location = New-Object System.Drawing.Point(20, $yCard)
-            $card.Size = New-Object System.Drawing.Size(344, 40)
-            $card.Cursor = [System.Windows.Forms.Cursors]::Hand
-            $card.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 51)
-            $card.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(50, 31, 22)
-            $card.Add_Click({
-                param($s, $e)
-                $script:pinturaSelecionadaTemp = [string]$s.Tag
-                & $script:AtualizarPinturaCards
-            })
-            $pForm.Controls.Add($card)
-            Set-RoundedControl -Control $card -Radius 10
-            $script:pinturaCardsUi += $card
-            $yCard += 46
-        }
-
-        # Rodape
-        $pFooterLine = New-Object System.Windows.Forms.Panel
-        $pFooterLine.BackColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
-        $pFooterLine.Location  = New-Object System.Drawing.Point(20, 282)
-        $pFooterLine.Size      = New-Object System.Drawing.Size(344, 1)
-        $pForm.Controls.Add($pFooterLine)
-
-        $cancel = New-Object System.Windows.Forms.Button
-        $cancel.Text = 'Cancelar'
-        $cancel.Font = New-Object System.Drawing.Font('Segoe UI', 8.5)
-        $cancel.ForeColor = [System.Drawing.Color]::FromArgb(240, 242, 248)
-        $cancel.BackColor = [System.Drawing.Color]::FromArgb(21, 24, 38)
-        $cancel.FlatStyle = 'Flat'
-        $cancel.FlatAppearance.BorderSize = 1
-        $cancel.FlatAppearance.BorderColor = [System.Drawing.Color]::FromArgb(42, 46, 63)
-        $cancel.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 35, 51)
-        $cancel.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $cancel.Location = New-Object System.Drawing.Point(20, 296)
-        $cancel.Size = New-Object System.Drawing.Size(112, 36)
-        $cancel.Add_Click({
-            $script:pinturaSelecionadaTemp = $null
-            $pForm.Tag = 'Cancel'
-            $pForm.Close()
-        })
-        $pForm.Controls.Add($cancel)
-        Set-RoundedControl -Control $cancel -Radius 8
-
-        $confirm = New-Object System.Windows.Forms.Button
-        $confirm.Text = 'Confirmar'
-        $confirm.Font = New-Object System.Drawing.Font('Segoe UI Semibold', 9, [System.Drawing.FontStyle]::Bold)
-        $confirm.ForeColor = [System.Drawing.Color]::White
-        $confirm.BackColor = [System.Drawing.Color]::FromArgb(94, 106, 210)
-        $confirm.FlatStyle = 'Flat'
-        $confirm.FlatAppearance.BorderSize = 0
-        $confirm.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(112, 124, 228)
-        $confirm.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(78, 89, 187)
-        $confirm.Cursor = [System.Windows.Forms.Cursors]::Hand
-        $confirm.Location = New-Object System.Drawing.Point(232, 296)
-        $confirm.Size = New-Object System.Drawing.Size(132, 36)
-        $confirm.Add_Click({
-            if (-not $script:pinturaSelecionadaTemp) { return }
-            $pForm.Tag = 'OK'
-            $pForm.Close()
-        })
-        $pForm.Controls.Add($confirm)
-        Set-RoundedControl -Control $confirm -Radius 8
-        $script:pinturaConfirmBtn = $confirm
-
-        & $script:AtualizarPinturaCards
-        Set-CaijWindowsTypography -Root $pForm
-        [void]$pForm.ShowDialog($popup)
-        if ($pForm.Tag -eq 'OK' -and $script:pinturaSelecionadaTemp) {
-            return [string]$script:pinturaSelecionadaTemp
-        }
-        return $null
-    }
 
     $script:btnGrades = @{}
     $gradeIndex = 0
@@ -7507,17 +7825,9 @@ $btnImprimir.Add_Click({
                 $chkRNA.Checked = $false
             }
             if ($letraSel -eq 'C') {
-                if ($script:tipoEtiqueta -eq 'Celular') {
-                    $script:pinturaOpcaoAtual = ''
-                    $script:gradeAtual = 'C'
-                    Set-AppStatus -Texto 'Grade C selecionada' -Cor $cYellow
-                } else {
-                    $pintura = & $script:SelecionarPintura
-                    if (-not $pintura) { return }
-                    $script:pinturaOpcaoAtual = $pintura
-                    $script:gradeAtual = "C - $pintura"
-                    Set-AppStatus -Texto "Grade C selecionada: $pintura" -Cor $cYellow
-                }
+                $script:pinturaOpcaoAtual = ''
+                $script:gradeAtual = 'C'
+                Set-AppStatus -Texto 'Grade C selecionada' -Cor $cYellow
             } elseif ($letraSel -eq 'T') {
                 $script:pinturaOpcaoAtual = ''
                 $script:gradeAtual = 'T - TRIAGEM'
@@ -7553,7 +7863,7 @@ $btnImprimir.Add_Click({
         foreach ($key in $script:btnGrades.Keys) {
             $btn = $script:btnGrades[$key]
             if ($key -eq 'C') {
-                $btn.Text = if ($script:tipoEtiqueta -eq 'Celular') { "C`r`nGrade C" } elseif ($script:pinturaOpcaoAtual) { "C`r`n$($script:pinturaOpcaoAtual)" } else { "C`r`nPintura" }
+                $btn.Text = "C`r`nGrade C"
             } elseif ($key -eq 'T') {
                 $btn.Text = "T`r`nTriagem"
             } elseif ($key -eq 'RMA') {
@@ -7816,7 +8126,7 @@ $btnImprimir.Add_Click({
     $btnAlterarOsPreview.Add_Click({
         $popup.TopMost = $false
         Prompt-OsManual -Owner $popup | Out-Null
-        $popup.TopMost = $true
+        $popup.TopMost = $false
         $popup.Activate() | Out-Null
         $printContext.OsNumero = [int]$script:osNumero
         $printContext.Ordem = $script:altertagOsAtual
@@ -9103,16 +9413,18 @@ $btnImprimir.Add_Click({
                 $txtSerial.Text = [string]$device3u.Serial
                 $txtCelularImei.Text = [string]$device3u.Imei
                 $txtCelularArmazenamento.Text = [string]$device3u.Armazenamento
+                $txtRam.Text = [string]$device3u.Ram
                 $armazenamentoTexto = if ($device3u.Armazenamento) { " | $($device3u.Armazenamento)" } else { '' }
+                $ramTexto = if ($device3u.Ram) { " | RAM $($device3u.Ram)" } else { '' }
                 if ($device3u.Bateria) {
                     $txtCelularBateria.Text = [string]$device3u.Bateria
                     $ciclosTexto = if ([int]$device3u.Ciclos -gt 0) { " | $($device3u.Ciclos) ciclos" } else { '' }
                     $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(74, 222, 128)
-                    $lbl3uToolsStatus.Text = "Dados lidos: $($device3u.Bateria)$ciclosTexto$armazenamentoTexto."
+                    $lbl3uToolsStatus.Text = "Dados lidos: $($device3u.Bateria)$ciclosTexto$armazenamentoTexto$ramTexto."
                 } else {
                     $txtCelularBateria.Text = ''
                     $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 191, 36)
-                    $lbl3uToolsStatus.Text = "Dados lidos. Bateria indisponivel: $($device3u.BateriaErro)"
+                    $lbl3uToolsStatus.Text = "Dados lidos:$armazenamentoTexto$ramTexto. Bateria indisponivel: $($device3u.BateriaErro)"
                 }
             } catch {
                 $lbl3uToolsStatus.ForeColor = [System.Drawing.Color]::FromArgb(251, 113, 133)
@@ -9388,7 +9700,7 @@ $btnImprimir.Add_Click({
             $script:modeloEtiqueta = $modelo
             $script:serialEtiqueta = $serial
             $script:tipoEtiqueta = if ($isMonitorManual) { 'Monitor' } elseif ($isCelularManual) { 'Celular' } elseif ($isDesktopManual) { 'Desktop' } else { 'Notebook' }
-            if ($isCelularManual -and ([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') {
+            if (([string]$script:gradeAtual) -match '^C\s*-\s*PINTURA') {
                 $script:gradeAtual = 'C'
                 $script:pinturaOpcaoAtual = ''
             }
@@ -9407,7 +9719,7 @@ $btnImprimir.Add_Click({
                 $script:celularImeiEtiqueta = $celularImei
                 $script:cpuEtiqueta = ''
                 $script:memEtiqueta = $celularArmazenamento
-                $script:ramEtiqueta = ''
+                $script:ramEtiqueta = $ram
                 $script:gpuEtiqueta = ''
                 $script:bateriaEtiqueta = $celularBateria
             } else {
@@ -9689,7 +10001,18 @@ $btnImprimir.Add_Click({
         })
     }
     Set-CaijWindowsTypography -Root $popup
-    $resultado = $popup.ShowDialog()
+    $previewArea = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+    $previewOwnerBounds = $form.Bounds
+    $previewXPreferido = $previewOwnerBounds.Left + [int][Math]::Floor(($previewOwnerBounds.Width - $popup.Width) / 2.0)
+    $previewYPreferido = $previewOwnerBounds.Top + [int][Math]::Floor(($previewOwnerBounds.Height - $popup.Height) / 2.0)
+    $previewMaxX = [Math]::Max(($previewArea.Left + 8), ($previewArea.Right - $popup.Width - 8))
+    $previewMaxY = [Math]::Max(($previewArea.Top + 8), ($previewArea.Bottom - $popup.Height - 8))
+    $popup.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
+    $popup.Location = New-Object System.Drawing.Point(
+        [Math]::Max(($previewArea.Left + 8), [Math]::Min($previewXPreferido, $previewMaxX)),
+        [Math]::Max(($previewArea.Top + 8), [Math]::Min($previewYPreferido, $previewMaxY))
+    )
+    $resultado = $popup.ShowDialog($form)
     $script:osPreviewRefreshAction = $null
     $script:AtualizarResumoAltertagPreview = $null
 
@@ -9824,7 +10147,7 @@ $btnImprimir.Add_Click({
                 ) | Out-Null
             } else {
                 [System.Windows.Forms.MessageBox]::Show(
-                    "Servidor de impressao nao encontrado ou sem resposta.`nVerifique se o ServidorImpressao.ps1 esta rodando no PC principal (192.168.15.127).",
+                    "Servidor de impressao nao encontrado ou sem resposta.`nVerifique se o ServidorImpressao.ps1 esta rodando no PC principal (INFOCAIJ).",
                     "Servidor offline",
                     "OK",
                     "Warning"
@@ -10280,6 +10603,13 @@ function Show-OsConcorrenciaPopup {
 function Show-NewOsAlert {
     param($Os, [int]$NovasCount = 1, [int]$ProximaOs = 0)
     if (-not $Os) { return }
+    if ($script:cadastroOsAberto) {
+        # Nao interrompe um cadastro em andamento com popup modal de outra OS.
+        # O monitor continua atualizando os contadores e exibira o aviso depois.
+        $script:alertaOsAtual = $Os
+        if ($ProximaOs -gt 0) { $script:ultimoAlertaOsNumero = [int]$Os.numero }
+        return
+    }
     $numero = [int]$Os.numero
     if ($numero -lt 1) { return }
     if ($ProximaOs -lt 1) { $ProximaOs = $numero + 1 }
@@ -10326,9 +10656,11 @@ function Update-OsRecentesMonitor {
     $script:osAlertMonitorBusy = $true
     try {
         try {
-            $resp = Invoke-CaijServer -Path '/status-os-local' -Method GET -TimeoutSec 4 -Retries 1
+            $resp = Invoke-CaijServer -Path '/status-os-local' -Method GET -TimeoutSec 1 -Retries 1
         } catch {
-            $resp = Invoke-CaijServer -Path '/status-os' -Method GET -TimeoutSec 5 -Retries 1
+            # O monitor e apenas informativo. Nunca prende a interface tentando
+            # uma sincronizacao externa quando o servidor esta ocupado/offline.
+            return
         }
         $proximaDetectada = 0
         if ($resp -and [string]$resp.status -eq 'ok' -and $resp.ultimoConfirmado) {
@@ -10484,7 +10816,6 @@ $form.Add_Shown({
         $script:startupTimer.Add_Tick({
             $this.Stop()
             try {
-                Test-ServidorPrincipal -Quiet | Out-Null
                 Sync-OsFromAltertag -Silent
                 Update-OsRecentesMonitor -PrimeiraLeitura
                 $script:osRecentesTimer = New-Object System.Windows.Forms.Timer

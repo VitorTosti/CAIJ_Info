@@ -16,12 +16,13 @@ function Assert-True {
 }
 
 $options = @(Get-CaijGradeOptions)
-Assert-Equal ($options -join '|') 'A|B|C - PINTURA 1|C - PINTURA 2|C - PINTURA 3|T - TRIAGEM|RMA' 'opcoes de grade'
+Assert-Equal ($options -join '|') 'A|B|C|T - TRIAGEM|RMA' 'opcoes de grade'
 $cellOptions = @(Get-CaijGradeOptions -EquipmentType 'Celular')
 Assert-Equal ($cellOptions -join '|') 'A|B|C|T - TRIAGEM|RMA' 'celular usa grade C sem pintura'
 Assert-Equal (Format-CaijGradeReference 'A') 'GRADE A' 'referencia A'
 Assert-Equal (Format-CaijGradeReference 'C') 'GRADE C' 'referencia C simples'
-Assert-Equal (Format-CaijGradeReference 'C - PINTURA 2') 'GRADE C - PINTURA 2' 'referencia pintura'
+Assert-Equal (Format-CaijGradeReference 'C - PINTURA 2') 'GRADE C' 'referencia antiga de pintura vira grade C'
+Assert-Equal (Normalize-CaijGrade 'GRADE C - PINTURA 3') 'C' 'normaliza referencia antiga de grade C'
 Assert-Equal (Format-CaijGradeReference 'T - TRIAGEM') 'GRADE T - TRIAGEM' 'referencia triagem'
 Assert-Equal (Format-CaijGradeReference 'RMA') 'RMA' 'referencia RMA'
 Assert-True (Test-CaijGradeRequiresObs 'B') 'B exige observacao'

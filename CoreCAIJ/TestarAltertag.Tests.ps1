@@ -177,12 +177,14 @@ $prodResp = @{
     code = 200
     status = 'success'
     data = @(
-        @{ id_ped_produto = 68740363; id_ordem = 14820098; id_produto = 82474640; desc_produto = 'Apple Macbook Pro 13" I7 16Gb 256GB'; qtde_produto = '1.0000'; valor_total_produto = 5000 }
+        @{ id_ped_produto = 68740363; id_ordem = 14820098; id_produto = 82474640; desc_produto = 'Apple Macbook Pro 13" I7 16Gb 256GB'; qtde_produto = '1.0000'; valor_unit_produto = '5000.00'; valor_custo_produto = '4200.00'; valor_total_produto = 5000; id_almoxarifado = 0; json_localizacoes = '[{"desc_almoxarifado":"TÉCNICA_BT","id_almoxarifado":"31196","qtde_saida":"1,00"}]' }
     )
 } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
 $prodApi = ConvertFrom-VhsysProdutosOrdemServico -Response $prodResp
 Assert-Equal $prodApi.Count 1 'produto api count'
 Assert-Equal $prodApi[0].Descricao 'Apple Macbook Pro 13" I7 16Gb 256GB' 'produto api descricao'
+Assert-Equal $prodApi[0].ValorUnitario '5000.00' 'produto api preserva valor unitario para atualizacao'
+Assert-Equal $prodApi[0].ValorCusto '4200.00' 'produto api preserva valor de custo para atualizacao'
 Assert-True (Test-VhsysProdutoVinculado -Produtos $prodApi -IdProduto 82474640) 'confirma produto vinculado pelo id'
 Assert-True (-not (Test-VhsysProdutoVinculado -Produtos $prodApi -IdProduto 83717891)) 'rejeita produto diferente'
 $prodApiAninhado = @($prodApi)
@@ -210,6 +212,27 @@ Assert-Equal $catalogoColunar[1].Codigo 'P035-C3F' 'catalogo colunar codigo 2'
 Assert-Equal $catalogoColunar[1].IdProduto '82530105' 'catalogo colunar id 2'
 Assert-Equal $catalogoColunar[1].Estoque '4.0000' 'catalogo colunar estoque 2'
 
+$produtoPorIdResp = @{
+    code = 200
+    status = 'success'
+    data = @{
+        id_produto = 83020915
+        cod_produto = 'T023'
+        desc_produto = 'Notebook Dell Latitude 3420 I7 11th'
+        valor_produto = '2899.000000'
+        estoque_produto = '1'
+    }
+} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+function Invoke-VhsysJson {
+    param($Config, [string]$Path, [string]$Method, $Body, [int]$TimeoutSec)
+    Assert-Equal $Path '/produtos/83020915' 'consulta preco usa id exato do produto'
+    Assert-Equal $Method 'Get' 'consulta preco nao altera o catalogo'
+    return $produtoPorIdResp
+}
+$produtoPorId = Get-VhsysProdutoCatalogoPorId -Config ([pscustomobject]@{}) -IdProduto 83020915
+Assert-Equal $produtoPorId.Codigo 'T023' 'consulta por id preserva codigo T023'
+Assert-Equal $produtoPorId.Valor '2899.000000' 'consulta por id retorna preco atual do AlterTag'
+
 $porOs = @{ '14820098' = $prodApi }
 $recentesComProduto = Add-VhsysProdutoResumoToOrdens -Ordens $recentes -ProdutosPorIdOrdem $porOs
 Assert-Equal $recentesComProduto[1].Equipamento 'Apple Macbook Pro 13" I7 16Gb 256GB' 'equipamento por produto'
@@ -228,6 +251,7 @@ Assert-Equal $draftOsComObs.obs_pedido 'IMEI: 123 | Bateria: 75%' 'payload os ob
 Assert-Equal $draftOsComObs.problema_ordem '' 'observacao nao ocupa campo problema'
 Assert-True (-not $draftOs.Contains('obs_interno_pedido')) 'payload os sem obs interna'
 Assert-Equal $draftOs.status_pedido 'Em Aberto' 'payload os status'
+Assert-Equal $draftOs.id_almoxarifado 31196 'payload os define localizacao geral TECNICA_BT'
 
 $draftProduto = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.00'
 Assert-Equal $draftProduto[0].id_produto 82530104 'payload produto id'
@@ -240,44 +264,65 @@ Assert-True (-not $draftProduto[0].PSObject.Properties['json_localizacoes']) 'pa
 $draftProdutoValorRuim = New-VhsysOrdemProdutoPayload -IdProduto 82530104 -Descricao '5420 I5 16GB 256GB' -ValorUnitario '0.000000 2950.000000 3000.000000'
 Assert-Equal $draftProdutoValorRuim[0].valor_unit_produto '0.00' 'payload produto valor invalido normalizado'
 
-$produtoComLocalizacao = @{
-    data = @(
-        @{
-            id_produto = 82530104
-            json_localizacoes = '[{"desc_almoxarifado":"TÃ‰CNICA_BT","id_almoxarifado":"31196","qtde_saida":"1,00"}]'
-        }
-    )
-} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
-$produtoSemLocalizacao = @{
-    data = @(
-        @{ id_produto = 82530104; json_localizacoes = $null }
-    )
-} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
-$produtoEmOutroAlmoxarifado = @{
-    data = @(
-        @{
-            id_produto = 82530104
-            json_localizacoes = '[{"desc_almoxarifado":"OUTRO","id_almoxarifado":"999","qtde_saida":"1,00"}]'
-        }
-    )
-} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
-$produtoCriadoNaBancada = @{
-    data = @(
-        @{
-            id_produto = 82530104
-            id_almoxarifado = 31196
-            desc_produto = '5420 I5 16GB 256GB'
-        }
-    )
-} | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$osComLocalizacao = @{ data = @{ id_ordem = 14820098; id_almoxarifado = 31196 } } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$osSemLocalizacao = @{ data = @{ id_ordem = 14820098; id_almoxarifado = $null } } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+$osOutroAlmoxarifado = @{ data = @{ id_ordem = 14820098; id_almoxarifado = 999 } } | ConvertTo-Json -Depth 5 | ConvertFrom-Json
+Assert-True (Test-VhsysOrdemServicoLocalizacao -Response $osComLocalizacao -IdAlmoxarifado 31196) 'confirma localizacao geral TECNICA_BT'
+Assert-True (-not (Test-VhsysOrdemServicoLocalizacao -Response $osSemLocalizacao -IdAlmoxarifado 31196)) 'rejeita OS sem localizacao geral'
+Assert-True (-not (Test-VhsysOrdemServicoLocalizacao -Response $osOutroAlmoxarifado -IdAlmoxarifado 31196)) 'rejeita outro almoxarifado geral'
 
-Assert-True (Test-VhsysProdutoLocalizacao -Response $produtoComLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196) 'confirma localizacao TECNICA_BT'
-Assert-True (Test-VhsysProdutoLocalizacao -Response $produtoCriadoNaBancada -IdProduto 82530104 -IdAlmoxarifado 31196) 'confirma almoxarifado retornado ao cadastrar produto'
-Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoSemLocalizacao -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita produto sem localizacao'
-Assert-True (-not (Test-VhsysProdutoLocalizacao -Response $produtoEmOutroAlmoxarifado -IdProduto 82530104 -IdAlmoxarifado 31196)) 'rejeita outro almoxarifado'
+$serverPath = Join-Path $PSScriptRoot 'ServidorImpressao.ps1'
+$serverText = Get-Content -LiteralPath $serverPath -Raw
+$serverTokens = $null
+$serverErrors = $null
+$serverAst = [System.Management.Automation.Language.Parser]::ParseFile($serverPath, [ref]$serverTokens, [ref]$serverErrors)
+Assert-Equal $serverErrors.Count 0 'servidor possui sintaxe valida para teste funcional da localizacao'
+$testLocalizacaoAst = $serverAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Test-VhsysOrdemServicoLocalizacao'
+}, $true)
+Assert-True ($null -ne $testLocalizacaoAst) 'funcao de validacao da localizacao geral existe'
+Invoke-Expression $testLocalizacaoAst.Extent.Text
+$confirmLocalizacaoAst = $serverAst.Find({
+    param($node)
+    $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+    $node.Name -eq 'Confirm-VhsysOrdemServicoLocalizacao'
+}, $true)
+Assert-True ($null -ne $confirmLocalizacaoAst) 'funcao de confirmacao da localizacao geral existe'
+Invoke-Expression $confirmLocalizacaoAst.Extent.Text
+$script:almoxarifadoBancadaTecnicaId = 31196
+$script:putLocalizacao = $null
+$script:getLocalizacaoCount = 0
+function Invoke-VhsysJson {
+    param($Config, [string]$Path, [string]$Method, $Body, [int]$TimeoutSec)
+    if ($Method -eq 'Put') {
+        $script:putLocalizacao = [pscustomobject]@{ Path=$Path; Method=$Method; Body=$Body }
+        return [pscustomobject]@{ code=200; status='success' }
+    }
+    $script:getLocalizacaoCount++
+    $idAlmoxarifado = if ($script:putLocalizacao) { 31196 } else { $null }
+    return [pscustomobject]@{ code=200; status='success'; data=[pscustomobject]@{ id_ordem=14820098; id_almoxarifado=$idAlmoxarifado } }
+}
+$osPayloadTeste = [ordered]@{ id_cliente=39509812; nome_cliente='CAIJ SERVICOS E COMERCIO LTDA'; obs_pedido='teste'; status_pedido='Em Aberto' }
+$localizacaoConfirmada = Confirm-VhsysOrdemServicoLocalizacao -Config ([pscustomobject]@{}) -IdOrdem 14820098 -IdPedido 2389 -OsPayload $osPayloadTeste
+Assert-True ([bool]$localizacaoConfirmada) 'confirmacao funcional retorna sucesso sem alerta'
+Assert-Equal $script:putLocalizacao.Method 'Put' 'localizacao usa metodo de atualizacao'
+Assert-Equal $script:putLocalizacao.Path '/ordens-servico/14820098' 'localizacao atualiza a OS correta'
+Assert-Equal $script:putLocalizacao.Body.id_almoxarifado 31196 'atualizacao funcional envia TÉCNICA_BT como localizacao geral'
+Assert-Equal $script:putLocalizacao.Body.obs_pedido 'teste' 'atualizacao preserva os demais campos da OS'
+Assert-Equal $script:getLocalizacaoCount 3 'confirmacao faz somente as consultas necessarias antes e depois da atualizacao'
 
-$serverText = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'ServidorImpressao.ps1') -Raw
-Assert-True ($serverText -notmatch 'Test-VhsysProdutoLocalizacao -Response \$prodResp') 'servidor nao rejeita produto criado por localizacao ausente na resposta oficial'
+Assert-True ($serverText -match 'function\s+Confirm-VhsysOrdemServicoLocalizacao') 'servidor confirma localizacao geral depois de cadastrar a OS'
+Assert-True ($serverText -match 'Get-VhsysProdutoCatalogoPorId\s+-Config\s+\$cfg\s+-IdProduto\s+\$IdProduto') 'servidor consulta produto por id antes de criar a OS'
+Assert-True ($serverText -match '\$ProdutoValor\s*=\s*Normalize-VhsysValorUnitario\s+\(\[string\]\$produtoCatalogo\.valor\)') 'servidor usa preco atual retornado pelo AlterTag'
+Assert-True ($serverText -match 'id_almoxarifado\s*=\s*\$almoxarifadoBancadaTecnicaId') 'payload inicial envia localizacao geral TECNICA_BT'
+Assert-True ($serverText -match '\$path\s*=\s*"/ordens-servico/\{0\}"\s+-f\s+\$IdOrdem') 'localizacao usa endpoint da OS'
+Assert-True ($serverText -match "Invoke-VhsysJson.*-Method\s+'Put'.*-Body\s+\`$payloadAtualizacao") 'servidor reaplica a localizacao geral quando necessario'
+Assert-True ($serverText -match 'Test-VhsysOrdemServicoLocalizacao') 'servidor confere localizacao geral persistida pela API'
+Assert-True ($serverText -match 'Confirm-VhsysOrdemServicoLocalizacao.*-OsPayload\s+\$osPayload') 'cadastro so continua depois de confirmar a localizacao'
+Assert-True ($serverText -notmatch 'throw\s+"A OS \$IdPedido foi criada, mas.*localizacao geral') 'falha de confirmacao da localizacao nao dispara alerta de erro'
+Assert-True ($serverText -match 'localizacaoConfirmada\s*=\s*\$localizacaoConfirmada') 'servidor mantem diagnostico silencioso da localizacao'
 Assert-True ($serverText -match 'Get-VhsysProdutosOrdemServico.*-ThrowOnError') 'servidor confirma produto persistido depois do cadastro'
 Assert-True ($serverText -match 'Test-VhsysProdutoVinculado') 'servidor valida produto persistido pelo id'
 Assert-True ($serverText -match 'ConvertTo-Json\s+-InputObject\s+\$Body') 'serializacao preserva arrays de produtos e servicos'
@@ -287,7 +332,7 @@ Assert-True ($serverText -match '\$prodPath\s*=\s*"/ordens-servico/\{0\}/produto
 Assert-True ($serverText -match '\$servPath\s*=\s*"/ordens-servico/\{0\}/servicos"\s+-f\s+\$IdOrdem') 'servico usa id interno da OS'
 Assert-True ($serverText -match 'foreach\s*\(\$tentativaEnvio\s+in\s+1\.\.3\)') 'servidor repete produto ausente com limite seguro'
 Assert-True ($serverText -match '\$consultaConcluida\s*=\s*\$true') 'reenvio exige consulta valida ao VHSYS'
-Assert-True ($serverText -match 'Start-Sleep\s+-Milliseconds\s+650') 'cadastro aguarda propagacao da OS antes do produto'
+Assert-True ($serverText -match 'Start-Sleep\s+-Milliseconds\s+250') 'cadastro usa espera curta antes de adicionar o produto'
 Assert-True ($serverText -match "New-VhsysOrdemServicoPayload.*-Equipamento\s+''") 'cadastro nao duplica produto no campo equipamento'
 Assert-True ($serverText -match "New-VhsysOrdemServicoPayload.*-Observacao\s+\`$Observacao") 'cadastro envia observacao para o campo correto da OS'
 Assert-True ($serverText -match 'obs_pedido\s*=\s*\(\[string\]\$Observacao\)\.Trim\(\)') 'payload mapeia observacao para obs_pedido'
@@ -300,7 +345,7 @@ Assert-True ($serverText -match '\$percentX\s*=\s*\(\$cellValueX\s*\+\s*4\)\s*\+
 Assert-True ($serverText -notmatch 'DIAGONAL\s+\$\(\$percentX') 'percentual nao depende de comando diagonal da impressora'
 Assert-True ($serverText -match 'BAR\s+\$\(\$percentX\s*\+\s*10\)') 'simbolo percentual e construido com barras compativeis'
 Assert-True ($serverText -notmatch '\$celularSemObs') 'celular preserva o lado direito para o QR mesmo sem observacao'
-Assert-True ($serverText -match "if\s*\(\`$temObservacaoEtiqueta\)[\s\S]*?TEXT 22,334,.*OBS") 'titulo observacoes compacto so e impresso com conteudo'
+Assert-True ($serverText -match "if\s*\(\`$temObservacaoEtiqueta\)[\s\S]*?TEXT 22,346,.*OBS") 'titulo observacoes compacto so e impresso com conteudo'
 Assert-True ($serverText -match '\$produtoErro\s*=\s*\$null') 'cadastro acompanha falha parcial do produto'
 Assert-True ($serverText -match 'produtoConfirmado\s*=\s*\$produtoConfirmado') 'resposta informa confirmacao do produto'
 Assert-True ($serverText -match 'produtoErro\s*=\s*\$produtoErro') 'resposta devolve pendencia do produto'

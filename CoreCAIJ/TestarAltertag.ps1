@@ -277,7 +277,11 @@ function ConvertFrom-VhsysProdutosOrdemServico {
             IdProduto = [string]$item.id_produto
             Descricao = [string]$item.desc_produto
             Quantidade = [string]$item.qtde_produto
+            ValorUnitario = [string]$item.valor_unit_produto
+            ValorCusto = [string]$item.valor_custo_produto
             ValorTotal = [string]$item.valor_total_produto
+            IdAlmoxarifado = [string]$item.id_almoxarifado
+            JsonLocalizacoes = [string]$item.json_localizacoes
         }
     }
     return ,$produtos
@@ -337,6 +341,21 @@ function ConvertFrom-VhsysProdutosCatalogo {
         }
     }
     return ,$produtos
+}
+
+function Get-VhsysProdutoCatalogoPorId {
+    param(
+        [Parameter(Mandatory=$true)]$Config,
+        [Parameter(Mandatory=$true)][int]$IdProduto
+    )
+
+    $resp = Invoke-VhsysJson -Config $Config -Path ("/produtos/{0}" -f $IdProduto) -Method 'Get' -TimeoutSec 18
+    $produtos = @(ConvertFrom-VhsysProdutosCatalogo -Response $resp)
+    $produto = @($produtos | Where-Object { [int]$_.IdProduto -eq $IdProduto } | Select-Object -First 1)
+    if ($produto.Count -lt 1) {
+        throw "O produto $IdProduto nao foi encontrado no catalogo do AlterTag."
+    }
+    return $produto[0]
 }
 
 function Add-VhsysProdutoResumoToOrdens {
@@ -406,6 +425,7 @@ function New-VhsysOrdemServicoPayload {
         referencia_ordem = ([string]$Referencia).Trim()
         obs_pedido = ([string]$Observacao).Trim()
         status_pedido = 'Em Aberto'
+        id_almoxarifado = 31196
     }
 }
 
@@ -426,32 +446,15 @@ function New-VhsysOrdemProdutoPayload {
     return ,@([pscustomobject]$payload)
 }
 
-function Test-VhsysProdutoLocalizacao {
+function Test-VhsysOrdemServicoLocalizacao {
     param(
         [Parameter(Mandatory=$true)]$Response,
-        [Parameter(Mandatory=$true)][int]$IdProduto,
         [Parameter(Mandatory=$true)][int]$IdAlmoxarifado
     )
 
-    foreach ($produto in @($Response.data)) {
-        if ([int]$produto.id_produto -ne $IdProduto) { continue }
-        if ($produto.PSObject.Properties['id_almoxarifado'] -and [int]$produto.id_almoxarifado -eq $IdAlmoxarifado) {
-            return $true
-        }
-        $jsonLocalizacoes = ([string]$produto.json_localizacoes).Trim()
-        if (-not $jsonLocalizacoes) { return $false }
-        try {
-            foreach ($localizacao in @($jsonLocalizacoes | ConvertFrom-Json)) {
-                if ([int]$localizacao.id_almoxarifado -eq $IdAlmoxarifado) {
-                    return $true
-                }
-            }
-        } catch {
-            return $false
-        }
-        return $false
-    }
-    return $false
+    $ordem = $Response.data
+    if ($ordem -is [array]) { $ordem = @($ordem)[0] }
+    return ($ordem -and [int]$ordem.id_almoxarifado -eq $IdAlmoxarifado)
 }
 
 function Test-VhsysProdutoVinculado {

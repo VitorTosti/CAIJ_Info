@@ -1,36 +1,33 @@
 function Get-CaijGradeOptions {
     param([string]$EquipmentType = '')
 
-    if ($EquipmentType -eq 'Celular') {
-        return @(
-            'A'
-            'B'
-            'C'
-            'T - TRIAGEM'
-            'RMA'
-        )
-    }
-
     @(
         'A'
         'B'
-        'C - PINTURA 1'
-        'C - PINTURA 2'
-        'C - PINTURA 3'
+        'C'
         'T - TRIAGEM'
         'RMA'
     )
 }
 
-function Format-CaijGradeReference {
+function Normalize-CaijGrade {
     param([string]$Grade)
 
     $normalized = ([string]$Grade).Trim().ToUpper()
+    if ($normalized -eq 'RNA') { return 'RMA' }
+    if ($normalized -match '^(?:GRADE\s+)?C(?:\s*-\s*PINTURA\s*[123])?$') { return 'C' }
+    if ($normalized -match '^(?:GRADE\s+)?T(?:\s*-\s*TRIAGEM)?$') { return 'T - TRIAGEM' }
+    if ($normalized -match '^GRADE\s+([AB])$') { return $matches[1] }
+    if ($normalized -in @('A', 'B', 'RMA')) { return $normalized }
+    return 'A'
+}
+
+function Format-CaijGradeReference {
+    param([string]$Grade)
+
+    $normalized = Normalize-CaijGrade $Grade
     if ($normalized -eq 'RMA') {
         return 'RMA'
-    }
-    if ($normalized -match '^C\s*-\s*PINTURA\s*([123])$') {
-        return "GRADE C - PINTURA $($matches[1])"
     }
     if ($normalized -eq 'C') {
         return 'GRADE C'
@@ -47,6 +44,6 @@ function Format-CaijGradeReference {
 function Test-CaijGradeRequiresObs {
     param([string]$Grade)
 
-    $normalized = ([string]$Grade).Trim().ToUpper()
-    return ($normalized -in @('B', 'C') -or $normalized -match '^C\s*-\s*PINTURA\s*[123]$')
+    $normalized = Normalize-CaijGrade $Grade
+    return ($normalized -in @('B', 'C'))
 }
