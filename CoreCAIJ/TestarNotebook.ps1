@@ -172,7 +172,7 @@ $sub.Size = New-Object System.Drawing.Size(440, 22)
 $head.Controls.Add($sub)
 
 $chip = New-Object System.Windows.Forms.Panel
-$chip.Location = New-Object System.Drawing.Point(748, 18)
+$chip.Location = New-Object System.Drawing.Point(710, 18)
 $chip.Size = New-Object System.Drawing.Size(184, 52)
 $chip.BackColor = $cCard
 $head.Controls.Add($chip)
@@ -213,6 +213,20 @@ $close.Size = New-Object System.Drawing.Size(30, 30)
 $close.Cursor = [System.Windows.Forms.Cursors]::Hand
 $close.Add_Click({ $form.Close() })
 $head.Controls.Add($close)
+
+$minimize = New-Object System.Windows.Forms.Button
+$minimize.Text = [char]0x2014
+$minimize.Font = New-Object System.Drawing.Font('Segoe UI', 9, [System.Drawing.FontStyle]::Bold)
+$minimize.ForeColor = $cMuted
+$minimize.BackColor = $head.BackColor
+$minimize.FlatStyle = 'Flat'
+$minimize.FlatAppearance.BorderSize = 0
+$minimize.FlatAppearance.MouseOverBackColor = $cCard
+$minimize.Location = New-Object System.Drawing.Point(902, 8)
+$minimize.Size = New-Object System.Drawing.Size(30, 30)
+$minimize.Cursor = [System.Windows.Forms.Cursors]::Hand
+$minimize.Add_Click({ $form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized })
+$head.Controls.Add($minimize)
 
 $dragState = @{ Active = $false; Mouse = [System.Drawing.Point]::Empty; Form = [System.Drawing.Point]::Empty }
 $head.Add_MouseDown({
@@ -542,9 +556,22 @@ function Set-TestsResponsiveLayout {
     # ocupar a maior parte do monitor atual, sem distorcer nem sair da area util.
     $baseWidth = 980.0
     $baseHeight = 550.0
-    $workingArea = [System.Windows.Forms.Screen]::FromPoint(
+    $ownerBounds = $null
+    $ownerBoundsText = [Environment]::GetEnvironmentVariable('CAIJ_TESTS_OWNER_BOUNDS', 'Process')
+    if ($ownerBoundsText -match '^(-?\d+),(-?\d+),(\d+),(\d+)$') {
+        $ownerBounds = New-Object System.Drawing.Rectangle(
+            [int]$Matches[1], [int]$Matches[2], [int]$Matches[3], [int]$Matches[4]
+        )
+    }
+    $anchorPoint = if ($ownerBounds) {
+        New-Object System.Drawing.Point(
+            ($ownerBounds.Left + [int]($ownerBounds.Width / 2)),
+            ($ownerBounds.Top + [int]($ownerBounds.Height / 2))
+        )
+    } else {
         [System.Windows.Forms.Cursor]::Position
-    ).WorkingArea
+    }
+    $workingArea = [System.Windows.Forms.Screen]::FromPoint($anchorPoint).WorkingArea
     $targetWidth = [Math]::Max(1.0, $workingArea.Width * 0.84)
     $targetHeight = [Math]::Max(1.0, $workingArea.Height * 0.84)
     $layoutScale = [Math]::Min($targetWidth / $baseWidth, $targetHeight / $baseHeight)
@@ -580,10 +607,22 @@ function Set-TestsResponsiveLayout {
         Set-RoundedControl -Control $button -Radius ([Math]::Max(6, [int][Math]::Round(8 * $layoutScale)))
     }
 
+    $preferredX = if ($ownerBounds) {
+        $ownerBounds.Left + [int](($ownerBounds.Width - $Form.Width) / 2)
+    } else {
+        $workingArea.Left + [int](($workingArea.Width - $Form.Width) / 2)
+    }
+    $preferredY = if ($ownerBounds) {
+        $ownerBounds.Top + [int](($ownerBounds.Height - $Form.Height) / 2)
+    } else {
+        $workingArea.Top + [int](($workingArea.Height - $Form.Height) / 2)
+    }
+    $maxX = [Math]::Max(($workingArea.Left + 8), ($workingArea.Right - $Form.Width - 8))
+    $maxY = [Math]::Max(($workingArea.Top + 8), ($workingArea.Bottom - $Form.Height - 8))
     $Form.StartPosition = [System.Windows.Forms.FormStartPosition]::Manual
     $Form.Location = New-Object System.Drawing.Point(
-        ($workingArea.Left + [int](($workingArea.Width - $Form.Width) / 2)),
-        ($workingArea.Top + [int](($workingArea.Height - $Form.Height) / 2))
+        [Math]::Max(($workingArea.Left + 8), [Math]::Min($preferredX, $maxX)),
+        [Math]::Max(($workingArea.Top + 8), [Math]::Min($preferredY, $maxY))
     )
 }
 

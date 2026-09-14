@@ -11,13 +11,16 @@ import subprocess
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 PORTA_SERVIDOR = 9100
-FALLBACK_SERVER = "http://192.168.15.127:9100"
+FALLBACK_SERVER = "http://INFOCAIJ:9100"
+FALLBACK_SERVER_LOCAL = "http://INFOCAIJ.local:9100"
+FALLBACK_SERVER_IP = "http://192.168.15.11:9100"
 
 
 def format_os(value):
@@ -41,8 +44,13 @@ def cpu_short(cpu):
     match = re.search(r"i([3579]).*?([0-9]{4,5})", text, re.I)
     if match:
         model = match.group(2)
-        gen = model[:2] if len(model) >= 5 else model[:1]
-        return "I{} {}".format(match.group(1), gen)
+        first_two = int(model[:2])
+        generation = first_two if 10 <= first_two <= 19 else int(model[:1])
+        mod100 = generation % 100
+        suffix = "th"
+        if not 11 <= mod100 <= 13:
+            suffix = {1: "st", 2: "nd", 3: "rd"}.get(generation % 10, "th")
+        return "i{} {}{}".format(match.group(1), generation, suffix)
     return text or "N/A"
 
 
@@ -90,13 +98,13 @@ def gpu_short(gpu):
     return text[:28]
 
 
-def build_print_payload(info, os_numero, grade, obs, include_os):
+def build_print_payload(info, os_numero, grade, obs, include_os, equipment_type="Notebook"):
     serial = (info.get("serial") or "").strip() or "XXXXXX"
     return {
         "os": int(os_numero) if include_os else None,
         "modelo": info.get("modelo") or "Apple MacBook",
         "serial": serial if serial != "N/A" else "XXXXXX",
-        "tipoEquipamento": "Notebook",
+        "tipoEquipamento": equipment_type,
         "cpu": cpu_short(info.get("cpu")),
         "gpu": gpu_short(info.get("gpu")),
         "ram": ram_short(info.get("ram")),
@@ -108,6 +116,10 @@ def build_print_payload(info, os_numero, grade, obs, include_os):
         "fichaDisco": info.get("disco") or "N/A",
         "modoManual": False,
         "bateria": info.get("bateria") or "N/A",
+        "monitorTamanho": info.get("monitorTamanho") or "",
+        "monitorEntradas": info.get("monitorEntradas") or "",
+        "celularImei": info.get("imei") or "",
+        "celularCiclos": info.get("ciclos") or "",
         "grade": (grade or "A").strip().upper(),
         "obs": obs or "",
     }
@@ -118,8 +130,8 @@ def validate_print_request(grade, obs):
     obs_text = (obs or "").strip()
     if grade_text == "B" and not obs_text:
         return "Observacoes sao obrigatorias para Grade B."
-    if re.match(r"^C\s*-\s*PINTURA", grade_text) and not obs_text:
-        return "Observacoes sao obrigatorias para Grade C - Pintura."
+    if re.match(r"^(?:GRADE\s+)?C(?:\s*-\s*PINTURA\s*[123])?$", grade_text) and not obs_text:
+        return "Observacoes sao obrigatorias para Grade C."
     return ""
 
 
@@ -153,14 +165,15 @@ class AppState:
         except Exception:
             return 235
 
-    def set_os_number(self, value):
+    def set_os_number(self, value, manual=False):
         num = max(int(value), 1)
         self.os_path.write_text(str(num), encoding="utf-8")
         self.data["osNumero"] = num
+        self.data["manualOsSet"] = bool(manual)
         self.save_runtime_data()
         return num
 
-    def server_url(self):
+    def server_candidates(self):
         candidates = []
         try:
             candidates.append(self.server_config_path.read_text(encoding="utf-8-sig").strip())
@@ -170,23 +183,51 @@ class AppState:
             candidates.append(os.environ["CAIJ_SERVIDOR_URL"])
         if os.environ.get("CAIJ_SERVIDOR_IP"):
             candidates.append(os.environ["CAIJ_SERVIDOR_IP"])
-        candidates.append(FALLBACK_SERVER)
+        candidates.extend((FALLBACK_SERVER_LOCAL, FALLBACK_SERVER, FALLBACK_SERVER_IP))
+        normalized = []
         for item in candidates:
             if item and item.strip():
-                return normalize_server_url(item)
-        return FALLBACK_SERVER
+                value = normalize_server_url(item)
+                if value not in normalized:
+                    normalized.append(value)
+        return normalized
+
+    def server_url(self):
+        candidates = self.server_candidates()
+        return candidates[0] if candidates else FALLBACK_SERVER
 
     def request_server(self, path, method="GET", payload=None, timeout=12):
-        base = self.server_url()
         data = None
         headers = {}
         if payload is not None:
             data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
             headers["Content-Type"] = "application/json; charset=utf-8"
-        req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8")
-            return json.loads(body) if body else {}
+        last_error = None
+        for base in self.server_candidates():
+            parsed = urllib.parse.urlparse(base)
+            try:
+                socket.getaddrinfo(parsed.hostname, parsed.port or PORTA_SERVIDOR, type=socket.SOCK_STREAM)
+            except socket.gaierror as exc:
+                last_error = exc
+                continue
+
+            req = urllib.request.Request(base + path, data=data, headers=headers, method=method)
+            try:
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    body = resp.read().decode("utf-8")
+                    try:
+                        self.server_config_path.write_text(base, encoding="utf-8")
+                    except Exception:
+                        pass
+                    return json.loads(body) if body else {}
+            except urllib.error.URLError as exc:
+                last_error = exc
+                if isinstance(exc.reason, (socket.gaierror, ConnectionRefusedError)):
+                    continue
+                raise
+        if last_error:
+            raise last_error
+        raise ConnectionError("Servidor CAIJ nao encontrado.")
 
     def public_state(self):
         with self.lock:
@@ -199,15 +240,19 @@ class AppState:
                 "lastServerStatus": self.data.get("lastServerStatus", "nao verificado"),
                 "lastOsSync": self.data.get("lastOsSync", ""),
                 "pendingCreatedOs": int(self.data.get("pendingCreatedOs") or 0),
+                "manualOsSet": bool(self.data.get("manualOsSet", False)),
+                "equipmentType": self.data.get("equipmentType") or "Notebook",
             }
 
-    def update_info(self, info):
-        allowed = ("modelo", "serial", "cpu", "gpu", "ram", "disco", "bateria")
+    def update_info(self, info, equipment_type=None):
+        allowed = ("modelo", "serial", "cpu", "gpu", "ram", "disco", "bateria", "imei", "ciclos", "monitorTamanho", "monitorEntradas")
         with self.lock:
             current = self.data.setdefault("info", {})
             for key in allowed:
                 if key in info:
                     current[key] = str(info.get(key) or "").strip()
+            if equipment_type in ("Notebook", "Desktop", "Celular", "Monitor"):
+                self.data["equipmentType"] = equipment_type
             self.save_runtime_data()
             return self.public_state()
 
@@ -238,7 +283,8 @@ class AppState:
             is_new = previous is not None and confirmed > previous
             self.last_seen_confirmed = max(previous or 0, confirmed)
             pending_created = int(self.data.get("pendingCreatedOs") or 0)
-            if not pending_created and next_num > 0 and next_num != self.read_os_number():
+            manual_os = bool(self.data.get("manualOsSet", False))
+            if not pending_created and not manual_os and next_num > 0 and next_num != self.read_os_number():
                 self.set_os_number(next_num)
             self.data["lastServerStatus"] = "online"
             self.data["lastOsSync"] = time.strftime("%d/%m %H:%M")
@@ -329,7 +375,7 @@ class AppState:
             "produtoDescricao": str(product.get("descricao") or product.get("nome") or ""),
             "produtoValor": str(product.get("valor") or "0.00"),
             "servicos": request_data.get("servicos") or [],
-            "tipoEquipamento": "Notebook",
+            "tipoEquipamento": request_data.get("equipmentType") or self.data.get("equipmentType") or "Notebook",
             "observacao": str(request_data.get("observacao") or "").strip(),
         }
         response = self.request_server("/criar-os-altertag", method="POST", payload=payload, timeout=45)
@@ -342,6 +388,7 @@ class AppState:
             self.set_os_number(created)
             self.last_seen_confirmed = max(self.last_seen_confirmed or 0, created)
         with self.lock:
+            self.data["equipmentType"] = payload["tipoEquipamento"]
             self.data["pendingCreatedOs"] = created
             self.data["lastServerStatus"] = "online"
             self.data["lastOsSync"] = time.strftime("%d/%m %H:%M")
@@ -390,16 +437,19 @@ class AppState:
             return {"ok": False, "message": error}
         with self.lock:
             if request_data.get("info"):
-                self.update_info(request_data["info"])
+                self.update_info(request_data["info"], request_data.get("equipmentType"))
             pending_created = int(self.data.get("pendingCreatedOs") or 0)
-            if include_os and not pending_created:
+            manual_os = bool(self.data.get("manualOsSet", False))
+            if include_os and not pending_created and not manual_os:
                 try:
                     self.reserve_os()
                 except Exception:
                     pass
-            payload = build_print_payload(self.data.get("info", {}), self.read_os_number(), grade, obs, include_os)
+            equipment_type = request_data.get("equipmentType") or self.data.get("equipmentType") or "Notebook"
+            self.data["equipmentType"] = equipment_type
+            payload = build_print_payload(self.data.get("info", {}), self.read_os_number(), grade, obs, include_os, equipment_type)
         try:
-            self.request_server("/imprimir", method="POST", payload=payload, timeout=20)
+            server_response = self.request_server("/imprimir", method="POST", payload=payload, timeout=20)
             with self.lock:
                 self.data["lastServerStatus"] = "online"
                 self.save_runtime_data()
@@ -407,12 +457,23 @@ class AppState:
             if include_os:
                 with self.lock:
                     self.data["pendingCreatedOs"] = 0
+                    self.data["manualOsSet"] = False
                     self.save_runtime_data()
                 try:
                     self.sync_os()
                 except Exception:
                     pass
-            return {"ok": True, "message": "Etiqueta enviada com sucesso.", "payload": payload, "state": self.public_state()}
+            tracker = server_response.get("rastreador") if isinstance(server_response, dict) else None
+            sync_warning = isinstance(tracker, dict) and str(tracker.get("status") or "").lower() == "warning"
+            message = server_response.get("mensagem") if isinstance(server_response, dict) else ""
+            return {
+                "ok": True,
+                "message": message or "Etiqueta enviada com sucesso.",
+                "payload": payload,
+                "tracker": tracker,
+                "syncWarning": sync_warning,
+                "state": self.public_state(),
+            }
         except Exception as exc:
             with self.lock:
                 self.data["lastServerStatus"] = "offline"
@@ -450,6 +511,19 @@ def make_handler(app_state, stop_event):
                 return self.serve_file(app_state.ui_dir / "style.css")
             if self.path == "/app.js":
                 return self.serve_file(app_state.ui_dir / "app.js")
+            if self.path == "/portable.js":
+                return self.serve_file(app_state.ui_dir / "portable.js")
+            if self.path == "/runtime-loader.js":
+                return self.serve_file(app_state.ui_dir / "runtime-loader.js")
+            if self.path == "/caij-runtime.js":
+                runtime_js = b"window.CAIJ_NATIVE_RUNTIME = null;\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "application/javascript; charset=utf-8")
+                self.send_header("Content-Length", str(len(runtime_js)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(runtime_js)
+                return
             if self.path == "/logo.png":
                 return self.serve_file(app_state.core_dir / "caij-logo.png")
             if self.path == "/api/state":
@@ -463,7 +537,8 @@ def make_handler(app_state, stop_event):
                 if self.path == "/api/print":
                     return self.send_json(200, app_state.print_label(self.read_json()))
                 if self.path == "/api/info":
-                    return self.send_json(200, app_state.update_info(self.read_json().get("info", {})))
+                    request_data = self.read_json()
+                    return self.send_json(200, app_state.update_info(request_data.get("info", {}), request_data.get("equipmentType")))
                 if self.path == "/api/sync-os":
                     return self.send_json(200, app_state.sync_os())
                 if self.path == "/api/products":
@@ -473,7 +548,7 @@ def make_handler(app_state, stop_event):
                     return self.send_json(200 if result.get("ok") else 400, result)
                 if self.path == "/api/set-os":
                     num = self.read_json().get("osNumero")
-                    return self.send_json(200, {"osNumero": app_state.set_os_number(int(num)), "state": app_state.public_state()})
+                    return self.send_json(200, {"osNumero": app_state.set_os_number(int(num), manual=True), "state": app_state.public_state()})
                 if self.path == "/api/shutdown":
                     stop_event.set()
                     return self.send_json(200, {"ok": True})

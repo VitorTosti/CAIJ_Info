@@ -171,6 +171,46 @@ function Get-MacBatterySummary {
     return $health
 }
 
+function Get-MacModelYear {
+    param([string]$Identifier, [string]$Chip, [string]$ModelName)
+    $id = ([string]$Identifier).Trim() -replace '^MacBookPro1,5,', 'MacBookPro15,'
+    switch -Regex ($id) {
+        '^MacBookPro18,' { return '2021' }
+        '^MacBookPro17,1$' { return '2020' }
+        '^MacBookPro16,[23]$' { return '2020' }
+        '^MacBookPro16,[14]$' { return '2019' }
+        '^MacBookPro15,2$' { return '2018' }
+        '^MacBookPro15,[34]$' { return '2019' }
+        '^MacBookPro15,1$' { if ($Chip -match '(?i)i[3579]-9') { return '2019' }; return '2018' }
+        '^MacBookPro14,' { return '2017' }
+        '^MacBookPro13,' { return '2016' }
+        '^MacBookPro12,1$' { return '2015' }
+        '^MacBookPro11,[45]$' { return '2015' }
+        '^MacBookAir10,1$' { return '2020' }
+        '^MacBookAir9,1$' { return '2020' }
+        '^MacBookAir8,2$' { return '2019' }
+        '^MacBookAir8,1$' { return '2018' }
+        '^Mac14,15$' { return '2023' }
+    }
+    if ($Chip -match '(?i)Apple\s+M1') {
+        if ($ModelName -match '(?i)Pro' -and $id -match '^MacBookPro18,') { return '2021' }
+        return '2020'
+    }
+    if ($Chip -match '(?i)Apple\s+M2') {
+        if ($Chip -match '(?i)\b(Pro|Max)\b') { return '2023' }
+        return '2022'
+    }
+    if ($Chip -match '(?i)Apple\s+M3') { return '2023' }
+    if ($Chip -match '(?i)Apple\s+M4') { return '2024' }
+    if ($Chip -match '(?i)i[3579]-(\d{4,5})') {
+        $cpuModel = $matches[1]
+        if ($cpuModel.StartsWith('10')) { return '2020' }
+        if ($cpuModel.Length -ge 5) { return "20$($cpuModel.Substring(0, 2))" }
+        return "201$($cpuModel.Substring(0, 1))"
+    }
+    return ''
+}
+
 function ConvertFrom-MacSystemProfilerJson {
     param([Parameter(Mandatory=$true)][string]$JsonText)
 
@@ -189,7 +229,13 @@ function ConvertFrom-MacSystemProfilerJson {
     $memory = Get-FirstValue $hw @('physical_memory')
 
     $info = [ordered]@{}
-    $info.Modelo = if ($machineName -and $machineModel) { "Apple $machineName ($machineModel)" } elseif ($machineName) { "Apple $machineName" } else { 'Apple MacBook' }
+    $chipLabel = ''
+    if ($chip -match '(?i)Apple\s+(M\d+)') { $chipLabel = $matches[1].ToUpper() }
+    elseif ($chip -match '(?i)\bi([3579])\b') { $chipLabel = "I$($matches[1])" }
+    $baseModel = if ($machineName) { $machineName.Trim() } else { 'MacBook' }
+    $friendlyModel = if ($chipLabel -and $baseModel -notmatch [regex]::Escape($chipLabel)) { "$baseModel $chipLabel" } else { $baseModel }
+    $modelYear = Get-MacModelYear -Identifier $machineModel -Chip $chip -ModelName $machineName
+    $info.Modelo = if ($modelYear) { "$friendlyModel ($modelYear)" } else { $friendlyModel }
     $info.Serial = if ($serial) { $serial.Trim() } else { 'N/A' }
     $info.CPU = $chip.Trim()
     $info.Nucleos = if ($cores -match '\d+') { "$($matches[0]) nucleos" } else { 'N/A' }
@@ -297,7 +343,7 @@ function Get-IntelCpuShort {
     param([string]$Cpu)
     $t = if ($Cpu) { [string]$Cpu.Trim() } else { '' }
     if ($t -match '(?i)\b(i[3579])(?:[- ]?)(\d{4,5})') {
-        $prefix = $matches[1].ToUpper()
+        $prefix = $matches[1].ToLowerInvariant()
         $modelo = [string]$matches[2]
         $gen = $null
         if ($modelo.Length -ge 4) {
@@ -306,7 +352,18 @@ function Get-IntelCpuShort {
             if ($primeirosDois -ge 10 -and $primeirosDois -le 19) { $gen = $primeirosDois }
             elseif ($primeiro -ge 2 -and $primeiro -le 9) { $gen = $primeiro }
         }
-        if ($gen) { return "$prefix $gen" }
+        if ($gen) {
+            $mod100 = $gen % 100
+            $sufixo = 'th'
+            if ($mod100 -lt 11 -or $mod100 -gt 13) {
+                switch ($gen % 10) {
+                    1 { $sufixo = 'st' }
+                    2 { $sufixo = 'nd' }
+                    3 { $sufixo = 'rd' }
+                }
+            }
+            return "$prefix $gen$sufixo"
+        }
         return $prefix
     }
     return $t
@@ -357,17 +414,7 @@ function Resolve-CaijGradeSelection {
     $gradeLimpa = if ($Grade) { $Grade.Trim().ToUpperInvariant() } else { 'A' }
     if ($gradeLimpa -eq '') { $gradeLimpa = 'A' }
 
-    if ($gradeLimpa -match '^C\s*-\s*PINTURA\s*([123])$') {
-        return "C - PINTURA $($matches[1])"
-    }
-
-    if ($gradeLimpa -eq 'C') {
-        $pinturaLimpa = if ($Pintura) { $Pintura.Trim().ToUpperInvariant() } else { '' }
-        if ($pinturaLimpa -match '^(?:PINTURA\s*)?([123])$') {
-            return "C - PINTURA $($matches[1])"
-        }
-        return 'C'
-    }
+    if ($gradeLimpa -match '^(?:GRADE\s+)?C(?:\s*-\s*PINTURA\s*[123])?$') { return 'C' }
 
     if ($gradeLimpa -eq 'RMA') { return 'RMA' }
     if ($gradeLimpa -match '^(?:GRADE\s*)?T(?:\s*-\s*TRIAGEM)?$') { return 'T - TRIAGEM' }
@@ -424,7 +471,8 @@ function Get-ServidorCandidates {
 
     if ($env:CAIJ_SERVIDOR_URL) { [void]$candidatos.Add($env:CAIJ_SERVIDOR_URL.TrimEnd('/')) }
     if ($env:CAIJ_SERVIDOR_IP)  { [void]$candidatos.Add(('http://{0}:{1}' -f $env:CAIJ_SERVIDOR_IP.Trim(), $portaServidor)) }
-    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.127', $portaServidor))
+    [void]$candidatos.Add(('http://{0}:{1}' -f 'INFOCAIJ', $portaServidor))
+    [void]$candidatos.Add(('http://{0}:{1}' -f '192.168.15.11', $portaServidor))
 
     if ($IsMacOS) {
         try {
@@ -467,7 +515,7 @@ function Get-ServidorBaseUrl {
         }
     }
 
-    $script:servidorBaseUrlCache = 'http://192.168.15.127:9100'
+    $script:servidorBaseUrlCache = 'http://INFOCAIJ:9100'
     return $script:servidorBaseUrlCache
 }
 
@@ -674,20 +722,10 @@ function Start-InfoNotebookMac {
             '1' {
                 $grade = Read-Host 'Grade (A/B/C/T/RMA) [A]'
                 if (-not $grade) { $grade = 'A' }
-                if ($grade.Trim() -match '^(?i:C)$') {
-                    do {
-                        $pintura = Read-Host 'Tipo de pintura para Grade C (1/2/3)'
-                        $grade = Resolve-CaijGradeSelection -Grade 'C' -Pintura $pintura
-                        if ($grade -eq 'C') {
-                            Write-Host 'Selecione Pintura 1, 2 ou 3 antes de continuar.' -ForegroundColor Yellow
-                        }
-                    } while ($grade -eq 'C')
-                } else {
-                    $grade = Resolve-CaijGradeSelection -Grade $grade
-                }
+                $grade = Resolve-CaijGradeSelection -Grade $grade
                 $obs = Read-Host 'Observacoes para etiqueta'
-                while (($grade -eq 'B' -or $grade -match '^C\s*-\s*PINTURA') -and [string]::IsNullOrWhiteSpace($obs)) {
-                    Write-Host 'Observacoes sao obrigatorias para Grade B e Grade C - Pintura.' -ForegroundColor Yellow
+                while (($grade -in @('B', 'C')) -and [string]::IsNullOrWhiteSpace($obs)) {
+                    Write-Host 'Observacoes sao obrigatorias para Grade B e Grade C.' -ForegroundColor Yellow
                     $obs = Read-Host 'Observacoes para etiqueta'
                 }
                 $inc = Read-Host 'Incluir OS na etiqueta? (S/n)'

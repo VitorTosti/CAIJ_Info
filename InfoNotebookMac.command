@@ -13,10 +13,33 @@ SERVER_CACHE=""
 LAST_SERVER_STATUS="nao verificado"
 LAST_OS_SYNC=""
 LAST_CONFIRMED_SEEN=""
+BATTERY_CYCLES=""
+INTERNET_STATUS="verificando"
+MAC_SESSION_ID="mac-$(date '+%Y%m%d%H%M%S')-$$"
 
 UPDATER="$CORE/AtualizarCAIJ.command"
-if [[ -f "$UPDATER" ]]; then
-  /bin/zsh "$UPDATER" --app-root "$DIR" >/dev/null 2>&1
+if [[ -f "$UPDATER" && "$1" != "--caij-after-update" ]]; then
+  UPDATE_ROOT="$DIR"
+  # Pendrives de recuperacao do Windows normalmente usam NTFS, que o macOS
+  # monta como somente leitura. Nesse caso o pendrive inicia o app, enquanto
+  # a copia executavel e atualizavel fica no cache privado do usuario.
+  if [[ ! -w "$DIR" || ! -w "$CORE" ]]; then
+    UPDATE_ROOT="$HOME/Library/Application Support/CAIJ/InfoNotebook"
+    mkdir -p "$UPDATE_ROOT/CoreCAIJ" >/dev/null 2>&1
+    for local_file in caij_servidor_url.txt caij_os_counter.txt caij_historico_notebooks.json caij_os_por_serial.json caij_modelos_manuais.json caij_ultimo_modelo_manual.json; do
+      if [[ ! -f "$UPDATE_ROOT/CoreCAIJ/$local_file" && -f "$CORE/$local_file" ]]; then
+        cp -p "$CORE/$local_file" "$UPDATE_ROOT/CoreCAIJ/$local_file" >/dev/null 2>&1
+      fi
+    done
+  fi
+
+  /bin/zsh "$UPDATER" --app-root "$UPDATE_ROOT" >/dev/null 2>&1
+  UPDATE_EXIT=$?
+  if [[ "$UPDATE_ROOT" != "$DIR" && -f "$UPDATE_ROOT/InfoNotebookMac.command" ]]; then
+    exec /bin/zsh "$UPDATE_ROOT/InfoNotebookMac.command" --caij-after-update
+  elif [[ "$UPDATE_EXIT" -eq 10 ]]; then
+    exec /bin/zsh "$DIR/InfoNotebookMac.command" --caij-after-update
+  fi
 fi
 
 hide_windows_launchers_in_finder() {
@@ -74,18 +97,10 @@ normalize_grade() {
   grade="$(trim "$1" | tr '[:lower:]' '[:upper:]')"
   pintura="$(trim "$2" | tr '[:lower:]' '[:upper:]')"
   if [[ -z "$grade" ]]; then grade="A"; fi
+  grade="${grade#GRADE }"
 
-  if [[ "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA[[:space:]]*([123])$' ]]; then
-    echo "C - PINTURA ${match[1]}"
-    return
-  fi
-
-  if [[ "$grade" == "C" ]]; then
-    if [[ "$pintura" =~ '^(PINTURA[[:space:]]*)?([123])$' ]]; then
-      echo "C - PINTURA ${match[2]}"
-    else
-      echo "C"
-    fi
+  if [[ "$grade" == "C" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA[[:space:]]*[123]$' ]]; then
+    echo "C"
     return
   fi
 
@@ -152,8 +167,47 @@ normalize_size() {
   fi
 }
 
+mac_model_year() {
+  local identifier="$1" chip="$2" model_name="$3"
+  identifier="${identifier//MacBookPro1,5,/MacBookPro15,}"
+  case "$identifier" in
+    MacBookPro18,*) echo "2021"; return ;;
+    MacBookPro17,1) echo "2020"; return ;;
+    MacBookPro16,2|MacBookPro16,3) echo "2020"; return ;;
+    MacBookPro16,1|MacBookPro16,4) echo "2019"; return ;;
+    MacBookPro15,2) echo "2018"; return ;;
+    MacBookPro15,3|MacBookPro15,4) echo "2019"; return ;;
+    MacBookPro15,1) [[ "$chip" =~ 'i[3579]-9' ]] && echo "2019" || echo "2018"; return ;;
+    MacBookPro14,*) echo "2017"; return ;;
+    MacBookPro13,*) echo "2016"; return ;;
+    MacBookPro12,1) echo "2015"; return ;;
+    MacBookPro11,4|MacBookPro11,5) echo "2015"; return ;;
+    MacBookAir10,1) echo "2020"; return ;;
+    MacBookAir9,1) echo "2020"; return ;;
+    MacBookAir8,2) echo "2019"; return ;;
+    MacBookAir8,1) echo "2018"; return ;;
+    Mac14,15) echo "2023"; return ;;
+  esac
+  if [[ "$chip" =~ 'Apple[[:space:]]+M1' ]]; then
+    [[ "$model_name" == *"Pro"* && "$identifier" == MacBookPro18,* ]] && echo "2021" || echo "2020"
+  elif [[ "$chip" =~ 'Apple[[:space:]]+M2' ]]; then
+    [[ "$chip" == *" Pro"* || "$chip" == *" Max"* ]] && echo "2023" || echo "2022"
+  elif [[ "$chip" =~ 'Apple[[:space:]]+M3' ]]; then
+    echo "2023"
+  elif [[ "$chip" =~ 'Apple[[:space:]]+M4' ]]; then
+    echo "2024"
+  elif [[ "$chip" =~ 'i[3579]-([0-9]{4,5})' ]]; then
+    local cpu_model="${match[1]}"
+    if [[ "$cpu_model" == 10* ]]; then echo "2020"
+    elif [[ ${#cpu_model} -ge 5 ]]; then echo "20${cpu_model[1,2]}"
+    else echo "201${cpu_model[1,1]}"
+    fi
+  fi
+}
+
 collect_info() {
-  local hw displays storage power cpu_brand bat_ioreg bat_health bat_max bat_design bat_pct bat_cycles
+  local hw displays storage power cpu_brand bat_ioreg bat_health bat_max bat_design bat_pct bat_cycles chip_label model_year
+  BATTERY_CYCLES=""
   hw="$(system_profiler SPHardwareDataType 2>/dev/null)"
   displays="$(system_profiler SPDisplaysDataType 2>/dev/null)"
   storage="$(system_profiler SPStorageDataType 2>/dev/null)"
@@ -186,12 +240,16 @@ collect_info() {
   bat_cycles="$(sed 's/[^0-9]//g' <<< "$bat_cycles")"
 
   if [[ -z "$MODEL_NAME" ]]; then MODEL_NAME="MacBook"; fi
-  if [[ "$CHIP" =~ 'Apple[[:space:]]+(M[0-9])' && "$MODEL_NAME" != *"${match[1]}"* ]]; then
-    MODEL="Apple $MODEL_NAME ${match[1]}"
-  else
-    MODEL="Apple $MODEL_NAME"
+  chip_label=""
+  if [[ "$CHIP" =~ 'Apple[[:space:]]+(M[0-9]+)' ]]; then
+    chip_label="${match[1]}"
+  elif [[ "$CHIP" =~ 'i([3579])' ]]; then
+    chip_label="I${match[1]}"
   fi
-  if [[ -n "$MODEL_ID" ]]; then MODEL="Apple $MODEL_NAME ($MODEL_ID)"; fi
+  MODEL="$MODEL_NAME"
+  if [[ -n "$chip_label" && "$MODEL_NAME" != *"$chip_label"* ]]; then MODEL="$MODEL $chip_label"; fi
+  model_year="$(mac_model_year "$MODEL_ID" "$CHIP" "$MODEL_NAME")"
+  if [[ -n "$model_year" ]]; then MODEL="$MODEL ($model_year)"; fi
   if [[ -z "$SERIAL" ]]; then
     SERIAL="$(ioreg -l 2>/dev/null | awk -F' = ' '/IOPlatformSerialNumber/ { gsub(/"/, "", $2); print $2; exit }')"
   fi
@@ -259,6 +317,7 @@ collect_info() {
     bat_cycles="$(awk '/"CycleCount"/ {line=$0; sub(/^.*"CycleCount"[^=]*=[^0-9]*/, "", line); sub(/[^0-9].*$/, "", line); n=line+0; if (n > max) max=n} END {if (max > 0) print max}' <<< "$bat_ioreg")"
   fi
   if [[ "$bat_cycles" == <-> && "$bat_cycles" -gt 0 ]]; then
+    BATTERY_CYCLES="$bat_cycles"
     BATTERY="$BATTERY | $bat_cycles ciclos"
   fi
 }
@@ -269,11 +328,24 @@ cpu_short() {
     echo "Apple ${match[1]}"
   elif [[ "$cpu" =~ 'i([3579]).*([0-9]{4,5})' ]]; then
     local model="${match[2]}"
-    if [[ ${#model} -ge 5 ]]; then
-      echo "I${match[1]} ${model[1,2]}"
+    local generation suffix mod100 mod10 first_two
+    first_two="${model[1,2]}"
+    if (( first_two >= 10 && first_two <= 19 )); then
+      generation="$first_two"
     else
-      echo "I${match[1]} ${model[1,1]}"
+      generation="${model[1,1]}"
     fi
+    suffix="th"
+    mod100=$(( generation % 100 ))
+    mod10=$(( generation % 10 ))
+    if (( mod100 < 11 || mod100 > 13 )); then
+      case "$mod10" in
+        1) suffix="st" ;;
+        2) suffix="nd" ;;
+        3) suffix="rd" ;;
+      esac
+    fi
+    echo "i${match[1]} ${generation}${suffix}"
   else
     echo "$cpu"
   fi
@@ -323,8 +395,10 @@ server_candidates() {
   fi
   if [[ -n "$CAIJ_SERVIDOR_URL" ]]; then echo "${CAIJ_SERVIDOR_URL%/}"; fi
   if [[ -n "$CAIJ_SERVIDOR_IP" ]]; then echo "http://$CAIJ_SERVIDOR_IP:9100"; fi
-  echo "http://192.168.15.127:9100"
-  ifconfig 2>/dev/null | awk '/inet / && $2 !~ /^127\.|^169\.254\./ { split($2,a,"."); print "http://" a[1] "." a[2] "." a[3] ".127:9100" }'
+  echo "http://INFOCAIJ.local:9100"
+  echo "http://INFOCAIJ:9100"
+  echo "http://192.168.15.11:9100"
+  ifconfig 2>/dev/null | awk '/inet / && $2 !~ /^127\.|^169\.254\./ { split($2,a,"."); print "http://" a[1] "." a[2] "." a[3] ".11:9100" }'
 }
 
 test_server() {
@@ -345,7 +419,7 @@ get_server_base_url() {
       return
     fi
   done < <(server_candidates | awk '!seen[$0]++')
-  SERVER_CACHE="http://192.168.15.127:9100"
+  SERVER_CACHE="http://INFOCAIJ.local:9100"
   echo "$SERVER_CACHE"
 }
 
@@ -466,6 +540,147 @@ JSON
   echo "$runtime_file"
 }
 
+portable_runtime_json() {
+  local version server_url
+  version="$(tr -d '\r\n' < "$CORE/caij_versao_app.txt" 2>/dev/null)"
+  server_url="$(get_server_base_url)"
+  cat <<JSON
+{
+  "osNumero": $OS_NUMBER,
+  "serverUrl": "$(json_escape "$server_url")",
+  "lastServerStatus": "$(json_escape "$LAST_SERVER_STATUS")",
+  "lastOsSync": "$(json_escape "$LAST_OS_SYNC")",
+  "internetStatus": "$(json_escape "$INTERNET_STATUS")",
+  "sessionId": "$(json_escape "$MAC_SESSION_ID")",
+  "version": "$(json_escape "$version")",
+  "info": {
+    "modelo": "$(json_escape "$MODEL")",
+    "serial": "$(json_escape "$SERIAL")",
+    "cpu": "$(json_escape "$CHIP")",
+    "gpu": "$(json_escape "$GPU")",
+    "ram": "$(json_escape "$RAM")",
+    "disco": "$(json_escape "$DISK")",
+    "bateria": "$(json_escape "$BATTERY")"
+  }
+}
+JSON
+}
+
+write_portable_runtime_data() {
+  local runtime_file runtime_json
+  runtime_file="$CORE/mac-ui/caij-runtime.js"
+  runtime_json="$(portable_runtime_json)"
+  mkdir -p "$CORE/mac-ui" >/dev/null 2>&1
+  printf 'window.CAIJ_NATIVE_RUNTIME = %s;\n' "$runtime_json" > "$runtime_file" || return 1
+  echo "$runtime_file"
+}
+
+launch_local_static_ui() {
+  local ruby_bin port candidate_port server_pid cache_key ui_url ready attempt
+  if [[ "${CAIJ_MAC_TERMINAL:-}" == "1" ]]; then return 1; fi
+  ruby_bin="/usr/bin/ruby"
+  [[ -x "$ruby_bin" && -f "$CORE/mac-ui/index.html" && -f "$CORE/mac-ui/portable.js" ]] || return 1
+  write_portable_runtime_data >/dev/null || return 1
+
+  port=""
+  for attempt in {0..12}; do
+    candidate_port=$((17654 + attempt))
+    if ! lsof -nP -iTCP:"$candidate_port" -sTCP:LISTEN >/dev/null 2>&1; then
+      port="$candidate_port"
+      break
+    fi
+  done
+  [[ -n "$port" ]] || return 1
+
+  "$ruby_bin" -run -e httpd "$CORE/mac-ui" -b 127.0.0.1 -p "$port" >/dev/null 2>&1 &
+  server_pid=$!
+  ready="nao"
+  for attempt in {1..30}; do
+    if curl -fsS --connect-timeout 1 --max-time 2 "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+      ready="sim"
+      break
+    fi
+    kill -0 "$server_pid" >/dev/null 2>&1 || break
+    sleep 0.2
+  done
+  if [[ "$ready" != "sim" ]]; then
+    kill "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  cache_key="$(tr -d '\r\n' < "$CORE/caij_versao_app.txt" 2>/dev/null)"
+  [[ -z "$cache_key" ]] && cache_key="$(date '+%s')"
+  ui_url="http://127.0.0.1:$port/?app=$cache_key"
+  if ! open -a Safari "$ui_url" >/dev/null 2>&1; then
+    kill "$server_pid" >/dev/null 2>&1 || true
+    wait "$server_pid" >/dev/null 2>&1 || true
+    return 1
+  fi
+
+  osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "Finder" to set screenBounds to bounds of window of desktop
+tell application "Safari"
+  activate
+  if (count of windows) > 0 then set bounds of front window to screenBounds
+end tell
+APPLESCRIPT
+  osascript -e 'tell application "Terminal" to if (count of windows) > 0 then set miniaturized of front window to true' >/dev/null 2>&1 || true
+  while kill -0 "$server_pid" >/dev/null 2>&1 && pgrep -x Safari >/dev/null 2>&1; do sleep 1; done
+  kill "$server_pid" >/dev/null 2>&1 || true
+  wait "$server_pid" >/dev/null 2>&1 || true
+  return 0
+}
+
+launch_portable_web_ui() {
+  local ui_file ui_url cache_key server_url runtime_json runtime_token hosted_mode command_reply native_command
+  if [[ "${CAIJ_MAC_TERMINAL:-}" == "1" ]]; then return 1; fi
+  ui_file="$CORE/mac-ui/index.html"
+  [[ -f "$ui_file" && -f "$CORE/mac-ui/portable.js" ]] || return 1
+  cache_key="$(tr -d '\r\n' < "$CORE/caij_versao_app.txt" 2>/dev/null)"
+  [[ -z "$cache_key" ]] && cache_key="$(date '+%s')"
+  server_url="$(get_server_base_url)"
+  runtime_json="$(portable_runtime_json)"
+  runtime_token="$(printf '%s' "$runtime_json" | base64 | tr -d '\r\n=' | tr '+/' '-_')"
+  hosted_mode="nao"
+
+  if [[ -n "$server_url" ]] && curl -fsS --connect-timeout 2 --max-time 4 "$server_url/status" >/dev/null 2>&1; then
+    # A UI vem do proprio servidor. Assim busca de produtos, cadastro de OS e
+    # impressao usam a mesma origem e nao sao bloqueados pelo Safari.
+    ui_url="$server_url/mac/?app=$cache_key#runtime=$runtime_token"
+    hosted_mode="sim"
+  else
+    write_portable_runtime_data >/dev/null || return 1
+    ui_url="file://$ui_file?app=$cache_key"
+    ui_url="${ui_url// /%20}"
+  fi
+  if open -a Safari "$ui_url" >/dev/null 2>&1; then
+    sleep 0.5
+    osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "Finder" to set screenBounds to bounds of window of desktop
+tell application "Safari"
+  activate
+  if (count of windows) > 0 then set bounds of front window to screenBounds
+end tell
+APPLESCRIPT
+    if [[ "$hosted_mode" == "sim" ]]; then
+      osascript -e 'tell application "Terminal" to if (count of windows) > 0 then set miniaturized of front window to true' >/dev/null 2>&1 || true
+      while pgrep -x Safari >/dev/null 2>&1; do
+        command_reply="$(curl -fsS --connect-timeout 1 --max-time 3 "$server_url/mac/comando?session=$MAC_SESSION_ID" 2>/dev/null)"
+        native_command="$(sed -n 's/.*"command":"\([^"]*\)".*/\1/p' <<< "$command_reply")"
+        if [[ "$native_command" == "open-tests" ]]; then
+          open_native_tests "hosted"
+        elif [[ "$native_command" == "quit" ]]; then
+          break
+        fi
+        sleep 1
+      done
+    fi
+    return 0
+  fi
+  return 1
+}
+
 launch_web_ui() {
   local python_bin runtime_file
   if [[ "${CAIJ_MAC_TERMINAL:-}" == "1" ]]; then return 1; fi
@@ -537,6 +752,116 @@ end run
 APPLESCRIPT
 }
 
+check_internet_connection() {
+  local marker pid_one pid_two
+  marker="$(mktemp "${TMPDIR:-/tmp}/caij-internet.XXXXXX")" || return 1
+  rm -f "$marker"
+  (
+    curl -fsS --connect-timeout 1 --max-time 3 -o /dev/null "https://captive.apple.com/hotspot-detect.html" 2>/dev/null && : > "$marker"
+  ) &
+  pid_one=$!
+  (
+    curl -fsS --connect-timeout 1 --max-time 3 -o /dev/null "https://www.cloudflare.com/cdn-cgi/trace" 2>/dev/null && : > "$marker"
+  ) &
+  pid_two=$!
+  wait "$pid_one" >/dev/null 2>&1 || true
+  wait "$pid_two" >/dev/null 2>&1 || true
+  if [[ -f "$marker" ]]; then
+    rm -f "$marker"
+    INTERNET_STATUS="online"
+    return 0
+  fi
+  INTERNET_STATUS="offline"
+  return 1
+}
+
+warn_if_no_internet() {
+  if check_internet_connection; then return 0; fi
+  if command -v osascript >/dev/null 2>&1 && [[ "${CAIJ_MAC_TERMINAL:-}" != "1" ]]; then
+    dialog_message "Mac sem internet" "Este Mac esta sem acesso a internet.
+
+Conecte-o ao Wi-Fi CAIJ. O InfoNotebook continuara abrindo, mas atualizacoes e recursos online podem ficar indisponiveis."
+  else
+    echo "AVISO: Mac sem internet. Conecte ao Wi-Fi CAIJ."
+  fi
+  return 1
+}
+
+clipboard_tests_observation() {
+  local value
+  command -v pbpaste >/dev/null 2>&1 || return 0
+  value="$(pbpaste 2>/dev/null | tr -d '\r' | sed -n '1p')"
+  value="$(trim "$value")"
+  if [[ "$value" =~ '^TESTES:[[:space:]]*(OK|FALHOU|PENDENTE)$' ]]; then
+    echo "$value"
+  fi
+}
+
+html_escape() {
+  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
+}
+
+open_native_info_table() {
+  local table_file
+  table_file="$CORE/mac-ui/informacoes-mac.html"
+  mkdir -p "${table_file:h}" >/dev/null 2>&1
+  cat > "$table_file" <<HTML
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>InfoNotebook - Informacoes do Mac</title>
+  <style>
+    :root { color-scheme: light; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f3f6f8; color: #17212b; }
+    main { width: min(860px, calc(100% - 32px)); margin: 32px auto; }
+    .eyebrow { color: #5865d8; font-size: 12px; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    h1 { margin: 8px 0 6px; font-size: clamp(26px, 4vw, 38px); }
+    p { margin: 0 0 20px; color: #637080; }
+    .table-wrap { overflow: hidden; border: 1px solid #d8e0e7; border-radius: 12px; background: white; box-shadow: 0 14px 38px rgba(26, 39, 52, .08); }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    thead { background: #f4f7fa; }
+    th, td { padding: 14px 18px; border-bottom: 1px solid #e8edf2; text-align: left; vertical-align: top; overflow-wrap: anywhere; }
+    thead th { color: #657180; font-size: 11px; letter-spacing: .07em; text-transform: uppercase; }
+    tbody th { width: 30%; color: #657180; font-size: 12px; letter-spacing: .04em; text-transform: uppercase; }
+    tbody td { font-size: 15px; font-weight: 650; }
+    tbody tr:last-child th, tbody tr:last-child td { border-bottom: 0; }
+    .os { margin-top: 16px; color: #5865d8; font-weight: 750; }
+  </style>
+</head>
+<body><main>
+  <div class="eyebrow">Diagnostico tecnico</div>
+  <h1>Informacoes do Mac</h1>
+  <p>Dados coletados automaticamente ao abrir o InfoNotebook.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Informacao</th><th>Valor detectado</th></tr></thead>
+    <tbody>
+      <tr><th>Modelo</th><td>$(html_escape "$MODEL")</td></tr>
+      <tr><th>Serial</th><td>$(html_escape "$SERIAL")</td></tr>
+      <tr><th>CPU</th><td>$(html_escape "$CHIP")</td></tr>
+      <tr><th>GPU</th><td>$(html_escape "$GPU")</td></tr>
+      <tr><th>RAM</th><td>$(html_escape "$RAM")</td></tr>
+      <tr><th>Disco</th><td>$(html_escape "$DISK")</td></tr>
+      <tr><th>Bateria</th><td>$(html_escape "$BATTERY")</td></tr>
+    </tbody>
+  </table></div>
+  <div class="os">OS atual: $(format_os "$OS_NUMBER")</div>
+</main></body></html>
+HTML
+  if open -a Safari "$table_file" >/dev/null 2>&1; then
+    osascript -e 'tell application "Safari" to activate' >/dev/null 2>&1
+    sleep 2
+    return 0
+  fi
+  if open "$table_file" >/dev/null 2>&1; then
+    sleep 2
+    return 0
+  fi
+  dialog_message "Tabela indisponivel" "Nao foi possivel abrir a tabela no navegador. Arquivo: $table_file"
+  return 1
+}
+
 start_native_os_monitor() {
   (
     local last_seen="" base resp confirmed next local_os
@@ -574,7 +899,7 @@ stop_native_os_monitor() {
 }
 
 dialog_create_os() {
-  local tecnico serial codigo descricao referencia obs confirm base payload resp criada mensagem
+  local tecnico serial codigo descricao referencia obs suggested_obs confirm base payload resp criada mensagem
   tecnico="$(dialog_choose "Quem esta realizando a OS?" "Vitor|Lucas|Hyrides|Erick|Outro")"
   [[ "$tecnico" == "__CAIJ_CANCEL__" ]] && return
   if [[ "$tecnico" == "Outro" ]]; then
@@ -587,9 +912,10 @@ dialog_create_os() {
   [[ "$codigo" == "__CAIJ_CANCEL__" || -z "$(trim "$codigo")" ]] && return
   descricao="$(dialog_input "Descricao do produto" "$MODEL")"
   [[ "$descricao" == "__CAIJ_CANCEL__" ]] && return
-  referencia="$(dialog_choose "Referencia" "GRADE A|GRADE B|GRADE C - PINTURA 1|GRADE C - PINTURA 2|GRADE C - PINTURA 3|GRADE T - TRIAGEM|RMA")"
+  referencia="$(dialog_choose "Referencia" "GRADE A|GRADE B|GRADE C|GRADE T - TRIAGEM|RMA")"
   [[ "$referencia" == "__CAIJ_CANCEL__" ]] && return
-  obs="$(dialog_input "Observacao" "")"
+  suggested_obs="$(clipboard_tests_observation)"
+  obs="$(dialog_input "Observacao" "$suggested_obs")"
   [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
   confirm="$(dialog_confirm "Tecnico: $tecnico
 Serial: $serial
@@ -631,15 +957,18 @@ dialog_edit_manual() {
 }
 
 dialog_set_os_manual() {
+  local quiet="${1:-nao}"
   local newos
   while true; do
     newos="$(dialog_input "Numero da OS" "$OS_NUMBER")"
-    [[ "$newos" == "__CAIJ_CANCEL__" ]] && return
+    [[ "$newos" == "__CAIJ_CANCEL__" ]] && return 1
     newos="$(trim "$newos")"
     if [[ "$newos" =~ '^[0-9]{2,8}$' ]]; then
       save_os_number "$newos"
-      dialog_message "OS atualizada" "OS atual: $(format_os "$OS_NUMBER")"
-      return
+      if [[ "$quiet" != "sim" ]]; then
+        dialog_message "OS atualizada" "OS atual: $(format_os "$OS_NUMBER")"
+      fi
+      return 0
     fi
     dialog_message "Numero invalido" "Digite apenas numeros, por exemplo: $OS_NUMBER"
   done
@@ -650,59 +979,81 @@ dialog_print_label() {
   local default_obs="$2"
   local default_include_os="$3"
   local skip_reserve="$4"
-  local grade pintura obs include_choice include_os preview confirm payload base
+  local grade obs include_os preview action edit_choice payload base printed_os battery_summary cycles_summary obs_option include_label
 
   if [[ -n "$default_grade" ]]; then
     grade="$(normalize_grade "$default_grade" "")"
   else
-    grade="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|T|RMA")"
-    [[ "$grade" == "__CAIJ_CANCEL__" ]] && return
-    if [[ "$grade" == "C" ]]; then
-      pintura="$(dialog_choose "Selecione o tipo de pintura" "1|2|3")"
-      [[ "$pintura" == "__CAIJ_CANCEL__" ]] && return
-      grade="$(normalize_grade "C" "$pintura")"
-    else
-      grade="$(normalize_grade "$grade" "")"
-    fi
+    grade="A"
   fi
 
-  if [[ -n "$default_obs" ]]; then
-    obs="$default_obs"
-  else
-    while true; do
-      obs="$(dialog_input "Observacoes para etiqueta" "")"
-      [[ "$obs" == "__CAIJ_CANCEL__" ]] && return
-      if [[ ( "$grade" == "B" || "$grade" =~ '^C[[:space:]]*-[[:space:]]*PINTURA' ) && -z "$(trim "$obs")" ]]; then
-        dialog_message "CAIJ Info Notebook Mac" "Observacoes sao obrigatorias para Grade B e Grade C - Pintura."
-      else
-        break
-      fi
-    done
+  obs="$default_obs"
+  if [[ -z "$(trim "$obs")" ]]; then
+    obs="$(clipboard_tests_observation)"
   fi
 
   if [[ -n "$default_include_os" ]]; then
     include_os="$default_include_os"
   else
-    include_choice="$(dialog_confirm "Incluir OS na etiqueta?" "Incluir")"
-    if [[ "$include_choice" == "__CAIJ_CANCEL__" ]]; then include_os="nao"; else include_os="sim"; fi
+    include_os="sim"
   fi
 
-  preview="OS: $([[ "$include_os" == "sim" ]] && format_os "$OS_NUMBER" || echo "sem OS")
+  battery_summary="$(sed -E 's/[[:space:]]*\|[[:space:]]*[0-9]+ ciclos.*$//' <<< "$BATTERY")"
+  [[ -z "$battery_summary" ]] && battery_summary="Nao detectada"
+  cycles_summary="${BATTERY_CYCLES:-Nao detectado}"
+
+  while true; do
+    preview="RESUMO DA ETIQUETA
+
 Modelo: $MODEL
 Serial: $SERIAL
 CPU: $(cpu_short "$CHIP")
 RAM: $(ram_short "$RAM")
-Disco: $(disk_short "$DISK")
+Armazenamento: $(disk_short "$DISK")
 GPU: $(gpu_short "$GPU")
-Grade: $grade
-Obs: $obs"
+Bateria: $battery_summary
+Ciclos: $cycles_summary
 
-  confirm="$(dialog_confirm "$preview" "Imprimir")"
-  [[ "$confirm" == "__CAIJ_CANCEL__" ]] && return
+Os campos editaveis aparecem na lista abaixo."
+
+    obs_option="$(printf '%s' "${obs:-Sem observacao}" | tr '\n|' ' /' | cut -c1-64)"
+    if [[ "$include_os" == "sim" ]]; then include_label="Sim"; else include_label="Nao"; fi
+    action="$(dialog_choose "$preview" "OS atual: $(format_os "$OS_NUMBER")|Grade: $grade|Observacao: $obs_option|Incluir OS: $include_label|IMPRIMIR ETIQUETA|Cancelar")"
+    case "$action" in
+      "OS atual:"*)
+        if dialog_set_os_manual "sim"; then
+          include_os="sim"
+          skip_reserve="sim"
+        fi
+        ;;
+      "Grade:"*)
+        edit_choice="$(dialog_choose "Selecione a grade da etiqueta" "A|B|C|T - TRIAGEM|RMA")"
+        if [[ "$edit_choice" != "__CAIJ_CANCEL__" ]]; then
+          grade="$(normalize_grade "$edit_choice" "")"
+        fi
+        ;;
+      "Observacao:"*)
+        edit_choice="$(dialog_input "Observacoes para etiqueta" "$obs")"
+        [[ "$edit_choice" != "__CAIJ_CANCEL__" ]] && obs="$edit_choice"
+        ;;
+      "Incluir OS:"*)
+        if [[ "$include_os" == "sim" ]]; then include_os="nao"; else include_os="sim"; fi
+        ;;
+      "IMPRIMIR ETIQUETA")
+        if [[ ( "$grade" == "B" || "$grade" == "C" ) && -z "$(trim "$obs")" ]]; then
+          dialog_message "Observacao obrigatoria" "Informe uma observacao para etiquetas Grade B ou Grade C."
+        else
+          break
+        fi
+        ;;
+      "Cancelar"|"__CAIJ_CANCEL__") return ;;
+    esac
+  done
 
   if [[ "$include_os" == "sim" && "$skip_reserve" != "sim" ]]; then
     reserve_os >/dev/null 2>&1 || true
   fi
+  if [[ "$include_os" == "sim" ]]; then printed_os="$(format_os "$OS_NUMBER")"; else printed_os="sem OS"; fi
 
   payload="$(make_payload "$include_os" "$grade" "$obs")"
   base="$(get_server_base_url)"
@@ -710,7 +1061,7 @@ Obs: $obs"
     LAST_SERVER_STATUS="online"
     add_log "ok" "Etiqueta enviada com sucesso" "$grade" "$obs"
     [[ "$include_os" == "sim" ]] && sync_os >/dev/null 2>&1
-    dialog_message "Etiqueta enviada" "Etiqueta enviada com sucesso. OS $(format_os "$OS_NUMBER")"
+    dialog_message "Etiqueta enviada" "Etiqueta enviada com sucesso. OS $printed_os"
   else
     LAST_SERVER_STATUS="offline"
     add_log "erro" "Falha ao enviar etiqueta" "$grade" "$obs"
@@ -719,23 +1070,33 @@ Obs: $obs"
 }
 
 launch_dialog_ui() {
-  local op
+  local op battery_summary cycles_summary
   if [[ "${CAIJ_MAC_TERMINAL:-}" == "1" ]]; then return 1; fi
   if ! command -v osascript >/dev/null 2>&1; then return 1; fi
 
   start_native_os_monitor
   trap stop_native_os_monitor EXIT INT TERM
   while true; do
+    battery_summary="$(sed -E 's/[[:space:]]*\|[[:space:]]*[0-9]+ ciclos.*$//' <<< "$BATTERY")"
+    [[ -z "$battery_summary" ]] && battery_summary="Nao detectada"
+    cycles_summary="${BATTERY_CYCLES:-Nao detectado}"
     op="$(dialog_choose "CAIJ Info Notebook Mac
 
 OS: $(format_os "$OS_NUMBER")
 Modelo: $MODEL
-Serial: $SERIAL" "Cadastrar OS|Imprimir etiqueta|Editar dados|Definir OS manual|Sincronizar OS|Recoletar dados|Sair")"
+Serial: $SERIAL
+
+Memoria: ${RAM:-Nao detectada}
+Armazenamento: $(disk_short "$DISK")
+Bateria: $battery_summary
+Ciclos: $cycles_summary" "Testes do Mac|Cadastrar OS|Imprimir etiqueta|Editar dados|Sincronizar OS|Recoletar dados|Sair")"
     case "$op" in
+      "Testes do Mac")
+        open_native_tests
+        ;;
       "Cadastrar OS") dialog_create_os ;;
       "Imprimir etiqueta") dialog_print_label ;;
       "Editar dados") dialog_edit_manual ;;
-      "Definir OS manual") dialog_set_os_manual ;;
       "Sincronizar OS")
         if sync_os >/dev/null 2>&1; then
           dialog_message "OS sincronizada" "OS atual: $(format_os "$OS_NUMBER")"
@@ -747,6 +1108,63 @@ Serial: $SERIAL" "Cadastrar OS|Imprimir etiqueta|Editar dados|Definir OS manual|
       "Sair"|"__CAIJ_CANCEL__") stop_native_os_monitor; exit 0 ;;
     esac
   done
+}
+
+open_native_tests() {
+  local tests_file tests_title tests_url return_mode
+  return_mode="$1"
+  tests_file="$CORE/mac-ui/index.html"
+  if [[ ! -f "$tests_file" ]]; then
+    dialog_message "Central indisponivel" "A interface local do Mac nao foi encontrada. Conecte o Mac a rede CAIJ e abra o aplicativo novamente para atualizar."
+    return 1
+  fi
+  tests_url="file://$tests_file?tests=1"
+  tests_url="${tests_url// /%20}"
+  if [[ -n "$tests_url" ]] && open -a Safari "$tests_url" >/dev/null 2>&1; then
+    # O menu do InfoNotebook continua vivo, mas sua janela fica recolhida
+    # enquanto o tecnico trabalha na Central de Testes.
+    osascript -e 'tell application "Terminal" to if (count of windows) > 0 then set miniaturized of front window to true' >/dev/null 2>&1 || true
+    osascript -e 'tell application "Safari" to activate' >/dev/null 2>&1 || true
+    while true; do
+      tests_title="$(osascript <<'APPLESCRIPT' 2>/dev/null
+tell application "System Events"
+  if not (exists process "Safari") then return "__CAIJ_TESTS_CLOSED__"
+end tell
+tell application "Safari"
+  if (count of windows) is 0 then return "__CAIJ_TESTS_CLOSED__"
+  repeat with safariWindow in windows
+    repeat with safariTab in tabs of safariWindow
+      try
+        if (URL of safariTab contains "mac-ui/index.html") then return name of safariTab
+      end try
+    end repeat
+  end repeat
+  return "__CAIJ_TESTS_CLOSED__"
+end tell
+APPLESCRIPT
+)"
+      if [[ "$tests_title" == "CAIJ_TESTES_CONCLUIDOS" || "$tests_title" == "__CAIJ_TESTS_CLOSED__" ]]; then
+        break
+      fi
+      sleep 1
+    done
+    if [[ "$tests_title" == "CAIJ_TESTES_CONCLUIDOS" ]]; then
+      osascript -e 'tell application "Safari" to if (count of windows) > 0 then close current tab of front window' >/dev/null 2>&1 || true
+    fi
+    if [[ "$return_mode" == "hosted" ]]; then
+      osascript -e 'tell application "Safari" to activate' >/dev/null 2>&1 || true
+    else
+      osascript <<'APPLESCRIPT' >/dev/null 2>&1 || true
+tell application "Terminal"
+  if (count of windows) > 0 then set miniaturized of front window to false
+  activate
+end tell
+APPLESCRIPT
+    fi
+    return 0
+  fi
+  dialog_message "Nao foi possivel abrir" "Abra manualmente CoreCAIJ/mac-ui/index.html no Safari."
+  return 1
 }
 
 show_info() {
@@ -839,10 +1257,19 @@ print_label() {
 
 ensure_dirs
 hide_windows_launchers_in_finder
+warn_if_no_internet || true
 collect_info
 sync_os >/dev/null 2>&1
 
 if launch_web_ui; then
+  exit 0
+fi
+
+if launch_local_static_ui; then
+  exit 0
+fi
+
+if launch_portable_web_ui; then
   exit 0
 fi
 
